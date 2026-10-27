@@ -1,0 +1,37 @@
+{
+  "name": "athena",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal local-first investigation workspace",
+  "type": "module",
+  "main": "dist/main.js",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "postinstall": "install-electron",
+    "start": "electron .",
+    "dev": "npm run build && electron .",
+    "build": "npm run typecheck && node scripts/build.mjs",
+    "typecheck": "tsc --noEmit && svelte-check --tsconfig tsconfig.json",
+    "test:unit": "vitest run",
+    "test:desktop": "npm run build && playwright test",
+    "test": "npm run test:unit && npm run test:desktop"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^1.4.0",
+    "@earendil-works/pi-ai": "^1.4.0",
+    "svelte": "^5.57.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "@types/node": "^24.19.2",
+    "electron": "^45.0.0",
+    "esbuild": "^0.28.2",
+    "svelte-check": "^4.7.7",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  }
+}
