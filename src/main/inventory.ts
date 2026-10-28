@@ -50,6 +50,9 @@ function filesystemFailure(error: unknown): string {
 
 const nameKey = (name: string) => name.normalize('NFC').toLowerCase();
 function validName(name: string): boolean { return !!name.trim() && name.length <= 100 && !/[\u0000-\u001f/\\]/.test(name); }
+function refreshRepository(previous: Repository, observed: Repository): Repository {
+  return { ...observed, name: previous.name, documentationRoots: previous.documentationRoots };
+}
 interface DurableInventory { roots: DesignatedRoot[]; repositories: Repository[]; candidates: RepositoryCandidate[] }
 
 /** Local metadata inventory only: no provider, agent, credentials, or repository writes. */
@@ -118,7 +121,8 @@ export class Inventory {
         if (marker && (marker.isDirectory() || (marker.isFile() && await isGitFile(join(path, '.git'))))) {
           owner?.boundaries.push(path);
           owner = { name: basename(path), path, presence: 'present', documentationRoots: ['docs'], fileCount: 0, boundaries: [], examined: false };
-          repositories.push(owner);
+          // A skipped ancestor is still an ownership boundary, not an inventory registration.
+          if (!transit) repositories.push(owner);
         }
         examined.add(path);
         for (const entry of entries) {
@@ -186,18 +190,18 @@ export class Inventory {
     if (!original || !candidate || candidate.presence !== 'present') throw new Error('Choose a missing repository and a discovered location.');
     const { reason: _, ...repository } = candidate;
     this.save({ ...this.state,
-      repositories: this.state.repositories.map(repo => repo === original ? { ...repository, name: original.name, documentationRoots: original.documentationRoots } : repo),
+      repositories: this.state.repositories.map(repo => repo === original ? refreshRepository(original, repository) : repo),
       candidates: this.state.candidates.filter(item => item !== candidate),
     });
   }
 
-  private async reconcile(found: Repository[], visited: Set<string>): Promise<void> {
+  private async reconcile(found: Repository[], examinedPaths: Set<string>): Promise<void> {
     const repositories: Repository[] = [];
     for (const previous of this.state.repositories) {
       const current = found.find(repo => repo.path === previous.path);
-      if (current) repositories.push({ ...current, name: previous.name, documentationRoots: previous.documentationRoots });
+      if (current) repositories.push(refreshRepository(previous, current));
       else {
-        let presence: Repository['presence'] = !this.cancelled && visited.has(previous.path) ? 'missing' : 'unknown';
+        let presence: Repository['presence'] = !this.cancelled && examinedPaths.has(previous.path) ? 'missing' : 'unknown';
         const root = this.state.roots.find(item => within(item.path, previous.path));
         try { if (!this.cancelled && root) await safeDirectory(root.path, relative(root.path, previous.path) || '.'); }
         catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') presence = 'missing'; }
@@ -208,7 +212,7 @@ export class Inventory {
     for (const repository of found) {
       if (repositories.some(item => item.path === repository.path)) continue;
       const collision = !validName(repository.name) || repositories.some(item => nameKey(item.name) === nameKey(repository.name));
-      if (collision || repositories.some(item => item.presence === 'missing') || this.state.candidates.some(item => item.path === repository.path)) {
+      if (collision || repositories.some(item => item.presence !== 'present') || this.state.candidates.some(item => item.path === repository.path)) {
         candidates.push({ ...repository, reason: collision ? 'collision' : 'connection' });
       } else repositories.push(repository);
     }

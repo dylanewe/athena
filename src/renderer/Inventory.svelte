@@ -9,7 +9,7 @@
   let includes = $state<Record<string, string>>({});
   let aliases = $state<Record<string, string>>({});
   let connections = $state<Record<string, string>>({});
-  let documentation = $state<Record<string, string>>({});
+  let documentation = $state<Record<string, string>>(Object.create(null));
   let requestNumber = 0;
   const scanning = $derived(inventory?.discovery.status === 'running');
   const missing = $derived(inventory?.repositories.filter(repo => repo.presence === 'missing') ?? []);
@@ -119,7 +119,7 @@
           {#each inventory.candidates as candidate (candidate.path)}
             <article class="repository">
               <h3>{candidate.name}</h3><p class="path">{candidate.path}</p>
-              <p>{candidate.reason === 'collision' ? 'This name is already in use or needs a valid alias. Choose a unique alias.' : 'A registered repository is missing. Register this as new, or explicitly reconnect it below.'}</p>
+              <p>{candidate.reason === 'collision' ? 'This name is already in use or needs a valid alias. Choose a unique alias.' : 'A registered repository is missing or unchecked. Rescan to verify moves, register this as new, or explicitly reconnect a missing repository below.'}</p>
               {#if candidate.presence === 'unknown'}<p class="meta">Location not checked. Rescan before making a decision.</p>{/if}
               <form onsubmit={(event) => { event.preventDefault(); void change(() => window.athena.inventory.register(candidate.path, aliases[candidate.path] ?? candidate.name)); }}>
                 <label for={`alias-${candidate.path}`}>Repository name for {candidate.path}</label>
@@ -177,6 +177,7 @@
   .check input { width: auto; accent-color: var(--accent); }
   .actions, .inline-form, .repository-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .actions { flex-wrap: wrap; }
+  .repository-heading .demo-badge { display: inline-block; }
   .actions button, .inline-form button { flex-shrink: 0; }
   .actions .meta { flex: 1; min-width: 160px; }
   .discovery { padding-bottom: 16px; border-bottom: 1px solid var(--border); }

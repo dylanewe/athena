@@ -60,6 +60,16 @@ test('resolve a collision, reconnect a renamed repository, and explicitly includ
   await expect(page.getByRole('heading', { name: 'legacy', exact: true })).toBeVisible();
 });
 
+test('repository names that match JavaScript property names still display editable documentation hints', async () => {
+  const path = join(root, 'constructor');
+  mkdirSync(path);
+  execFileSync('git', ['-C', path, 'init'], { stdio: 'pipe' });
+  await chooseRoot();
+  await page.getByLabel('I understand the folder permission').check();
+  await page.getByRole('button', { name: 'Save consent and discover' }).click();
+  await expect(page.getByLabel('Documentation starting directories for constructor')).toHaveValue('docs');
+});
+
 test('folder consent, local discovery, documentation hints, and launch-time rediscovery survive restart without model work', async () => {
   await chooseRoot();
   await expect(page.getByText(FOLDER_CONSENT, { exact: true })).toBeVisible();
@@ -69,6 +79,8 @@ test('folder consent, local discovery, documentation hints, and launch-time redi
   await page.getByRole('button', { name: 'Save consent and discover' }).click();
   await expect(page.getByRole('status')).toContainText('Discovery complete');
   await expect(page.getByRole('heading', { name: 'atlas', exact: true })).toBeVisible();
+  await expect(page.getByText('Unexamined', { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 640, height: 520 });
   await expect(page.getByText('Unexamined', { exact: true })).toBeVisible();
   await expect(page.getByText('1 non-Git files', { exact: false })).toBeVisible();
   await page.getByLabel('Documentation starting directories for atlas').fill('handbook\nreference');

@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, rm, realpath, symlink, rename } from 'node:f
 import { renameSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { execFileSync } from 'node:child_process';
 import { Inventory } from '../../src/main/inventory';
 import { FOLDER_CONSENT } from '../../src/shared/inventory';
@@ -150,6 +151,29 @@ test('nested repositories, submodules, and worktrees own their contents separate
   expect(inventory.snapshot().repositories[0].boundaries).toEqual([join(parent, 'module'), join(parent, 'nested')]);
 });
 
+test('cancelling after discovering a renamed repository still allows explicit reconnection after rescan', async () => {
+  await repository(join(root, 'original'));
+  await inventory.designate(root, FOLDER_CONSENT);
+  await inventory.scan();
+  await inventory.documentation('original', ['handbook']);
+  await rename(join(root, 'original'), join(root, 'renamed'));
+  await mkdir(join(root, 'renamed', 'child'));
+  inventory.close();
+  let shouldCancel = true;
+  inventory = new Inventory(join(directory, 'inventory.sqlite'), () => {
+    if (shouldCancel && inventory.snapshot().discovery.current === join(root, 'renamed', 'child')) {
+      shouldCancel = false;
+      inventory.cancel();
+    }
+  });
+  await inventory.scan();
+  expect(inventory.snapshot().discovery.status).toBe('cancelled');
+  await inventory.scan();
+  inventory.reconnect('original', join(root, 'renamed'));
+  expect(inventory.snapshot().repositories).toMatchObject([{ name: 'original', path: join(root, 'renamed'), documentationRoots: ['handbook'], presence: 'present' }]);
+  expect(inventory.snapshot().repositories).toHaveLength(1);
+});
+
 test('an unresolved collision cannot be registered from unchecked results after cancellation', async () => {
   await repository(join(root, 'one', 'api'));
   await repository(join(root, 'two', 'api'));
@@ -162,6 +186,21 @@ test('an unresolved collision cannot be registered from unchecked results after 
   await inventory.scan();
   expect(() => inventory.register(join(root, 'two', 'api'), 'billing')).toThrow();
   expect(inventory.snapshot().candidates).toMatchObject([{ presence: 'unknown' }]);
+});
+
+test('including a skipped descendant does not register excluded ancestor repositories or attribute their files to a parent', async () => {
+  await repository(root);
+  await repository(join(root, 'vendor'));
+  await repository(join(root, 'vendor', 'wanted'));
+  await mkdir(join(root, 'vendor', 'handbook'));
+  await writeFile(join(root, 'vendor', 'handbook', 'intro.md'), 'Owned by excluded vendor');
+  await inventory.designate(root, FOLDER_CONSENT);
+  await inventory.include(root, 'vendor/wanted');
+  await inventory.include(root, 'vendor/handbook');
+  await inventory.scan();
+  expect(inventory.snapshot().repositories.map(repo => [repo.name, repo.fileCount])).toEqual([['chosen', 1], ['wanted', 1]]);
+  expect(inventory.snapshot().candidates).toEqual([]);
+  expect(inventory.snapshot().discovery.nonGitFiles).toBe(0);
 });
 
 test('overlapping roots and explicitly included descendants do not duplicate or misattribute content', async () => {
@@ -177,6 +216,22 @@ test('overlapping roots and explicitly included descendants do not duplicate or 
   expect(inventory.snapshot().repositories[0].boundaries).toEqual([join(parent, '.hidden', 'child')]);
   expect(inventory.snapshot().discovery.nonGitFiles).toBe(0);
   expect(git(parent, 'status', '--porcelain').toString()).toBe(before);
+});
+
+test('a persistence failure is visible and a rescan can recover without losing saved consent', async () => {
+  await repository(join(root, 'atlas'));
+  await inventory.designate(root, FOLDER_CONSENT);
+  const writer = new DatabaseSync(join(directory, 'inventory.sqlite'));
+  try {
+    writer.exec('BEGIN IMMEDIATE');
+    await inventory.scan();
+    expect(inventory.snapshot().discovery).toMatchObject({ status: 'failed', failures: [{ message: 'Could not save inventory. Check local storage and rescan.' }] });
+    expect(inventory.snapshot().roots).toMatchObject([{ path: root, consent: FOLDER_CONSENT }]);
+    writer.exec('ROLLBACK');
+    await inventory.scan();
+    expect(inventory.snapshot().discovery).toMatchObject({ status: 'complete', failures: [] });
+    expect(inventory.snapshot().repositories[0].name).toBe('atlas');
+  } finally { writer.close(); }
 });
 
 test('folder consent and ordinary repositories survive restart; loose documents remain eligible', async () => {
