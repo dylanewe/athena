@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, session, utilityProcess } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, session, utilityProcess } from 'electron';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -8,6 +8,7 @@ import { JobSupervisor } from './supervisor';
 
 app.setName('Athena');
 app.enableSandbox();
+nativeTheme.themeSource = 'dark';
 // Also useful for isolated development profiles; never controlled by the renderer.
 const profile = app.commandLine.getSwitchValue('user-data-dir');
 if (profile) app.setPath('userData', resolve(profile));
@@ -41,7 +42,7 @@ function createWindow() {
   });
   window = new BrowserWindow({
     width: 1120, height: 800, minWidth: 640, minHeight: 520,
-    title: 'Athena', backgroundColor: '#f6f8fb',
+    title: 'Athena', backgroundColor: '#242526',
     webPreferences: {
       preload: join(output, 'preload.cjs'),
       sandbox: true, contextIsolation: true, nodeIntegration: false,
