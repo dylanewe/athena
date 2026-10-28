@@ -28,7 +28,6 @@ const bridge: DesktopBridge = {
     documentation: (name, locations) => inventoryRequest('documentation', { name, locations }),
   },
   workspace: () => request('workspace'),
-  create: title => request('create', { title }),
   select: conversationId => request('select', { conversationId }),
   send: (conversationId, text) => request('send', { conversationId, text }),
   cancel: () => request('cancel'),

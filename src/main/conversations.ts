@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import type { ConversationSummary, DemoJob, Message, MessageStatus, Workspace } from '../shared/contracts';
+import { MAX_MESSAGE_LENGTH, MAX_TITLE_LENGTH, type ConversationSummary, type DemoJob, type Message, type MessageStatus, type Workspace } from '../shared/contracts';
+
+// Temporary local excerpt; replace with approved model naming during live integration (#5).
+function firstPromptTitle(text: string): string {
+  const characters = Array.from(text.replace(/\s+/gu, ' '));
+  return characters.length <= MAX_TITLE_LENGTH ? characters.join('') : characters.slice(0, MAX_TITLE_LENGTH - 1).join('').trimEnd() + '…';
+}
 
 /** Durable user state only. Rebuildable repository knowledge does not belong here. */
 export class Conversations {
@@ -44,25 +50,24 @@ export class Conversations {
     };
   }
 
-  create(title: string): ConversationSummary {
-    const conversation = { id: randomUUID(), title };
-    this.transaction(() => {
-      this.db.prepare('INSERT INTO conversations(id, title) VALUES (?, ?)').run(conversation.id, title);
-      this.select(conversation.id);
-    });
-    return conversation;
-  }
-
   select(id: string): void {
     this.requireConversation(id);
     this.db.prepare("INSERT OR REPLACE INTO settings(key, value) VALUES ('selected', ?)").run(id);
   }
 
-  begin(conversationId: string, text: string): DemoJob {
-    this.requireConversation(conversationId);
+  begin(conversationId: string | null, text: string): DemoJob {
+    if (!text.trim() || text.length > MAX_MESSAGE_LENGTH || text.includes('\0')) throw new Error('Invalid message.');
+    if (conversationId !== null) this.requireConversation(conversationId);
+    text = text.trim();
     if (this.workspace().activeConversationId) throw new Error('A demonstration is already running.');
     const messageId = randomUUID();
     this.transaction(() => {
+      if (conversationId === null) {
+        conversationId = randomUUID();
+        const title = firstPromptTitle(text);
+        this.db.prepare('INSERT INTO conversations(id, title) VALUES (?, ?)').run(conversationId, title);
+        this.select(conversationId);
+      }
       const insert = this.db.prepare('INSERT INTO messages(id, conversation_id, role, text, status) VALUES (?, ?, ?, ?, ?)');
       insert.run(randomUUID(), conversationId, 'user', text, 'complete');
       insert.run(messageId, conversationId, 'assistant', 'Starting local demonstration…', 'running');

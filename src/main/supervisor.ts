@@ -37,7 +37,7 @@ export class JobSupervisor {
     private readonly changed: () => void,
   ) {}
 
-  start(conversationId: string, text: string): void {
+  start(conversationId: string | null, text: string): void {
     this.retrySaving();
     if (this.unsaved) throw new Error('The previous result must be saved before starting another demonstration.');
     if (this.active) throw new Error('A demonstration is already running.');

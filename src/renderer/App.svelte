@@ -1,22 +1,24 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import InventoryView from './Inventory.svelte';
-  import { MAX_MESSAGE_LENGTH, MAX_TITLE_LENGTH, type Workspace } from '../shared/contracts';
+  import { MAX_MESSAGE_LENGTH, type Workspace } from '../shared/contracts';
 
   let inventoryOpen = $state(false);
   let workspace = $state<Workspace | null>(null);
   let error = $state('');
   let busy = $state(false);
-  let naming = $state(false);
-  let title = $state('');
-  let nameInput = $state<HTMLInputElement>();
-  let drafts = $state<Record<string, string>>({});
+  let composingNew = $state(false);
+  let drafts = $state<Record<string, string>>({ new: '' });
+  let messageInput = $state<HTMLTextAreaElement>();
   let transcript = $state<HTMLDivElement>();
   let requestNumber = 0;
-  const selected = $derived(workspace?.selected);
+  const selected = $derived(composingNew ? null : workspace?.selected);
+  const draftKey = $derived(selected?.id ?? 'new');
   const active = $derived(workspace?.activeConversationId);
 
   async function load() {
+    // A mutation owns its response. Notifications during it are refreshed after it settles.
+    if (busy) return;
     const number = ++requestNumber;
     try {
       const next = await window.athena.workspace();
@@ -25,38 +27,42 @@
   }
 
   async function change(action: () => Promise<Workspace>): Promise<boolean> {
+    if (busy) return false;
     busy = true;
     error = '';
-    const number = ++requestNumber;
+    ++requestNumber;
     try {
-      const next = await action();
-      if (number === requestNumber) workspace = next;
+      workspace = await action();
       return true;
     } catch {
       error = 'Could not save this change. Your draft is still here. Try again.';
       return false;
-    } finally { busy = false; }
+    } finally { busy = false; void load(); }
   }
 
   async function newConversation() {
     inventoryOpen = false;
-    naming = true;
+    composingNew = true;
+    error = '';
     await tick();
-    nameInput?.focus();
+    messageInput?.focus();
   }
-  async function create() {
-    if (!title.trim() || busy) return;
-    if (await change(() => window.athena.create(title))) {
-      title = '';
-      naming = false;
+  async function select(id: string) {
+    if (await change(() => window.athena.select(id))) {
+      inventoryOpen = false;
+      composingNew = false;
     }
   }
   async function send() {
-    if (!selected || busy || active) return;
-    const id = selected.id;
-    const text = drafts[id] ?? '';
+    if (!workspace || busy || active) return;
+    const id = selected?.id ?? null;
+    const key = draftKey;
+    const text = drafts[key] ?? '';
     if (!text.trim()) return;
-    if (await change(() => window.athena.send(id, text))) drafts[id] = '';
+    if (await change(() => window.athena.send(id, text))) {
+      drafts[key] = '';
+      composingNew = false;
+    }
   }
 
   onMount(() => {
@@ -77,21 +83,11 @@
     <button class="new-conversation" aria-pressed={inventoryOpen} onclick={() => inventoryOpen = !inventoryOpen}>Repositories</button>
     <div class="sidebar-heading">Your conversations</div>
     <button class="new-conversation" onclick={newConversation} disabled={busy || !workspace}><span aria-hidden="true">+</span> New conversation</button>
-    {#if naming}
-      <form class="name-form" onsubmit={(event) => { event.preventDefault(); void create(); }}>
-        <label for="name">Conversation name</label>
-        <input id="name" bind:this={nameInput} bind:value={title} maxlength={MAX_TITLE_LENGTH} required placeholder="An investigation to return to" />
-        <div class="form-actions">
-          <button class="primary" disabled={busy || !title.trim()}>Create conversation</button>
-          <button type="button" onclick={() => naming = false}>Cancel</button>
-        </div>
-      </form>
-    {/if}
     <nav aria-label="Saved conversations">
       {#each workspace?.conversations ?? [] as conversation (conversation.id)}
         <button class:selected={selected?.id === conversation.id}
           aria-current={selected?.id === conversation.id ? 'page' : undefined}
-          disabled={busy} onclick={() => { inventoryOpen = false; void change(() => window.athena.select(conversation.id)); }}>
+          disabled={busy} onclick={() => select(conversation.id)}>
           <span class="conversation-icon" aria-hidden="true">↳</span>
           <span>{conversation.title}</span>
           {#if active === conversation.id}<span class="running-dot" aria-label={workspace?.saveError ? 'Not saved' : 'Running'}></span>{/if}
@@ -104,54 +100,45 @@
   {#if inventoryOpen}
     <InventoryView />
   {:else}
-  <main>
-    <header>
-      <div><div class="eyebrow">Conversation workspace</div><h1>{selected?.title ?? 'A place to investigate'}</h1></div>
-      <span class="demo-badge">Local demo</span>
-    </header>
-    {#if error || workspace?.saveError}<div class="error" role="alert">{error || workspace?.saveError}</div>{/if}
-    <div class="transcript" bind:this={transcript} role="log" aria-label="Messages" aria-live="polite">
+    <main>
+      {#if error || workspace?.saveError}<div class="error" role="alert">{error || workspace?.saveError}</div>{/if}
       {#if !workspace}
         <p class="empty-copy">Loading your conversations…</p>
-      {:else if !selected || selected.messages.length === 0}
-        <section class="welcome">
-          <span class="eyebrow">Start with a question</span>
-          <h2>A thread worth<br />coming back to.</h2>
-          <p>This first version keeps your conversations on your Mac. Send a message to try a deterministic response, then reopen Athena to find it here.</p>
-          <div class="capabilities" aria-label="Demonstration permissions">
-            <div><span>This demo</span><strong>No repository access</strong></div>
-            <div><span>Model calls</span><strong>None</strong></div>
-            <div><span>Storage</span><strong>Local only</strong></div>
-          </div>
-          {#if !selected}<button class="primary" onclick={newConversation}>Create your first conversation</button>{/if}
-        </section>
       {:else}
-        {#each selected.messages as message (message.id)}
-          <article class:user={message.role === 'user'} class="message">
-            <div class="message-heading"><strong>{message.role === 'user' ? 'You' : 'Athena'}</strong>
-              {#if message.role === 'assistant'}<span class:problem={message.status === 'failed' || message.status === 'cancelled'}>{message.status === 'running' && workspace?.saveError ? 'Not saved' : message.status === 'complete' ? 'Local demo' : message.status}</span>{/if}
+        {#if selected}
+          <div class="transcript" bind:this={transcript} role="log" aria-label="Messages" aria-live="polite">
+            {#each selected.messages as message (message.id)}
+              <article class:user={message.role === 'user'} class="message">
+                <div class="message-heading"><strong>{message.role === 'user' ? 'You' : 'Athena'}</strong>
+                  {#if message.role === 'assistant'}<span class:problem={message.status === 'failed' || message.status === 'cancelled'}>{message.status === 'running' && workspace.saveError ? 'Not saved' : message.status === 'complete' ? 'Local demo' : message.status}</span>{/if}
+                </div>
+                <p>{message.text}</p>
+              </article>
+            {/each}
+          </div>
+        {/if}
+        <section class="chat-input" class:unsent={!selected} aria-label="Conversation composer">
+          <div class="composer-heading">
+            <div><div class="eyebrow">{selected ? 'Conversation' : 'Start with a question'}</div><h1>{selected?.title ?? 'New conversation'}</h1></div>
+            <span class="demo-badge">Local demo</span>
+          </div>
+          {#if !selected}<p class="draft-note">Send your first message to save this conversation. Its title will be derived locally from your prompt.</p>{/if}
+          <form class="composer" onsubmit={(event) => { event.preventDefault(); void send(); }}>
+            <label for="message">Message</label>
+            <textarea id="message" bind:this={messageInput} bind:value={drafts[draftKey]} maxlength={MAX_MESSAGE_LENGTH} rows="3"
+              disabled={busy} placeholder="Ask a question to try the local demo…"
+              onkeydown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); } }}></textarea>
+            <div class="composer-actions">
+              <span>{workspace.saveError ? 'Demonstration stopped · Result not saved' : active ? 'Demonstration running. No paid work.' : selected ? 'Saved locally · No repository access · No model charges' : 'Unsent · No repository access · No model charges'}</span>
+              {#if active}
+                <button type="button" disabled={busy} onclick={() => change(() => window.athena.cancel())}>{workspace.saveError ? 'Retry saving' : 'Stop demonstration'}</button>
+              {:else}
+                <button class="primary" aria-label="Send message" disabled={busy || !(drafts[draftKey] ?? '').trim()}>Send <span aria-hidden="true">↗</span></button>
+              {/if}
             </div>
-            <p>{message.text}</p>
-          </article>
-        {/each}
+          </form>
+        </section>
       {/if}
-    </div>
-    {#if selected}
-      <form class="composer" onsubmit={(event) => { event.preventDefault(); void send(); }}>
-        <label for="message">Message</label>
-        <textarea id="message" bind:value={drafts[selected.id]} maxlength={MAX_MESSAGE_LENGTH} rows="3"
-          disabled={busy} placeholder="Ask a question to try the local demo…"
-          onkeydown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); } }}></textarea>
-        <div class="composer-actions">
-          <span>{workspace?.saveError ? 'Demonstration stopped · Result not saved' : active ? 'Demonstration running. No paid work.' : 'Saved locally · No repository access · No model charges'}</span>
-          {#if active}
-            <button type="button" disabled={busy} onclick={() => change(() => window.athena.cancel())}>{workspace?.saveError ? 'Retry saving' : 'Stop demonstration'}</button>
-          {:else}
-            <button class="primary" aria-label="Send message" disabled={busy || !(drafts[selected.id] ?? '').trim()}>Send <span aria-hidden="true">↗</span></button>
-          {/if}
-        </div>
-      </form>
-    {/if}
-  </main>
+    </main>
   {/if}
 </div>

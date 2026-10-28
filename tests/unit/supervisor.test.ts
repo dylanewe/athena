@@ -25,7 +25,9 @@ afterEach(() => {
 });
 function setup(path = ':memory:') {
   const store = new Conversations(path);
-  const conversation = store.create('Demo');
+  const initial = store.begin(null, 'Demo');
+  store.finish(initial.messageId, 'complete', 'Previous response');
+  const conversation = store.workspace().selected!;
   const workers: WorkerProcess[] = [];
   const supervisor = new JobSupervisor(store, () => {
     const worker = new WorkerProcess();
@@ -74,8 +76,7 @@ test('a spawn failure is persisted without leaving the conversation busy', () =>
   const store = new Conversations(':memory:');
   const supervisor = new JobSupervisor(store, () => { throw new Error('OS refused spawn'); }, () => {});
   cleanups.push(() => { supervisor.lifecycle('quit'); store.close(); });
-  const conversation = store.create('No process');
-  expect(() => supervisor.start(conversation.id, 'Hello')).not.toThrow();
+  expect(() => supervisor.start(null, 'Hello')).not.toThrow();
   expect(store.workspace().selected?.messages.at(-1)).toMatchObject({ status: 'failed' });
   expect(store.workspace().activeConversationId).toBeNull();
 });

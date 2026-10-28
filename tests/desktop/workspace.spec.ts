@@ -34,11 +34,10 @@ async function launch() {
   page = await application.firstWindow();
   await expect(page.getByRole('button', { name: 'New conversation', exact: true })).toBeVisible();
 }
-async function create(title: string) {
+async function newConversation() {
   await page.getByRole('button', { name: 'New conversation', exact: true }).click();
-  await page.getByLabel('Conversation name').fill(title);
-  await page.getByRole('button', { name: 'Create conversation', exact: true }).click();
-  await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'New conversation', exact: true })).toBeVisible();
+  await expect(page.getByLabel('Message', { exact: true })).toBeFocused();
 }
 async function send(text: string) {
   await page.getByLabel('Message', { exact: true }).fill(text);
@@ -58,23 +57,81 @@ test.afterEach(async () => {
   rmSync(directory, { recursive: true, force: true });
 });
 
-test('create, select, and reopen a conversation with its deterministic answer after restart', async () => {
-  await create('First investigation');
-  await send('What can Athena do today?');
-  await expect(page.getByText('Local demonstration complete.', { exact: false })).toBeVisible();
-  await create('Second investigation');
-  await page.getByRole('button', { name: 'First investigation', exact: true }).click();
+test('an unsent conversation has a title above the chatbox but no name prompt or persisted sidebar session', async () => {
+  await newConversation();
+  await expect(page.getByLabel('Conversation name')).toHaveCount(0);
+  await page.getByLabel('Message', { exact: true }).fill('An unsent thought');
+  await expect(page.getByRole('navigation', { name: 'Saved conversations' }).getByRole('button')).toHaveCount(0);
+  const title = await page.getByRole('heading', { name: 'New conversation', exact: true }).boundingBox();
+  const input = await page.getByLabel('Message', { exact: true }).boundingBox();
+  expect(title!.y + title!.height).toBeLessThan(input!.y);
+  expect(input!.y - title!.y).toBeLessThan(180);
   await application.close();
   await launch();
-  await expect(page.getByRole('heading', { name: 'First investigation' })).toBeVisible();
-  await expect(page.getByText('What can Athena do today?', { exact: true })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Saved conversations' }).getByRole('button')).toHaveCount(0);
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('');
+});
+
+test('create, select, and reopen a conversation with its deterministic answer after restart', async () => {
+  await newConversation();
+  await send('What can Athena do today?');
+  await expect(page.getByText('Local demonstration complete.', { exact: false })).toBeVisible();
+  await newConversation();
+  await send('Second investigation');
+  await expect(page.getByText('Local demonstration complete.', { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: 'What can Athena do today?', exact: true }).click();
+  await application.close();
+  await launch();
+  await expect(page.getByRole('heading', { name: 'What can Athena do today?', exact: true })).toBeVisible();
+  await expect(page.getByRole('log', { name: 'Messages' }).getByText('What can Athena do today?', { exact: true })).toBeVisible();
   await expect(page.getByText('Local demonstration complete.', { exact: false })).toBeVisible();
   await page.getByRole('button', { name: 'Second investigation', exact: true }).click();
-  await expect(page.getByText('What can Athena do today?', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('log', { name: 'Messages' }).getByText('What can Athena do today?', { exact: true })).toHaveCount(0);
+});
+
+test('a failed first save keeps the draft and creates no empty sidebar session; retry saves once', async () => {
+  await newConversation();
+  const writer = new DatabaseSync(join(directory, 'state', 'conversations.sqlite'));
+  try {
+    writer.exec('BEGIN IMMEDIATE');
+    await send('Keep my first prompt');
+    await expect(page.getByRole('alert')).toContainText('Your draft is still here');
+    await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep my first prompt');
+    await expect(page.getByRole('navigation', { name: 'Saved conversations' }).getByRole('button')).toHaveCount(0);
+    writer.exec('ROLLBACK');
+    await page.getByRole('button', { name: 'Send message' }).click();
+    await expect(page.getByRole('heading', { name: 'Keep my first prompt', exact: true })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Saved conversations' }).getByRole('button')).toHaveCount(1);
+    await expect(page.getByRole('alert')).toHaveCount(0);
+  } finally { writer.close(); }
+});
+
+test('an unsent draft survives navigation and progress from another conversation without entering the sidebar', async () => {
+  await newConversation();
+  await pauseNextWorker();
+  await send('Saved conversation');
+  pausedWorker = await workerPid();
+  await newConversation();
+  await page.getByLabel('Message', { exact: true }).fill('A future investigation');
+  process.kill(pausedWorker, 'SIGCONT');
+  pausedWorker = undefined;
+  await expect.poll(() => page.evaluate(async () => (await window.athena.workspace()).activeConversationId)).toBeNull();
+  await expect(page.getByRole('heading', { name: 'New conversation', exact: true })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Saved conversations' }).getByRole('button')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Saved conversation', exact: true }).click();
+  await expect(page.getByText('Local demonstration complete.', { exact: false })).toBeVisible();
+  await newConversation();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('A future investigation');
+  await page.getByRole('button', { name: 'Repositories', exact: true }).click();
+  await page.getByRole('button', { name: 'Repositories', exact: true }).click();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue('A future investigation');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByRole('heading', { name: 'A future investigation', exact: true })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Saved conversations' }).getByRole('button')).toHaveCount(2);
 });
 
 test('a real utility-process crash is visible and the workspace remains usable', async () => {
-  await create('Crash recovery');
+  await newConversation();
   await pauseNextWorker();
   await send('This job will be interrupted');
   pausedWorker = await workerPid();
@@ -86,7 +143,7 @@ test('a real utility-process crash is visible and the workspace remains usable',
 });
 
 test('minimizing keeps the real job active and it can finish after restore', async () => {
-  await create('Minimized work');
+  await newConversation();
   await pauseNextWorker();
   await send('Keep working');
   pausedWorker = await workerPid();
@@ -100,7 +157,7 @@ test('minimizing keeps the real job active and it can finish after restore', asy
 
 for (const action of ['close window', 'quit'] as const) {
   test(`${action} cancels active work and allows a clean restart`, async () => {
-    await create('Lifecycle recovery');
+    await newConversation();
     await pauseNextWorker();
     await send('Retain my question');
     pausedWorker = await workerPid();
@@ -116,14 +173,14 @@ for (const action of ['close window', 'quit'] as const) {
     await closed;
     await launch();
     await expect(page.getByText('Demonstration cancelled.', { exact: false })).toBeVisible();
-    await expect(page.getByText('Retain my question', { exact: true })).toBeVisible();
+    await expect(page.getByRole('log', { name: 'Messages' }).getByText('Retain my question', { exact: true })).toBeVisible();
     await send('Continue after restarting');
     await expect(page.getByText('Local demonstration complete.', { exact: false })).toBeVisible();
   });
 }
 
 test('abrupt application interruption recovers the pending transcript on restart', async () => {
-  await create('Unexpected interruption');
+  await newConversation();
   await pauseNextWorker();
   await send('Keep the question after a crash');
   pausedWorker = await workerPid();
@@ -139,7 +196,7 @@ test('abrupt application interruption recovers the pending transcript on restart
 });
 
 test('a storage failure still stops the worker and offers a visible save retry', async () => {
-  await create('Save recovery');
+  await newConversation();
   await pauseNextWorker();
   await send('Keep this question when storage is busy');
   pausedWorker = await workerPid();
@@ -170,7 +227,7 @@ test('the renderer is sandboxed, has a narrow bridge, and cannot fetch files or 
     bridge: Object.keys(window.athena).sort(),
     inventory: Object.keys(window.athena.inventory).sort(),
   }))).toEqual({
-    node: 'undefined', require: 'undefined', bridge: ['cancel', 'create', 'inventory', 'onChange', 'select', 'send', 'workspace'],
+    node: 'undefined', require: 'undefined', bridge: ['cancel', 'inventory', 'onChange', 'select', 'send', 'workspace'],
     inventory: ['cancel', 'chooseFolder', 'consentFolder', 'dismissFolder', 'documentation', 'include', 'reconnect', 'register', 'scan', 'snapshot'],
   });
   expect(await application.evaluate(({ app, BrowserWindow }) => {
@@ -183,7 +240,7 @@ test('the renderer is sandboxed, has a narrow bridge, and cannot fetch files or 
     }, url)).toBe('denied');
   }
   expect(await page.evaluate(async () => {
-    try { await window.athena.create({ title: 'malformed' } as unknown as string); return 'accepted'; }
+    try { await window.athena.send(null, { text: 'malformed' } as unknown as string); return 'accepted'; }
     catch { return 'rejected'; }
   })).toBe('rejected');
 });

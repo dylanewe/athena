@@ -1,6 +1,6 @@
 import type { Conversations } from './conversations';
 import type { JobSupervisor } from './supervisor';
-import { MAX_MESSAGE_LENGTH, MAX_TITLE_LENGTH, type Workspace } from '../shared/contracts';
+import { MAX_MESSAGE_LENGTH, type Workspace } from '../shared/contracts';
 
 /** Caller metadata is derived by main from Electron, never from a renderer payload. */
 export interface Caller {
@@ -22,11 +22,6 @@ export class DesktopGateway {
       case 'workspace':
         noPayload(payload);
         break;
-      case 'create': {
-        const input = object(payload, ['title']);
-        this.conversations.create(text(input.title, MAX_TITLE_LENGTH));
-        break;
-      }
       case 'select': {
         const input = object(payload, ['conversationId']);
         this.conversations.select(identifier(input.conversationId));
@@ -34,7 +29,7 @@ export class DesktopGateway {
       }
       case 'send': {
         const input = object(payload, ['conversationId', 'text']);
-        this.jobs.start(identifier(input.conversationId), text(input.text, MAX_MESSAGE_LENGTH));
+        this.jobs.start(input.conversationId === null ? null : identifier(input.conversationId), text(input.text, MAX_MESSAGE_LENGTH));
         break;
       }
       case 'cancel':

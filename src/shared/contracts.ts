@@ -32,9 +32,8 @@ export interface DemoJob {
 export interface DesktopBridge {
   inventory: InventoryBridge;
   workspace(): Promise<Workspace>;
-  create(title: string): Promise<Workspace>;
   select(conversationId: string): Promise<Workspace>;
-  send(conversationId: string, text: string): Promise<Workspace>;
+  send(conversationId: string | null, text: string): Promise<Workspace>;
   cancel(): Promise<Workspace>;
   onChange(listener: () => void): () => void;
 }
