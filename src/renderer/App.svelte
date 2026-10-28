@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import InventoryView from './Inventory.svelte';
   import { MAX_MESSAGE_LENGTH, MAX_TITLE_LENGTH, type Workspace } from '../shared/contracts';
 
+  let inventoryOpen = $state(false);
   let workspace = $state<Workspace | null>(null);
   let error = $state('');
   let busy = $state(false);
@@ -9,7 +11,7 @@
   let title = $state('');
   let nameInput = $state<HTMLInputElement>();
   let drafts = $state<Record<string, string>>({});
-  let transcript: HTMLDivElement;
+  let transcript = $state<HTMLDivElement>();
   let requestNumber = 0;
   const selected = $derived(workspace?.selected);
   const active = $derived(workspace?.activeConversationId);
@@ -37,6 +39,7 @@
   }
 
   async function newConversation() {
+    inventoryOpen = false;
     naming = true;
     await tick();
     nameInput?.focus();
@@ -71,6 +74,7 @@
 <div class="workspace">
   <aside aria-label="Conversations">
     <div class="brand"><span class="brand-mark" aria-hidden="true">a.</span><span>Athena</span></div>
+    <button class="new-conversation" aria-pressed={inventoryOpen} onclick={() => inventoryOpen = !inventoryOpen}>Repositories</button>
     <div class="sidebar-heading">Your conversations</div>
     <button class="new-conversation" onclick={newConversation} disabled={busy || !workspace}><span aria-hidden="true">+</span> New conversation</button>
     {#if naming}
@@ -87,7 +91,7 @@
       {#each workspace?.conversations ?? [] as conversation (conversation.id)}
         <button class:selected={selected?.id === conversation.id}
           aria-current={selected?.id === conversation.id ? 'page' : undefined}
-          disabled={busy} onclick={() => change(() => window.athena.select(conversation.id))}>
+          disabled={busy} onclick={() => { inventoryOpen = false; void change(() => window.athena.select(conversation.id)); }}>
           <span class="conversation-icon" aria-hidden="true">↳</span>
           <span>{conversation.title}</span>
           {#if active === conversation.id}<span class="running-dot" aria-label={workspace?.saveError ? 'Not saved' : 'Running'}></span>{/if}
@@ -97,6 +101,9 @@
     <div class="local-note"><span class="eyebrow">On this Mac</span><p>Conversations stay here.<br />Close Athena. Pick up later.</p></div>
   </aside>
 
+  {#if inventoryOpen}
+    <InventoryView />
+  {:else}
   <main>
     <header>
       <div><div class="eyebrow">Conversation workspace</div><h1>{selected?.title ?? 'A place to investigate'}</h1></div>
@@ -112,7 +119,7 @@
           <h2>A thread worth<br />coming back to.</h2>
           <p>This first version keeps your conversations on your Mac. Send a message to try a deterministic response, then reopen Athena to find it here.</p>
           <div class="capabilities" aria-label="Demonstration permissions">
-            <div><span>Repositories</span><strong>Not accessed</strong></div>
+            <div><span>This demo</span><strong>No repository access</strong></div>
             <div><span>Model calls</span><strong>None</strong></div>
             <div><span>Storage</span><strong>Local only</strong></div>
           </div>
@@ -146,4 +153,5 @@
       </form>
     {/if}
   </main>
+  {/if}
 </div>

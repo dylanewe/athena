@@ -5,6 +5,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Conversations } from './conversations';
 import { DesktopGateway } from './bridge';
 import { JobSupervisor } from './supervisor';
+import { Inventory } from './inventory';
+import { InventoryGateway } from './inventory-bridge';
 
 app.setName('Athena');
 app.enableSandbox();
@@ -20,6 +22,8 @@ let window: BrowserWindow | undefined;
 let conversations: Conversations | undefined;
 let jobs: JobSupervisor | undefined;
 let gateway: DesktopGateway | undefined;
+let inventory: Inventory | undefined;
+let inventoryGateway: InventoryGateway | undefined;
 
 function notify() {
   if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
@@ -50,13 +54,18 @@ function createWindow() {
     },
   });
   gateway = new DesktopGateway(conversations!, jobs!, { webContentsId: window.webContents.id, url: documentURL });
+  inventoryGateway = new InventoryGateway(inventory!, { webContentsId: window.webContents.id, url: documentURL }, async () => {
+    if (!window || window.isDestroyed()) return;
+    const result = await dialog.showOpenDialog(window, { title: 'Choose a folder for Athena', properties: ['openDirectory'], buttonLabel: 'Review permission' });
+    return result.canceled ? undefined : result.filePaths[0];
+  });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.on('will-attach-webview', event => event.preventDefault());
-  window.webContents.on('render-process-gone', () => jobs?.cancel());
+  window.webContents.on('render-process-gone', () => { jobs?.cancel(); inventory?.cancel(); });
   window.on('minimize', () => jobs?.lifecycle('minimize'));
-  window.on('close', () => jobs?.lifecycle('window-close'));
-  window.on('closed', () => { gateway = undefined; window = undefined; });
+  window.on('close', () => { jobs?.lifecycle('window-close'); inventory?.cancel(); });
+  window.on('closed', () => { gateway = undefined; inventoryGateway = undefined; window = undefined; });
   void window.loadURL(documentURL);
 }
 
@@ -67,15 +76,18 @@ if (!app.requestSingleInstanceLock()) {
     if (window?.isMinimized()) window.restore();
     window?.focus();
   });
-  app.on('before-quit', () => jobs?.lifecycle('quit'));
+  app.on('before-quit', () => { jobs?.lifecycle('quit'); inventory?.cancel(); });
   app.on('window-all-closed', () => app.quit());
-  app.on('will-quit', () => conversations?.close());
+  app.on('will-quit', () => { conversations?.close(); inventory?.close(); });
   void app.whenReady().then(() => {
     const stateDirectory = join(app.getPath('userData'), 'state');
     mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
     const database = join(stateDirectory, 'conversations.sqlite');
     conversations = new Conversations(database);
     chmodSync(database, 0o600);
+    const inventoryDatabase = join(stateDirectory, 'inventory.sqlite');
+    inventory = new Inventory(inventoryDatabase, notify);
+    chmodSync(inventoryDatabase, 0o600);
     jobs = new JobSupervisor(conversations, () => utilityProcess.fork(join(output, 'worker.js'), [], {
       serviceName: 'Athena demonstration',
       // Do not inherit provider keys, shell setup, or other secrets from the launching environment.
@@ -95,10 +107,24 @@ if (!app.requestSingleInstanceLock()) {
         return { ok: false, error: 'Request rejected. Select a conversation and try again.' };
       }
     });
+    ipcMain.handle('athena:inventory', async (event, operation: unknown, payload: unknown) => {
+      try {
+        if (!inventoryGateway) throw new Error('No workspace.');
+        const result = await inventoryGateway.dispatch({
+          webContentsId: event.sender.id,
+          isMainFrame: event.senderFrame === event.sender.mainFrame,
+          url: event.senderFrame?.url ?? '',
+        }, operation, payload);
+        return { ok: true, inventory: result };
+      } catch {
+        return { ok: false, error: 'Inventory change rejected. Finish discovery first; check the selected folder, unique name, and relative directories, then retry.' };
+      }
+    });
     Menu.setApplicationMenu(Menu.buildFromTemplate([
       { role: 'appMenu' }, { role: 'editMenu' }, { role: 'windowMenu' },
     ]));
     createWindow();
+    void inventory.scan();
   }).catch(() => {
     dialog.showErrorBox('Athena could not start', 'Local state could not be opened. Check that your application data folder is writable, then restart Athena.');
     app.quit();

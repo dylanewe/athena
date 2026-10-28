@@ -17,9 +17,7 @@ export class DesktopGateway {
   ) {}
 
   dispatch(caller: Caller, operation: unknown, payload: unknown): Workspace {
-    if (caller.webContentsId !== this.owner.webContentsId || !caller.isMainFrame || caller.url !== this.owner.url) {
-      throw new Error('Unauthorized desktop caller.');
-    }
+    authorize(caller, this.owner);
     switch (operation) {
       case 'workspace':
         noPayload(payload);
@@ -49,15 +47,21 @@ export class DesktopGateway {
   }
 }
 
+export function authorize(caller: Caller, owner: { webContentsId: number; url: string }): void {
+  if (caller.webContentsId !== owner.webContentsId || !caller.isMainFrame || caller.url !== owner.url) {
+    throw new Error('Unauthorized desktop caller.');
+  }
+}
+
 function invalid(): never { throw new Error('Invalid desktop request.'); }
-function noPayload(value: unknown): void { if (value !== undefined) invalid(); }
-function object(value: unknown, keys: string[]): Record<string, unknown> {
+export function noPayload(value: unknown): void { if (value !== undefined) invalid(); }
+export function object(value: unknown, keys: string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid();
   const actual = Object.keys(value);
   if (actual.length !== keys.length || actual.some(key => !keys.includes(key))) return invalid();
   return value as Record<string, unknown>;
 }
-function text(value: unknown, max: number): string {
+export function text(value: unknown, max: number): string {
   if (typeof value !== 'string' || !value.trim() || value.length > max || value.includes('\u0000')) return invalid();
   return value.trim();
 }

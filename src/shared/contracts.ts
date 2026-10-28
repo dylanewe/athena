@@ -1,3 +1,5 @@
+import type { InventoryBridge } from './inventory';
+
 export const MAX_TITLE_LENGTH = 100;
 export const MAX_MESSAGE_LENGTH = 8_000;
 export const MAX_WORKER_TEXT_LENGTH = 16_000;
@@ -28,6 +30,7 @@ export interface DemoJob {
   text: string;
 }
 export interface DesktopBridge {
+  inventory: InventoryBridge;
   workspace(): Promise<Workspace>;
   create(title: string): Promise<Workspace>;
   select(conversationId: string): Promise<Workspace>;
