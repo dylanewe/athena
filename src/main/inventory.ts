@@ -203,8 +203,13 @@ export class Inventory {
       else {
         let presence: Repository['presence'] = !this.cancelled && examinedPaths.has(previous.path) ? 'missing' : 'unknown';
         const root = this.state.roots.find(item => within(item.path, previous.path));
-        try { if (!this.cancelled && root) await safeDirectory(root.path, relative(root.path, previous.path) || '.'); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') presence = 'missing'; }
+        try {
+          if (!this.cancelled && root) {
+            await safeDirectory(root.path, relative(root.path, previous.path) || '.');
+            // Case-insensitive filesystems can still resolve the old spelling after a rename.
+            if (await realpath(previous.path) !== previous.path) presence = 'missing';
+          }
+        } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') presence = 'missing'; }
         repositories.push({ ...previous, presence });
       }
     }

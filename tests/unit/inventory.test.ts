@@ -151,6 +151,17 @@ test('nested repositories, submodules, and worktrees own their contents separate
   expect(inventory.snapshot().repositories[0].boundaries).toEqual([join(parent, 'module'), join(parent, 'nested')]);
 });
 
+test('case-only renames on macOS offer reconnection without changing the original name', async () => {
+  await repository(join(root, 'original'));
+  await inventory.designate(root, FOLDER_CONSENT);
+  await inventory.scan();
+  await rename(join(root, 'original'), join(root, 'ORIGINAL'));
+  await inventory.scan();
+  expect(inventory.snapshot().repositories[0].presence).toBe('missing');
+  inventory.reconnect('original', join(root, 'ORIGINAL'));
+  expect(inventory.snapshot().repositories[0]).toMatchObject({ name: 'original', path: join(root, 'ORIGINAL'), presence: 'present' });
+});
+
 test('cancelling after discovering a renamed repository still allows explicit reconnection after rescan', async () => {
   await repository(join(root, 'original'));
   await inventory.designate(root, FOLDER_CONSENT);
