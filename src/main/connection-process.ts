@@ -1,5 +1,5 @@
 import type { ConnectionProvider, ConnectionResult } from './model-settings';
-import type { TokenUsage } from '../shared/models';
+import { parseTokenUsage } from '../shared/models';
 
 export interface ConnectionWorker {
   on(event: 'message', listener: (value: unknown) => void): unknown;
@@ -12,13 +12,10 @@ export interface ConnectionWorker {
 function decode(value: unknown): ConnectionResult {
   if (!value || typeof value !== 'object') return { status: 'failed', reason: 'provider' };
   const result = value as Record<string, unknown>;
-  if (result.status === 'failed' && result.reason === 'authentication') return { status: 'failed', reason: 'authentication' };
-  if (result.status === 'success' && result.usage && typeof result.usage === 'object') {
-    const usage = result.usage as TokenUsage;
-    const { input, output, cacheRead, cacheWrite } = usage;
-    if ([input, output, cacheRead, cacheWrite].every(count => Number.isSafeInteger(count) && count >= 0)) {
-      return { status: 'success', usage: { input, output, cacheRead, cacheWrite } };
-    }
+  if (result.status === 'failed' && (result.reason === 'authentication' || result.reason === 'usage')) return { status: 'failed', reason: result.reason };
+  if (result.status === 'success') {
+    const usage = parseTokenUsage(result.usage);
+    if (usage) return { status: 'success', usage };
   }
   return { status: 'failed', reason: 'provider' };
 }
@@ -39,7 +36,10 @@ export class ConnectionProcess implements ConnectionProvider {
     };
     try {
       worker = this.spawn();
-      worker.on('spawn', () => { if (settled) worker?.kill(); });
+      worker.on('spawn', () => {
+        // kill() may have returned false before Electron assigned a PID.
+        if (settled) { try { worker?.kill(); } catch { /* Process already gone. */ } }
+      });
       worker.on('message', value => finish(decode(value)));
       worker.on('exit', () => finish({ status: 'failed', reason: 'provider' }));
       worker.postMessage({ key });

@@ -126,6 +126,29 @@ test('the real pi-ai adapter sends only the fixed bounded test prompt and interp
   expect(settings.snapshot().test.usage).toEqual({ input: 15, output: 4, cacheRead: 5, cacheWrite: 0 });
 });
 
+test.each([
+  {}, { prompt_tokens: 20 }, { prompt_tokens: 20, completion_tokens: '4' },
+  { prompt_tokens: -1, completion_tokens: 4 },
+  { prompt_tokens: 20, completion_tokens: 4, prompt_cache_hit_tokens: 21 },
+])('incomplete or invalid raw provider usage is never reported as zero-cost success: %j', async usage => {
+  settings = new ModelSettings(join(directory, 'models.sqlite'), protection, {
+    start(key) {
+      const controller = new AbortController();
+      return { result: exchange(key, controller.signal, async () => new Response(
+        'data: ' + JSON.stringify({ id: 'scripted', choices: [{ index: 0, delta: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }], usage }) + '\n\n' +
+        'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } },
+      )), cancel: () => controller.abort() };
+    },
+  });
+  settings.saveKey('sk-private-test');
+  settings.testConnection();
+  await expect.poll(() => settings.snapshot().test.status).toBe('failed');
+  expect(settings.snapshot().test.message).toContain('valid token usage was not reported');
+  expect(settings.snapshot().test.usage).toBeUndefined();
+  expect(settings.snapshot().test.estimatedCostUsd).toBeUndefined();
+  expect(settings.snapshot().gate.reservedUsd).toBe(0.0003456);
+});
+
 test('pi-ai authentication failures do not retry or echo provider error bodies to settings or logs', async () => {
   const logs = ['error', 'warn', 'log', 'info', 'debug'].map(level => vi.spyOn(console, level as 'error').mockImplementation(() => {}));
   let calls = 0;

@@ -4,6 +4,15 @@ export const CONNECTION_TIMEOUT_MS = 20_000;
 export const PROVIDER_CONSENT = 'I approve DeepSeek as a provider for future repository content I explicitly choose to send. This does not start investigation, grant folder or secret access, or approve paid work.';
 
 export interface TokenUsage { input: number; output: number; cacheRead: number; cacheWrite: number }
+
+/** Validate and copy only numeric usage at each trust boundary; never forward extra data. */
+export function parseTokenUsage(value: unknown): TokenUsage | undefined {
+  if (!value || typeof value !== 'object') return;
+  const { input, output, cacheRead, cacheWrite } = value as TokenUsage;
+  if ([input, output, cacheRead, cacheWrite].every(count => Number.isSafeInteger(count) && count >= 0)) {
+    return { input, output, cacheRead, cacheWrite };
+  }
+}
 export interface ModelInfo {
   provider: string;
   id: string;

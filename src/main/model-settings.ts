@@ -5,7 +5,7 @@ import { CONNECTION_MAX_TOKENS, CONNECTION_TIMEOUT_MS, PROVIDER_CONSENT, type Mo
 type SavedState = Pick<ModelWorkspace, 'model' | 'providerConsent' | 'test'> & { reservedNanoUsd: number };
 const NANO_USD = 1_000_000_000;
 
-function estimate(model: ModelInfo): number | null {
+function estimateTestReservationNanoUsd(model: ModelInfo): number | null {
   const cost = model.cost;
   if (!cost || [cost.input, cost.output, cost.cacheRead, cost.cacheWrite].some(rate => !Number.isFinite(rate) || rate < 0) || cost.input <= 0 || cost.output <= 0) return null;
   // Only the fixed short ASCII prompt, no tools/system/history. 1024 input tokens
@@ -21,7 +21,8 @@ export interface CredentialProtection {
   encrypt(value: string): Buffer;
   decrypt(value: Uint8Array): string;
 }
-export type ConnectionResult = { status: 'success'; usage: TokenUsage } | { status: 'failed'; reason: 'authentication' | 'provider' };
+export type ConnectionFailureReason = 'authentication' | 'provider' | 'usage';
+export type ConnectionResult = { status: 'success'; usage: TokenUsage } | { status: 'failed'; reason: ConnectionFailureReason };
 export interface ConnectionProvider {
   start(key: string): { result: Promise<ConnectionResult>; cancel(): void };
 }
@@ -53,11 +54,12 @@ export class ModelSettings {
     this.state = state;
   }
   snapshot(): ModelWorkspace {
+    const estimateNanoUsd = estimateTestReservationNanoUsd(this.state.model);
     return {
       model: structuredClone(this.state.model), credentialConfigured: !!this.db.prepare('SELECT id FROM credential').get(),
       protectedStorageAvailable: this.protection.available(), providerConsent: structuredClone(this.state.providerConsent),
       gate: { limitUsd: 1, reservedUsd: this.state.reservedNanoUsd / NANO_USD,
-        estimateUsd: estimate(this.state.model) === null ? null : estimate(this.state.model)! / NANO_USD },
+        estimateUsd: estimateNanoUsd === null ? null : estimateNanoUsd / NANO_USD },
       test: structuredClone(this.state.test),
     };
   }
@@ -84,7 +86,7 @@ export class ModelSettings {
     if (this.state.model.id !== DEEPSEEK_INFO.id || this.state.model.provider !== DEEPSEEK_INFO.provider || this.state.model.api !== DEEPSEEK_INFO.api) {
       throw new ModelSettingsError('Unsupported saved model configuration. Update Athena to support this configuration before testing; no fallback was used.');
     }
-    const reservation = estimate(this.state.model);
+    const reservation = estimateTestReservationNanoUsd(this.state.model);
     if (reservation === null) throw new ModelSettingsError("Pricing is missing or invalid. Update Athena's model configuration with verified prices before testing.");
     if (this.state.reservedNanoUsd + reservation > NANO_USD) throw new ModelSettingsError('The conservative estimate cannot fit the remaining $1 application cost gate. No request was sent.');
     if (!this.protection.available()) throw new ModelSettingsError('Unlock your macOS login Keychain before testing.');
@@ -127,9 +129,13 @@ export class ModelSettings {
     this.notify();
     return this.snapshot();
   }
-  private finishFailure(reason: 'authentication' | 'provider'): void {
-    this.save({ ...this.state, test: { status: 'failed', message: reason === 'authentication' ?
-      'Authentication rejected. Replace the DeepSeek API key and retry.' : 'Connection test failed. Check your network, DeepSeek account balance and provider availability, then retry.' } });
+  private finishFailure(reason: ConnectionFailureReason): void {
+    const messages: Record<ConnectionFailureReason, string> = {
+      authentication: 'Authentication rejected. Replace the DeepSeek API key and retry.',
+      provider: 'Connection test failed. Check your network, DeepSeek account balance and provider availability, then retry.',
+      usage: 'DeepSeek responded, but valid token usage was not reported. Estimated cost is unavailable; its conservative reservation is retained. Retry later or check provider availability.',
+    };
+    this.save({ ...this.state, test: { status: 'failed', message: messages[reason] } });
     this.notify();
   }
   cancel(): ModelWorkspace { this.stop(false); return this.snapshot(); }

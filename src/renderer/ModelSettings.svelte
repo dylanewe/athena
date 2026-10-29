@@ -65,7 +65,7 @@
         </dl>
         <p class="meta">{settings.model.api} · Pinned by Athena, never auto-switched · Metadata verified {settings.model.verifiedAt}</p>
         {#if settings.model.cost}
-          <div class="pricing" aria-label="Configured pricing">
+          <div class="pricing" role="group" aria-label="Configured pricing">
             <span class="eyebrow">Configured peak USD per 1M tokens</span>
             <dl>
               <div><dt>Input</dt><dd>${settings.model.cost.input}</dd></div>
@@ -98,7 +98,7 @@
         <p>Clicking <strong>Test connection</strong> authorizes one potentially paid request to DeepSeek with only this prompt:</p>
         <blockquote>{CONNECTION_PROMPT}</blockquote>
         <p class="meta">Maximum {CONNECTION_MAX_TOKENS} output tokens · {CONNECTION_TIMEOUT_MS / 1000}s timeout · No tools, repository content, conversation history, automatic retries, or other provider requests.</p>
-        <div class="cost-gate" aria-label="Application cost gate">
+        <div class="cost-gate" role="group" aria-label="Application cost gate">
           <div class="eyebrow">$1 application cost gate · Always enabled</div>
           <dl>
             <div><dt>Reserved since setup</dt><dd>{usd(settings.gate.reservedUsd)} / $1.00</dd></div>
@@ -120,7 +120,7 @@
         </div>
         <p role="status" aria-live="polite" class:problem={settings.test.status === 'failed'}>{settings.test.message}</p>
         {#if settings.test.usage}
-          <div class="usage" aria-label="Reported usage">
+          <div class="usage" role="group" aria-label="Reported usage">
             <span class="eyebrow">Provider-reported tokens</span>
             <p>{settings.test.usage.input} input · {settings.test.usage.output} output · {settings.test.usage.cacheRead} cache read · {settings.test.usage.cacheWrite} cache write</p>
             <span class="eyebrow">Estimated cost at configured rates</span>
