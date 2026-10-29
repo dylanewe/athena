@@ -1,5 +1,6 @@
 import type { InventoryBridge } from './inventory';
 import type { ModelBridge } from './models';
+import type { SourceBridge } from './sources';
 
 export const MAX_TITLE_LENGTH = 100;
 export const MAX_MESSAGE_LENGTH = 8_000;
@@ -31,6 +32,7 @@ export interface DemoJob {
   text: string;
 }
 export interface DesktopBridge {
+  sources: SourceBridge;
   inventory: InventoryBridge;
   models: ModelBridge;
   workspace(): Promise<Workspace>;

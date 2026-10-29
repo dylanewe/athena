@@ -3,6 +3,7 @@ import { stream } from '@earendil-works/pi-ai/api/openai-completions';
 import { DEEPSEEK_MODEL } from '../main/deepseek-model';
 import { CONNECTION_MAX_TOKENS, CONNECTION_PROMPT, CONNECTION_TIMEOUT_MS, parseTokenUsage } from '../shared/models';
 import type { ConnectionResult } from '../main/model-settings';
+import { checkBeforeModelSend } from '../main/secret-check';
 
 function hasReportedUsage(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
@@ -31,6 +32,8 @@ export async function exchange(key: string, signal: AbortSignal, fetchRequest: t
       maxRetries: 0, cacheRetention: 'none', env: {}, identity: { userAgent: { custom: 'Athena/0.1' }, attribution: null },
       fetch: async (url, options) => {
         if (sent || String(url) !== 'https://api.deepseek.com/chat/completions' || options?.method !== 'POST') throw new Error('Request denied.');
+        // Final wire-body check; credential headers are not request material.
+        checkBeforeModelSend(options.body);
         sent = true;
         const result = await fetchRequest(url, { ...options, redirect: 'error' });
         status = result.status;

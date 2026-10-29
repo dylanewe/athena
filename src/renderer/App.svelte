@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import InventoryView from './Inventory.svelte';
+  import SourcesView from './Sources.svelte';
   import ModelSettingsView from './ModelSettings.svelte';
   import { MAX_MESSAGE_LENGTH, type Workspace } from '../shared/contracts';
 
-  let section = $state<'conversation' | 'inventory' | 'models'>('conversation');
+  let section = $state<'conversation' | 'inventory' | 'models' | 'sources'>('conversation');
   let workspace = $state<Workspace | null>(null);
   let error = $state('');
   let busy = $state(false);
@@ -82,6 +83,7 @@
   <aside aria-label="Conversations">
     <div class="brand"><span class="brand-mark" aria-hidden="true">a.</span><span>Athena</span></div>
     <button class="new-conversation" aria-pressed={section === 'inventory'} onclick={() => section = section === 'inventory' ? 'conversation' : 'inventory'}>Repositories</button>
+    <button class="new-conversation" aria-pressed={section === 'sources'} onclick={() => section = section === 'sources' ? 'conversation' : 'sources'}>Sources</button>
     <button class="new-conversation" aria-pressed={section === 'models'} onclick={() => section = section === 'models' ? 'conversation' : 'models'}>Model settings</button>
     <div class="sidebar-heading">Your conversations</div>
     <button class="new-conversation" onclick={newConversation} disabled={busy || !workspace}><span aria-hidden="true">+</span> New conversation</button>
@@ -101,6 +103,8 @@
 
   {#if section === 'inventory'}
     <InventoryView />
+  {:else if section === 'sources'}
+    <SourcesView />
   {:else if section === 'models'}
     <ModelSettingsView />
   {:else}

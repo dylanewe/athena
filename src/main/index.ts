@@ -10,6 +10,8 @@ import { InventoryGateway } from './inventory-bridge';
 import { ModelSettings, ModelSettingsError } from './model-settings';
 import { ModelGateway } from './model-bridge';
 import { ConnectionProcess } from './connection-process';
+import { Sources } from './sources';
+import { SourceGateway } from './source-bridge';
 
 app.setName('Athena');
 app.enableSandbox();
@@ -29,6 +31,8 @@ let inventory: Inventory | undefined;
 let inventoryGateway: InventoryGateway | undefined;
 let modelSettings: ModelSettings | undefined;
 let modelGateway: ModelGateway | undefined;
+let sources: Sources | undefined;
+let sourceGateway: SourceGateway | undefined;
 
 function notify() {
   if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
@@ -65,13 +69,14 @@ function createWindow() {
     return result.canceled ? undefined : result.filePaths[0];
   });
   modelGateway = new ModelGateway(modelSettings!, { webContentsId: window.webContents.id, url: documentURL });
+  sourceGateway = new SourceGateway(sources!, { webContentsId: window.webContents.id, url: documentURL });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.on('will-attach-webview', event => event.preventDefault());
-  window.webContents.on('render-process-gone', () => { jobs?.cancel(); inventory?.cancel(); modelSettings?.cancel(); });
+  window.webContents.on('render-process-gone', () => { jobs?.cancel(); inventory?.cancel(); modelSettings?.cancel(); sourceGateway?.cancel(); });
   window.on('minimize', () => jobs?.lifecycle('minimize'));
-  window.on('close', () => { jobs?.lifecycle('window-close'); inventory?.cancel(); modelSettings?.cancel(); });
-  window.on('closed', () => { gateway = undefined; inventoryGateway = undefined; modelGateway = undefined; window = undefined; });
+  window.on('close', () => { jobs?.lifecycle('window-close'); inventory?.cancel(); modelSettings?.cancel(); sourceGateway?.cancel(); });
+  window.on('closed', () => { gateway = undefined; inventoryGateway = undefined; modelGateway = undefined; sourceGateway = undefined; window = undefined; });
   void window.loadURL(documentURL);
 }
 
@@ -82,9 +87,9 @@ if (!app.requestSingleInstanceLock()) {
     if (window?.isMinimized()) window.restore();
     window?.focus();
   });
-  app.on('before-quit', () => { jobs?.lifecycle('quit'); inventory?.cancel(); modelSettings?.cancel(); });
+  app.on('before-quit', () => { jobs?.lifecycle('quit'); inventory?.cancel(); modelSettings?.cancel(); sourceGateway?.cancel(); });
   app.on('window-all-closed', () => app.quit());
-  app.on('will-quit', () => { conversations?.close(); inventory?.close(); modelSettings?.close(); });
+  app.on('will-quit', () => { conversations?.close(); inventory?.close(); modelSettings?.close(); sources?.close(); });
   void app.whenReady().then(() => {
     const stateDirectory = join(app.getPath('userData'), 'state');
     mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
@@ -94,6 +99,9 @@ if (!app.requestSingleInstanceLock()) {
     const inventoryDatabase = join(stateDirectory, 'inventory.sqlite');
     inventory = new Inventory(inventoryDatabase, notify);
     chmodSync(inventoryDatabase, 0o600);
+    const sourceDatabase = join(stateDirectory, 'sources.sqlite');
+    sources = new Sources(sourceDatabase, inventory);
+    chmodSync(sourceDatabase, 0o600);
     jobs = new JobSupervisor(conversations, () => utilityProcess.fork(join(output, 'worker.js'), [], {
       serviceName: 'Athena demonstration',
       // Do not inherit provider keys, shell setup, or other secrets from the launching environment.
@@ -149,6 +157,19 @@ if (!app.requestSingleInstanceLock()) {
         return { ok: true, inventory: result };
       } catch {
         return { ok: false, error: 'Inventory change rejected. Finish discovery first; check the selected folder, unique name, and relative directories, then retry.' };
+      }
+    });
+    ipcMain.handle('athena:sources', async (event, operation: unknown, payload: unknown) => {
+      try {
+        if (!sourceGateway) throw new Error('No workspace.');
+        const result = await sourceGateway.dispatch({
+          webContentsId: event.sender.id,
+          isMainFrame: event.senderFrame === event.sender.mainFrame,
+          url: event.senderFrame?.url ?? '',
+        }, operation, payload);
+        return { ok: true, result };
+      } catch {
+        return { ok: false, error: 'Source request rejected. Check folder permission, relative path, and limits; finish or cancel active browsing first.' };
       }
     });
     Menu.setApplicationMenu(Menu.buildFromTemplate([

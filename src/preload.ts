@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { SourceResult, SourceException } from './shared/sources';
 import type { InventoryWorkspace } from './shared/inventory';
 import type { ModelWorkspace } from './shared/models';
 import type { DesktopBridge, Workspace } from './shared/contracts';
@@ -21,7 +22,19 @@ async function modelRequest(operation: string, payload?: unknown): Promise<Model
   return reply.models;
 }
 
+async function sourceRequest(operation: string, payload?: unknown): Promise<unknown> {
+  const reply = await ipcRenderer.invoke('athena:sources', operation, payload);
+  if (!reply.ok) throw new Error(reply.error);
+  return reply.result;
+}
+
 const bridge: DesktopBridge = {
+  sources: {
+    run: (operation, input) => sourceRequest(operation, input) as Promise<SourceResult>,
+    cancel: () => sourceRequest('cancel') as Promise<void>,
+    exceptions: () => sourceRequest('exceptions') as Promise<SourceException[]>,
+    exception: (root, path, include) => sourceRequest('exception', { root, path, include }) as Promise<SourceException[]>,
+  },
   models: {
     snapshot: () => modelRequest('snapshot'),
     saveKey: key => modelRequest('saveKey', { key }),
