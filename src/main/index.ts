@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, session, utilityProcess } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, safeStorage, session, utilityProcess } from 'electron';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -7,6 +7,9 @@ import { DesktopGateway } from './bridge';
 import { JobSupervisor } from './supervisor';
 import { Inventory } from './inventory';
 import { InventoryGateway } from './inventory-bridge';
+import { ModelSettings, ModelSettingsError } from './model-settings';
+import { ModelGateway } from './model-bridge';
+import { ConnectionProcess } from './connection-process';
 
 app.setName('Athena');
 app.enableSandbox();
@@ -24,6 +27,8 @@ let jobs: JobSupervisor | undefined;
 let gateway: DesktopGateway | undefined;
 let inventory: Inventory | undefined;
 let inventoryGateway: InventoryGateway | undefined;
+let modelSettings: ModelSettings | undefined;
+let modelGateway: ModelGateway | undefined;
 
 function notify() {
   if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
@@ -59,13 +64,14 @@ function createWindow() {
     const result = await dialog.showOpenDialog(window, { title: 'Choose a folder for Athena', properties: ['openDirectory'], buttonLabel: 'Review permission' });
     return result.canceled ? undefined : result.filePaths[0];
   });
+  modelGateway = new ModelGateway(modelSettings!, { webContentsId: window.webContents.id, url: documentURL });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.on('will-attach-webview', event => event.preventDefault());
-  window.webContents.on('render-process-gone', () => { jobs?.cancel(); inventory?.cancel(); });
+  window.webContents.on('render-process-gone', () => { jobs?.cancel(); inventory?.cancel(); modelSettings?.cancel(); });
   window.on('minimize', () => jobs?.lifecycle('minimize'));
-  window.on('close', () => { jobs?.lifecycle('window-close'); inventory?.cancel(); });
-  window.on('closed', () => { gateway = undefined; inventoryGateway = undefined; window = undefined; });
+  window.on('close', () => { jobs?.lifecycle('window-close'); inventory?.cancel(); modelSettings?.cancel(); });
+  window.on('closed', () => { gateway = undefined; inventoryGateway = undefined; modelGateway = undefined; window = undefined; });
   void window.loadURL(documentURL);
 }
 
@@ -76,9 +82,9 @@ if (!app.requestSingleInstanceLock()) {
     if (window?.isMinimized()) window.restore();
     window?.focus();
   });
-  app.on('before-quit', () => { jobs?.lifecycle('quit'); inventory?.cancel(); });
+  app.on('before-quit', () => { jobs?.lifecycle('quit'); inventory?.cancel(); modelSettings?.cancel(); });
   app.on('window-all-closed', () => app.quit());
-  app.on('will-quit', () => { conversations?.close(); inventory?.close(); });
+  app.on('will-quit', () => { conversations?.close(); inventory?.close(); modelSettings?.close(); });
   void app.whenReady().then(() => {
     const stateDirectory = join(app.getPath('userData'), 'state');
     mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
@@ -93,6 +99,31 @@ if (!app.requestSingleInstanceLock()) {
       // Do not inherit provider keys, shell setup, or other secrets from the launching environment.
       env: {}, stdio: 'ignore', cwd: stateDirectory,
     }), notify);
+    const modelDatabase = join(stateDirectory, 'models.sqlite');
+    modelSettings = new ModelSettings(modelDatabase, {
+      // On macOS safeStorage encrypts using a key held in the login Keychain.
+      // Never fall back to Linux basic_text or ordinary plaintext storage.
+      available: () => process.platform === 'darwin' && safeStorage.isEncryptionAvailable(),
+      encrypt: key => safeStorage.encryptString(key),
+      decrypt: bytes => safeStorage.decryptString(Buffer.from(bytes)),
+    }, new ConnectionProcess(() => utilityProcess.fork(join(output, 'connection.js'), [], {
+      serviceName: 'Athena connection test', env: {}, stdio: 'ignore', cwd: stateDirectory,
+    })), notify);
+    chmodSync(modelDatabase, 0o600);
+    ipcMain.handle('athena:models', (event, operation: unknown, payload: unknown) => {
+      try {
+        if (!modelGateway) throw new Error('No model settings.');
+        const models = modelGateway.dispatch({
+          webContentsId: event.sender.id,
+          isMainFrame: event.senderFrame === event.sender.mainFrame,
+          url: event.senderFrame?.url ?? '',
+        }, operation, payload);
+        return { ok: true, models };
+      } catch (error) {
+        return { ok: false, error: error instanceof ModelSettingsError ? error.message :
+          'Model settings request rejected. Check the entered values and available local storage, then retry.' };
+      }
+    });
     ipcMain.handle('athena:request', (event, operation: unknown, payload: unknown) => {
       try {
         if (!gateway) throw new Error('No workspace.');

@@ -226,9 +226,11 @@ test('the renderer is sandboxed, has a narrow bridge, and cannot fetch files or 
     require: typeof (globalThis as Record<string, unknown>).require,
     bridge: Object.keys(window.athena).sort(),
     inventory: Object.keys(window.athena.inventory).sort(),
+    models: Object.keys(window.athena.models).sort(),
   }))).toEqual({
-    node: 'undefined', require: 'undefined', bridge: ['cancel', 'inventory', 'onChange', 'select', 'send', 'workspace'],
+    node: 'undefined', require: 'undefined', bridge: ['cancel', 'inventory', 'models', 'onChange', 'select', 'send', 'workspace'],
     inventory: ['cancel', 'chooseFolder', 'consentFolder', 'dismissFolder', 'documentation', 'include', 'reconnect', 'register', 'scan', 'snapshot'],
+    models: ['cancel', 'consent', 'revokeConsent', 'saveKey', 'snapshot', 'test'],
   });
   expect(await application.evaluate(({ app, BrowserWindow }) => {
     const pid = BrowserWindow.getAllWindows()[0].webContents.getOSProcessId();
@@ -261,5 +263,11 @@ test('a second real renderer cannot use the owner window’s bridge', async () =
   })).toBe('rejected');
   expect(await outsider.evaluate(async () => {
     try { await window.athena.inventory.chooseFolder(); return 'accepted'; } catch { return 'rejected'; }
+  })).toBe('rejected');
+  expect(await outsider.evaluate(async () => {
+    try { await window.athena.models.test(); return 'accepted'; } catch { return 'rejected'; }
+  })).toBe('rejected');
+  expect(await outsider.evaluate(async () => {
+    try { await window.athena.models.saveKey('sk-outsider'); return 'accepted'; } catch { return 'rejected'; }
   })).toBe('rejected');
 });

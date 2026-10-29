@@ -4,7 +4,7 @@ import { rm } from 'node:fs/promises';
 
 await rm('dist', { recursive: true, force: true });
 await bundle({
-  entryPoints: { main: 'src/main/index.ts', worker: 'src/worker/demo.ts' },
+  entryPoints: { main: 'src/main/index.ts', worker: 'src/worker/demo.ts', connection: 'src/worker/connection.ts' },
   outdir: 'dist', bundle: true, platform: 'node', format: 'esm',
   packages: 'external', target: 'node24',
 });

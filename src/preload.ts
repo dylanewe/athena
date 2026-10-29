@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { InventoryWorkspace } from './shared/inventory';
+import type { ModelWorkspace } from './shared/models';
 import type { DesktopBridge, Workspace } from './shared/contracts';
 
 async function request(operation: string, payload?: unknown): Promise<Workspace> {
@@ -14,7 +15,21 @@ async function inventoryRequest(operation: string, payload?: unknown): Promise<I
   return reply.inventory;
 }
 
+async function modelRequest(operation: string, payload?: unknown): Promise<ModelWorkspace> {
+  const reply = await ipcRenderer.invoke('athena:models', operation, payload);
+  if (!reply.ok) throw new Error(reply.error);
+  return reply.models;
+}
+
 const bridge: DesktopBridge = {
+  models: {
+    snapshot: () => modelRequest('snapshot'),
+    saveKey: key => modelRequest('saveKey', { key }),
+    consent: text => modelRequest('consent', { text }),
+    revokeConsent: () => modelRequest('revokeConsent'),
+    test: () => modelRequest('test'),
+    cancel: () => modelRequest('cancel'),
+  },
   inventory: {
     snapshot: () => inventoryRequest('snapshot'),
     chooseFolder: () => inventoryRequest('chooseFolder'),

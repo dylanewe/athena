@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import InventoryView from './Inventory.svelte';
+  import ModelSettingsView from './ModelSettings.svelte';
   import { MAX_MESSAGE_LENGTH, type Workspace } from '../shared/contracts';
 
-  let inventoryOpen = $state(false);
+  let section = $state<'conversation' | 'inventory' | 'models'>('conversation');
   let workspace = $state<Workspace | null>(null);
   let error = $state('');
   let busy = $state(false);
@@ -41,7 +42,7 @@
   }
 
   async function newConversation() {
-    inventoryOpen = false;
+    section = 'conversation';
     composingNew = true;
     error = '';
     await tick();
@@ -49,7 +50,7 @@
   }
   async function select(id: string) {
     if (await change(() => window.athena.select(id))) {
-      inventoryOpen = false;
+      section = 'conversation';
       composingNew = false;
     }
   }
@@ -80,7 +81,8 @@
 <div class="workspace">
   <aside aria-label="Conversations">
     <div class="brand"><span class="brand-mark" aria-hidden="true">a.</span><span>Athena</span></div>
-    <button class="new-conversation" aria-pressed={inventoryOpen} onclick={() => inventoryOpen = !inventoryOpen}>Repositories</button>
+    <button class="new-conversation" aria-pressed={section === 'inventory'} onclick={() => section = section === 'inventory' ? 'conversation' : 'inventory'}>Repositories</button>
+    <button class="new-conversation" aria-pressed={section === 'models'} onclick={() => section = section === 'models' ? 'conversation' : 'models'}>Model settings</button>
     <div class="sidebar-heading">Your conversations</div>
     <button class="new-conversation" onclick={newConversation} disabled={busy || !workspace}><span aria-hidden="true">+</span> New conversation</button>
     <nav aria-label="Saved conversations">
@@ -97,8 +99,10 @@
     <div class="local-note"><span class="eyebrow">On this Mac</span><p>Conversations stay here.<br />Close Athena. Pick up later.</p></div>
   </aside>
 
-  {#if inventoryOpen}
+  {#if section === 'inventory'}
     <InventoryView />
+  {:else if section === 'models'}
+    <ModelSettingsView />
   {:else}
     <main>
       {#if error || workspace?.saveError}<div class="error" role="alert">{error || workspace?.saveError}</div>{/if}
