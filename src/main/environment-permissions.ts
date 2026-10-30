@@ -23,6 +23,7 @@ export class EnvironmentPermissions {
     this.permissions.clear();
   }
   act(id: string, action: EnvironmentAction): void {
+    if (typeof action !== 'string' || !['local', 'external', 'deny', 'revoke'].includes(action)) throw new Error('Invalid environment action.');
     const permission = this.permissions.get(id);
     if (!permission || this.expired || this.signal.aborted) throw new Error('Environment permission expired.');
     if (action === 'revoke') { this.expire(); this.cancel(); return; }

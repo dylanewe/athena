@@ -20,13 +20,21 @@ export class Conversations {
   private readonly ephemeral = new Map<string, Partial<Message>>();
   private readonly sensitiveValues = new Set<string>();
 
-  rememberEnvironment(text: string): void { for (const value of environmentValues(text)) this.sensitiveValues.add(value); }
+  rememberEnvironment(text: string): void {
+    for (const value of environmentValues(text)) {
+      // Low-information scalars are not secrets in isolation. Keep their full
+      // assignment/file text, but do not poison application control metadata.
+      if (!Number.isFinite(Number(value)) && !/^(?:true|false|null|undefined|none)$/i.test(value)) this.sensitiveValues.add(value);
+    }
+  }
   assertClean(material: unknown): void {
     checkBeforeModelSend(material);
-    const serialized = JSON.stringify(material) ?? '';
-    for (const value of this.sensitiveValues) {
-      if (serialized.includes(JSON.stringify(value).slice(1, -1))) throw new Error('Known environment content withheld.');
-    }
+    const inspect = (value: unknown): boolean => {
+      if (typeof value === 'string') return [...this.sensitiveValues].some(secret => value.includes(secret));
+      if (value && typeof value === 'object') return Object.values(value).some(inspect);
+      return false;
+    };
+    if (inspect(material)) throw new Error('Known environment content withheld.');
   }
 
   constructor(path: string) {

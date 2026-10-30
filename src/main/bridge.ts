@@ -48,7 +48,7 @@ export class DesktopGateway {
       }
       case 'environment': {
         const input = object(payload, ['id', 'action']);
-        if (!this.jobs.environment || !['local', 'external', 'deny', 'revoke'].includes(String(input.action))) throw new Error('Invalid desktop request.');
+        if (!this.jobs.environment || typeof input.action !== 'string' || !['local', 'external', 'deny', 'revoke'].includes(input.action)) throw new Error('Invalid desktop request.');
         this.jobs.environment(identifier(input.id), input.action as EnvironmentAction);
         break;
       }

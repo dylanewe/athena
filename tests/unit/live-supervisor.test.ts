@@ -62,6 +62,20 @@ class Worker extends EventEmitter {
   rpc(type: string, extra = {}) { return new Promise<Extract<LiveParentMessage, { type: 'reply' }>>(resolve => { const id = ++this.next; this.pending.set(id, resolve); queueMicrotask(() => this.emit('message', { type, id, ...extra })); }); }
   kill() { this.killed = true; this.controller.abort(); return true; }
 }
+async function exposeEnvironmentAndStall(canary: string): Promise<string> {
+  writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);
+  const scripts = [functionResponse('investigate', { question: 'Read configuration' }), toolResponse(root, true, '.env')];
+  http = async (_url, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    if (scripts.length) return new Response(new TextEncoder().encode(scripts.shift()));
+    return new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error(canary)), { once: true }));
+  };
+  jobs.start(null, 'Inspect configuration');
+  await expect.poll(() => jobs.environmentPermissions().length).toBe(1);
+  const { id } = jobs.environmentPermissions()[0]; jobs.environment(id, 'external');
+  await expect.poll(() => requests.length).toBe(3);
+  return id;
+}
 test('local-only approval previews ephemerally without granting the delegated agent contents', async () => {
   writeFileSync(join(root, '.env'), 'PASSWORD=synthetic-local-canary-7');
   scripted(investigationScripts(root, 'The actual file was withheld.', '.env'));
@@ -69,6 +83,8 @@ test('local-only approval previews ephemerally without granting the delegated ag
   await expect.poll(() => jobs.environmentPermissions().length).toBe(1);
   const permission = jobs.environmentPermissions()[0];
   expect(JSON.stringify(permission).includes('synthetic-local-canary-7')).toBe(false);
+  for (const action of [['revoke'], ['local'], {}, 1, null]) expect(() => jobs.environment(permission.id, action as never)).toThrow('Invalid');
+  expect(jobs.environmentPermissions()[0].local).toBe(false);
   jobs.environment(permission.id, 'local');
   await expect.poll(() => jobs.environmentPermissions()[0]?.preview?.includes('synthetic-local-canary-7')).toBe(true);
   expect(requests).toHaveLength(2);
@@ -79,6 +95,24 @@ test('local-only approval previews ephemerally without granting the delegated ag
   expect(jobs.environmentPermissions()).toEqual([]);
   expect(() => jobs.start(null, 'Explain synthetic-local-canary-7')).toThrow('secret checks');
   expect(db.workspace().conversations).toHaveLength(1);
+});
+
+test('local-only flag and numeric values do not poison subsequent ordinary conversations through metadata', async () => {
+  writeFileSync(join(root, '.env'), 'FEATURE_ENABLED=false\nRETRIES=1\nFLAG=true\nZERO=0');
+  scripted(investigationScripts(root, 'File withheld', '.env'));
+  jobs.start(null, 'Inspect configuration locally');
+  await expect.poll(() => jobs.environmentPermissions().length).toBe(1);
+  const { id } = jobs.environmentPermissions()[0]; jobs.environment(id, 'local');
+  await expect.poll(() => jobs.environmentPermissions()[0]?.preview !== undefined).toBe(true);
+  jobs.environment(id, 'deny'); await idle();
+  expect(db.workspace().selected?.sealed).not.toBe(true);
+  scripted([textResponse('Ordinary answer'), textResponse('Ordinary follow-up')]);
+  jobs.start(null, 'An unrelated question'); await idle();
+  const conversation = db.workspace().selected!;
+  expect(conversation.sealed).not.toBe(true);
+  expect(conversation.messages.at(-1)).toMatchObject({ status: 'complete', text: 'Ordinary answer' });
+  jobs.start(conversation.id, 'An unrelated follow-up'); await idle();
+  expect(db.workspace().selected?.sealed).not.toBe(true);
 });
 
 test('outbound approval reaches child and main contexts but echoes, titles and tool history never reach durable storage', async () => {
@@ -131,17 +165,7 @@ test.each(['cancel', 'failure'] as const)('environment permissions expire on %s 
 
 test('revoking an outbound permission stops child sends and retains only safe state even after provider exposure', async () => {
   const canary = 'synthetic-revocation-7';
-  writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);
-  const scripts = [functionResponse('investigate', { question: 'Read configuration' }), toolResponse(root, true, '.env')];
-  http = async (_url, init) => {
-    requests.push(JSON.parse(String(init?.body)));
-    if (scripts.length) return new Response(new TextEncoder().encode(scripts.shift()));
-    return new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error(canary)), { once: true }));
-  };
-  jobs.start(null, 'Inspect configuration');
-  await expect.poll(() => jobs.environmentPermissions().length).toBe(1);
-  const { id } = jobs.environmentPermissions()[0]; jobs.environment(id, 'external');
-  await expect.poll(() => requests.length).toBe(3);
+  const id = await exposeEnvironmentAndStall(canary);
   jobs.environment(id, 'revoke'); await idle();
   expect(workers[0].killed).toBe(true);
   expect(jobs.environmentPermissions()).toEqual([]);
@@ -182,17 +206,8 @@ test('wall-clock expiry releases a waiting environment decision without carrying
 });
 
 test('save retries after exposed output cannot persist tool, answer or error canaries', async () => {
-  const canary = 'synthetic-save-retry-7'; writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);
-  const scripts = [functionResponse('investigate', { question: 'Read configuration' }), toolResponse(root, true, '.env')];
-  http = async (_url, init) => {
-    requests.push(JSON.parse(String(init?.body)));
-    if (scripts.length) return new Response(new TextEncoder().encode(scripts.shift()));
-    return new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error(canary)), { once: true }));
-  };
-  jobs.start(null, 'Inspect configuration');
-  await expect.poll(() => jobs.environmentPermissions().length).toBe(1);
-  jobs.environment(jobs.environmentPermissions()[0].id, 'external');
-  await expect.poll(() => requests.length).toBe(3);
+  const canary = 'synthetic-save-retry-7';
+  await exposeEnvironmentAndStall(canary);
   workers[0].emit('message', { type: 'progress', text: canary, activity: canary });
   const lock = new DatabaseSync(join(directory, 'conversations.sqlite'));
   try {

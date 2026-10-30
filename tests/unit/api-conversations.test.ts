@@ -80,6 +80,25 @@ test('real Pi agents use separate pinned API-key providers, preserve source boun
   expect(binding.apiKey?.investigator.model.id).toBe('investigator-one');
 });
 
+test('local-only primitive flags do not seal later API-key answers or their pinned follow-ups', async () => {
+  writeFileSync(join(root, '.env'), 'FEATURE_ENABLED=false\nRETRIES=1\nFLAG=true\nZERO=0');
+  scripts = [response(undefined, 'investigate', { question: 'Inspect configuration' }), response(undefined, 'sources_read', { root, path: '.env' }),
+    response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: ['File withheld'], candidateKnowledgeChanges: [] }), response('File withheld')];
+  supervisor.start(null, 'Inspect configuration locally');
+  await expect.poll(() => supervisor.environmentPermissions().length).toBe(1);
+  const { id } = supervisor.environmentPermissions()[0]; supervisor.environment(id, 'local');
+  await expect.poll(() => supervisor.environmentPermissions()[0]?.preview !== undefined).toBe(true);
+  supervisor.environment(id, 'deny'); await idle();
+  expect(conversations.workspace().selected?.sealed).not.toBe(true);
+  scripts = [response('Ordinary answer'), response('Ordinary follow-up')];
+  supervisor.start(null, 'An unrelated question'); await idle();
+  const conversation = conversations.workspace().selected!;
+  expect(conversation.sealed).not.toBe(true);
+  supervisor.start(conversation.id, 'An unrelated follow-up'); await idle();
+  expect(conversations.workspace().selected?.sealed).not.toBe(true);
+  expect(conversations.workspace().selected?.messages.at(-1)).toMatchObject({ status: 'complete', text: 'Ordinary follow-up' });
+});
+
 test('API-key outbound environment approval propagates across separately pinned roles without persisting echoes or bypassing reservations', async () => {
   const canary = 'synthetic-api-environment-7';
   writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);

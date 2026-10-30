@@ -185,6 +185,11 @@ test('environment permission UI separates local preview from outbound access and
   await investigateEnvironment('Inspect actual environment', canary);
   await expect(page.getByRole('region', { name: 'Environment-file permissions' })).toBeVisible();
   expect((await page.textContent('body'))?.includes(canary)).toBe(false);
+  expect(await page.evaluate(async () => {
+    const id = (await window.athena.workspace()).environment![0].id;
+    try { await window.athena.environment(id, ['revoke'] as never); return true; } catch { return false; }
+  })).toBe(false);
+  expect(await page.evaluate(async () => (await window.athena.workspace()).environment![0].local)).toBe(false);
   await page.getByRole('button', { name: 'Approve local inspection' }).click();
   await expect(page.getByLabel('Ephemeral local preview')).toContainText(canary);
   expect(await page.evaluate(async () => (await window.athena.workspace()).environment?.[0].external)).toBe(false);
