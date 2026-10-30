@@ -138,6 +138,13 @@ export class ModelSettings {
     this.save({ ...this.state, test: { status: 'failed', message: messages[reason] } });
     this.notify();
   }
+  /** Shared non-refundable $1 application gate for API-key jobs and fixed tests. */
+  reservePaidRequest(nanoUsd: number): void {
+    if (!Number.isSafeInteger(nanoUsd) || nanoUsd < 0) throw new ModelSettingsError('Invalid or unknown model pricing. No request sent.');
+    if (nanoUsd + this.state.reservedNanoUsd > NANO_USD) throw new ModelSettingsError('The conservative request estimate cannot fit the remaining $1 application cost gate. No request sent.');
+    this.save({ ...this.state, reservedNanoUsd: this.state.reservedNanoUsd + nanoUsd });
+    this.notify();
+  }
   cancel(): ModelWorkspace { this.stop(false); return this.snapshot(); }
   private stop(timedOut: boolean): void {
     const request = this.active;

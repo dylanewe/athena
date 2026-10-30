@@ -1,3 +1,7 @@
+import { ApiSettingsError } from './pi-model-config';
+import { ModelSettingsError } from './model-settings';
+import type { ApiSettings } from './api-settings';
+import type { ApiConversationConfig, ApiGrant, ModelRole } from '../shared/api-models';
 import type { Message as PiMessage } from '@earendil-works/pi-ai';
 import type { Conversations } from './conversations';
 import type { ChatGPTSettings } from './chatgpt-settings';
@@ -20,7 +24,7 @@ export interface LiveWorker {
 }
 interface Active {
   conversationId: string; messageId: string; prompt: string; controller: AbortController;
-  text: string; evidence: Evidence[]; exploration?: Exploration; title?: string; requests: number; usage?: ChatGPTUsage; stop?: () => void;
+  apiKey?: boolean; text: string; evidence: Evidence[]; exploration?: Exploration; title?: string; requests: number; usage?: ChatGPTUsage; stop?: () => void;
   timer?: ReturnType<typeof setTimeout>; progressTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -31,20 +35,31 @@ export class LiveSupervisor {
   get saveError(): string | undefined { return this.unsaved ? 'The conversation stopped, but its result could not be saved. Check disk space and choose Retry saving.' : undefined; }
   constructor(private readonly conversations: Conversations, private readonly chatgpt: ChatGPTSettings,
     private readonly sources: Sources, private readonly inventory: Pick<Inventory, 'snapshot'>,
-    private readonly spawn: () => LiveWorker, private readonly changed: () => void) {}
+    private readonly spawn: () => LiveWorker, private readonly changed: () => void, private readonly apiSettings?: ApiSettings) {}
 
   start(id: string | null, prompt: string, retryId?: string): void {
     this.retrySaving();
     if (this.unsaved) throw new LiveError('Save the previous result before starting another conversation.');
     if (this.active) throw new LiveError('A conversation is already running.');
-    if (this.chatgpt.snapshot().activity !== 'idle') throw new LiveError('Finish or cancel the current ChatGPT operation first.');
     if (retryId) { const target = this.conversations.retryTarget(retryId); id = target.conversationId; prompt = target.prompt; }
     try { checkBeforeModelSend(prompt); } catch { throw new LiveError('Message withheld by secret checks. Remove suspected credentials before sending.'); }
     let binding;
-    try { binding = this.chatgpt.conversationBinding(id ? this.conversations.binding(id) : undefined); }
-    catch (error) { if (error instanceof ChatGPTError) throw error; throw new LiveError('Local demonstrations are read-only. Start a new ChatGPT conversation.'); }
+    try {
+      const pinned = id ? this.conversations.binding(id) : undefined;
+      if (pinned?.apiKey || (!pinned && this.apiSettings?.route() === 'api-key')) {
+        const apiKey = pinned?.apiKey ?? this.apiSettings!.conversationConfig();
+        this.apiSettings!.assertApproved(apiKey.conversation); this.apiSettings!.assertApproved(apiKey.investigator);
+        binding = structuredClone(pinned ?? { model: apiKey.conversation.model.id, registration: '', apiKey });
+      } else {
+        if (this.chatgpt.snapshot().activity !== 'idle') throw new LiveError('Finish or cancel the current ChatGPT operation first.');
+        binding = this.chatgpt.conversationBinding(pinned);
+      }
+    } catch (error) {
+      if (error instanceof ChatGPTError || error instanceof ApiSettingsError || error instanceof LiveError) throw error;
+      throw new LiveError('Local demonstrations are read-only. Start a new conversation.');
+    }
     const job = this.conversations.beginLive(id, prompt, binding, retryId);
-    const active: Active = { ...job, controller: new AbortController(), text: '', evidence: [], requests: 0 };
+    const active: Active = { ...job, apiKey: !!binding.apiKey, controller: new AbortController(), text: '', evidence: [], requests: 0 };
     this.active = active;
     active.timer = setTimeout(() => this.end(active, { status: 'limit', text: active.text + '\n\nTime limit reached. Retry explicitly when ready.', history: [], requests: active.requests, usageComplete: false }), LIVE_LIMITS.milliseconds);
     this.changed();
@@ -55,13 +70,15 @@ export class LiveSupervisor {
         active.evidence = previous.evidence;
         if (!await this.verify(previous.evidence, active.controller.signal)) throw new LiveError('Saved evidence changed or is no longer permitted. Start a new conversation to investigate current sources.');
         if (this.active !== active) return;
-        await this.chatgpt.conversation(binding, active.controller.signal, async (access, signal) => {
+        const work = async (access: (role?: ModelRole, bytes?: number) => Promise<string | ApiGrant>, signal: AbortSignal) => {
           const snapshot = this.inventory.snapshot();
           const roots = snapshot.roots.map(root => ({ path: root.path, repositories: snapshot.repositories.filter(repo => repo.path === root.path || repo.path.startsWith(root.path + '/')).map(repo => ({ name: repo.name, path: repo.path })) }));
           checkBeforeModelSend({ history: previous.history, roots });
-          outcome = await this.run(active, { model: binding.model, prompt: job.prompt, history: previous.history, roots, ...this.conversations.naming(job.conversationId) }, access, signal);
-          if (outcome.reason) throw new ChatGPTError(outcome.reason);
-        });
+          outcome = await this.run(active, { ...(binding.apiKey ? { apiKey: binding.apiKey } : {}), model: binding.model, prompt: job.prompt, history: previous.history, roots, ...this.conversations.naming(job.conversationId) }, access, signal);
+          if (outcome.reason && !binding.apiKey) throw new ChatGPTError(outcome.reason);
+        };
+        if (binding.apiKey) await work((role, bytes) => this.apiSettings!.grant(binding.apiKey!, role!, bytes!, active.controller.signal), active.controller.signal);
+        else await this.chatgpt.conversation(binding, active.controller.signal, work);
         if (this.active !== active || !outcome) return;
         if (outcome.status === 'complete') {
           const identitiesValid = await this.verify(active.evidence, active.controller.signal);
@@ -71,11 +88,12 @@ export class LiveSupervisor {
         this.end(active, outcome);
       } catch (error) {
         if (this.active !== active) return;
-        const message = error instanceof ChatGPTError || error instanceof LiveError ? error.message : 'Conversation failed. Check ChatGPT settings and retry explicitly.';
+        const message = error instanceof ChatGPTError || error instanceof LiveError || error instanceof ApiSettingsError || error instanceof ModelSettingsError ? error.message : 'Conversation failed. Check the pinned connection settings and retry explicitly.';
         this.end(active, { ...(outcome ?? { text: active.text, history: [], requests: active.requests, usageComplete: false }), status: 'failed', history: [], text: (outcome?.text ?? active.text) + '\n\n' + message });
       }
     })();
   }
+  revokeApiAuthority(): void { if (this.active?.apiKey) this.cancel(); }
   retry(messageId: string): void { this.start(null, '', messageId); }
   lifecycle(event: 'window-close' | 'quit' | 'minimize'): void { if (event !== 'minimize') this.cancel(); }
   cancel(): void {
@@ -93,10 +111,10 @@ export class LiveSupervisor {
     }
     return true;
   }
-  private run(active: Active, job: LiveStart, access: () => Promise<string>, signal: AbortSignal): Promise<LiveResult> {
+  private run(active: Active, job: LiveStart, access: (role?: ModelRole, bytes?: number) => Promise<string | ApiGrant>, signal: AbortSignal): Promise<LiveResult> {
     return new Promise(resolve => {
       let worker: LiveWorker | undefined, settled = false, inFlight = false, lastId = 0, sourceCalls = 0, lastUsage = 0;
-      let authority: Promise<string> | undefined;
+      let authority: Promise<string | ApiGrant> | undefined;
       const failure = (status: LiveResult['status'] = 'failed'): LiveResult => ({ status, text: active.text, history: [], requests: active.requests, usageComplete: false });
       const finish = (result: LiveResult) => {
         if (settled) return;
@@ -127,7 +145,7 @@ export class LiveSupervisor {
               if (!message.checkpoint || typeof message.checkpoint !== 'object') throw new Error();
               const checkpoint = message.checkpoint as Pick<LiveResult, 'exploration' | 'title'>;
               if (checkpoint.exploration) {
-                active.exploration = this.exploration(checkpoint.exploration, job.model, active.evidence);
+                active.exploration = this.exploration(checkpoint.exploration, job.apiKey?.investigator.model.id ?? job.model, active.evidence, job.apiKey?.investigator.model.provider);
                 this.conversations.progressExploration(active.messageId, active.exploration, active.evidence);
               }
               if (checkpoint.title !== undefined) {
@@ -160,7 +178,7 @@ export class LiveSupervisor {
             }
             if (message.type === 'result') {
               if (inFlight) throw new Error();
-              const result = this.result(message.result, job.model, active.requests, active.evidence);
+              const result = this.result(message.result, job.model, active.requests, active.evidence, job.apiKey);
               finish(result); return;
             }
             if (!['access', 'source', 'inspect'].includes(String(message.type)) || inFlight || !Number.isSafeInteger(message.id) || Number(message.id) <= lastId) throw new Error();
@@ -169,9 +187,10 @@ export class LiveSupervisor {
               try {
                 if (message.type === 'access') {
                   if (active.requests >= LIVE_LIMITS.requests) { finish(failure('limit')); return; }
-                  authority = access();
-                  const token = await authority;
-                  if (!settled && this.active === active && !signal.aborted) { active.requests++; worker!.postMessage({ type: 'reply', id: lastId, token }); }
+                  if (job.apiKey && (!['conversation', 'investigator'].includes(String(message.role)) || !Number.isSafeInteger(message.contextBytes))) throw new ApiSettingsError('Invalid model role or bounded request.');
+                  authority = access(message.role as ModelRole, message.contextBytes as number);
+                  const credential = await authority;
+                  if (!settled && this.active === active && !signal.aborted) { active.requests++; worker!.postMessage({ type: 'reply', id: lastId, ...(typeof credential === 'string' ? { token: credential } : { grant: credential }) }); }
                 } else if (message.type === 'inspect') {
                   if (++sourceCalls > 1000) { finish(failure('limit')); return; }
                   if (!Array.isArray(message.ids) || !message.ids.length || message.ids.length > INVESTIGATION_LIMITS.inspections || !message.ids.every(id => typeof id === 'string' && active.evidence.some(item => item.id === id))) throw new Error();
@@ -201,7 +220,7 @@ export class LiveSupervisor {
                 }
               } catch (error) {
                 if (settled || this.active !== active) return;
-                if (message.type === 'access') finish({ ...failure(), ...(error instanceof ChatGPTError ? { reason: error.reason } : {}) });
+                if (message.type === 'access') finish({ ...failure(), ...(error instanceof ApiSettingsError || error instanceof ModelSettingsError ? { text: active.text + '\n\n' + error.message } : {}), ...(error instanceof ChatGPTError ? { reason: error.reason } : {}) });
                 else worker!.postMessage({ type: 'reply', id: lastId, error: 'Source request denied by access or secret checks.' });
               } finally { inFlight = false; }
             })();
@@ -211,26 +230,26 @@ export class LiveSupervisor {
       } catch { finish(failure()); }
     });
   }
-  private result(value: unknown, model: string, requests: number, evidence: Evidence[]): LiveResult {
+  private result(value: unknown, model: string, requests: number, evidence: Evidence[], apiKey?: ApiConversationConfig): LiveResult {
     if (!value || typeof value !== 'object') throw new Error();
     const r = value as LiveResult;
     if (!['complete', 'failed', 'cancelled', 'partial', 'limit'].includes(r.status) || typeof r.text !== 'string' || r.text.length > LIVE_LIMITS.answerCharacters || !Array.isArray(r.history) || Buffer.byteLength(JSON.stringify(r.history)) > LIVE_LIMITS.historyBytes) throw new Error();
     for (const message of r.history) {
       if (!message || !['user', 'assistant', 'toolResult'].includes(message.role)) throw new Error();
-      if (message.role === 'assistant' && (message.model !== model || message.provider !== 'openai' || !['stop', 'toolUse'].includes(message.stopReason))) throw new Error();
+      if (message.role === 'assistant' && (message.model !== model || message.provider !== (apiKey?.conversation.model.provider ?? 'openai') || !['stop', 'toolUse'].includes(message.stopReason))) throw new Error();
     }
     // Preserve protocol-only reasoning signatures for replay; never expose history to renderer.
     const history = r.status === 'complete' ? structuredClone(r.history) as PiMessage[] : [];
     const reason = r.reason && Object.hasOwn(CHATGPT_ERRORS, r.reason) ? r.reason : undefined;
     if (r.title !== undefined) this.validateTitle(r.title);
-    const exploration = r.exploration ? this.exploration(r.exploration, model, evidence) : undefined;
+    const exploration = r.exploration ? this.exploration(r.exploration, apiKey?.investigator.model.id ?? model, evidence, apiKey?.investigator.model.provider) : undefined;
     return { status: r.status, text: r.text, history, requests, ...(exploration ? { exploration } : {}), ...(r.title ? { title: r.title } : {}), usageComplete: r.usageComplete === true, ...(parseChatGPTUsage(r.usage) ? { usage: parseChatGPTUsage(r.usage) } : {}), ...(reason ? { reason } : {}) };
   }
   private validateTitle(title: unknown): asserts title is string {
     if (typeof title !== 'string' || !title.trim() || Array.from(title).length > MAX_TITLE_LENGTH || /[\x00-\x1f\x7f]/u.test(title)) throw new Error('Invalid title.');
     checkBeforeModelSend(title);
   }
-  private exploration(value: Exploration, model: string, evidence: Evidence[]): Exploration {
+  private exploration(value: Exploration, model: string, evidence: Evidence[], provider = 'openai'): Exploration {
     const result = value.result;
     if (Buffer.byteLength(JSON.stringify(value)) > LIVE_LIMITS.historyBytes || !Array.isArray(value.history) || !result || !['complete', 'partial'].includes(result.status) ||
         !Array.isArray(result.evidence) || result.evidence.length > INVESTIGATION_LIMITS.references || !validFindings({ findings: result.findings, unresolvedQuestions: result.unresolvedQuestions, candidateKnowledgeChanges: result.candidateKnowledgeChanges }, evidence) ||
@@ -241,7 +260,7 @@ export class LiveSupervisor {
     }
     if (result.findings.some(finding => finding.evidenceIds.some(id => !result.evidence.some(item => item.id === id)))) throw new Error('Missing evidence reference.');
     for (const message of value.history) {
-      if (!message || !['user', 'assistant', 'toolResult'].includes(message.role) || (message.role === 'assistant' && (message.model !== model || message.provider !== 'openai'))) throw new Error('Invalid exploration history.');
+      if (!message || !['user', 'assistant', 'toolResult'].includes(message.role) || (message.role === 'assistant' && (message.model !== model || message.provider !== provider))) throw new Error('Invalid exploration history.');
     }
     checkBeforeModelSend(value);
     return structuredClone(value);

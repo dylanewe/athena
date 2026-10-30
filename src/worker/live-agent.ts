@@ -1,3 +1,5 @@
+import { apiStream } from './api-stream';
+import { requestAllowance, type ApiGrant, type ModelRole } from '../shared/api-models';
 import { Agent, type AgentTool, type StreamFn } from '@earendil-works/pi-agent-core';
 import { createAssistantMessageEventStream, type Message, type AssistantMessage } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
@@ -12,6 +14,7 @@ import type { ChatGPTUsage } from '../shared/chatgpt';
 
 export interface LiveCapabilities {
   access(): Promise<string>;
+  apiAccess?(role: ModelRole, contextBytes: number): Promise<ApiGrant>;
   source(operation: SourceOperation, input: SourceRequest): Promise<SourceResult & { evidence: Evidence[] }>;
   inspect?(ids: string[]): Promise<Evidence[]>;
   progress(text: string, activity: string): void;
@@ -21,7 +24,7 @@ export interface LiveCapabilities {
 
 /** Two isolated Pi contexts; all source and credential authority is brokered by main. */
 export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilities, signal: AbortSignal, http?: typeof fetch): Promise<LiveResult> {
-  let text = '', activity = 'Preparing ChatGPT…', requests = 0, reported = 0, limited = false, usageComplete = true, limitNotice = '';
+  let text = '', activity = job.apiKey ? 'Preparing API-key model…' : 'Preparing ChatGPT…', requests = 0, reported = 0, limited = false, usageComplete = true, limitNotice = '';
   let exploration: Exploration | undefined, title: string | undefined;
   const usage: ChatGPTUsage = { input: 0, output: 0, cachedInput: 0 };
   const observations: StreamObservation[] = [];
@@ -36,7 +39,7 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
   };
   const abort = () => { for (const agent of agents) agent.abort(); };
   signal.addEventListener('abort', abort, { once: true });
-  const streamFn: StreamFn = async (_model, context, options) => {
+  const streamFor = (role: ModelRole): StreamFn => async (_model, context, options) => {
     try {
       signal.throwIfAborted();
       if (limited) throw new Error(limitNotice || 'Job limit reached.');
@@ -47,15 +50,29 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
       }
       // A failure never starts another paid request, including in the other role.
       if (observations.some(observation => observation.failure)) throw new Error('Model request failed. Retry explicitly.');
-      const token = await capabilities.access();
-      signal.throwIfAborted();
-      requests++;
+      const requestSignal = AbortSignal.any([signal, ...(options?.signal ? [options.signal] : [])]);
       const observation: StreamObservation = {}; observations.push(observation);
-      return chatgptStream(job.model, context, token, AbortSignal.any([signal, ...(options?.signal ? [options.signal] : [])]), observation, http);
+      if (job.apiKey) {
+        const bytes = Buffer.byteLength(JSON.stringify(context));
+        if (!capabilities.apiAccess) throw new Error('API-key authority unavailable.');
+        const grant = await capabilities.apiAccess(role, bytes);
+        signal.throwIfAborted(); requests++;
+        const output = apiStream(job.apiKey[role].model, context, grant, requestSignal, requestAllowance(bytes), observation, http);
+        // Observe result without introducing another consumer of the event iterator.
+        void output.result().then(result => {
+          if (!['stop', 'toolUse'].includes(result.stopReason)) observation.failure = 'unavailable';
+        }, () => { observation.failure = 'unavailable'; });
+        return output;
+      }
+      const token = await capabilities.access();
+      signal.throwIfAborted(); requests++;
+      return chatgptStream(job.model, context, token, requestSignal, observation, http);
     } catch {
+      if (job.apiKey && !limited && observations.length) observations.at(-1)!.failure = 'unavailable';
       // Agent's stream contract encodes preparation failures as protocol events.
       const output = createAssistantMessageEventStream();
-      const error: AssistantMessage = { role: 'assistant', content: [], api: 'openai-responses', provider: 'openai', model: job.model,
+      const selectedModel = job.apiKey?.[role].model;
+      const error: AssistantMessage = { role: 'assistant', content: [], api: selectedModel?.api ?? 'openai-responses', provider: selectedModel?.provider ?? 'openai', model: selectedModel?.id ?? job.model,
         stopReason: signal.aborted ? 'aborted' : 'error', errorMessage: 'Athena stopped this request. Retry explicitly.', timestamp: Date.now(),
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
       output.push({ type: 'error', reason: error.stopReason as 'error' | 'aborted', error }); output.end();
@@ -64,8 +81,8 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
   };
   const createAgent = (role: 'main' | 'investigator', tools: AgentTool[], systemPrompt: string, history: Message[] = []) => {
     const agent = new Agent({
-      initialState: { model: chatgptModel(job.model), tools, systemPrompt, messages: history.filter(message => message.role !== 'system') },
-      toolExecution: 'sequential', identity: { userAgent: { custom: 'Athena/0.1' }, attribution: null }, streamFn,
+      initialState: { model: job.apiKey?.[role === 'main' ? 'conversation' : 'investigator'].model ?? chatgptModel(job.model), tools, systemPrompt, messages: history.filter(message => message.role !== 'system') },
+      toolExecution: 'sequential', identity: { userAgent: { custom: 'Athena/0.1' }, attribution: null }, streamFn: streamFor(role === 'main' ? 'conversation' : 'investigator'),
     });
     agents.add(agent);
     agent.subscribe(event => {
@@ -81,7 +98,7 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
       if (event.type === 'message_update' && event.assistantMessageEvent.type === 'text_delta' && role === 'main') {
         text += event.assistantMessageEvent.delta;
         if (text.length > LIVE_LIMITS.answerCharacters) { text = text.slice(0, LIVE_LIMITS.answerCharacters); limited = true; abort(); }
-        activity = 'Receiving ChatGPT response…'; progress();
+        activity = job.apiKey ? 'Receiving API-key response…' : 'Receiving ChatGPT response…'; progress();
       } else if (event.type === 'tool_execution_start') {
         activity = role === 'investigator' ? `Investigator: ${event.toolName}` : `Athena: ${event.toolName}`;
         if (role === 'main' && text && !text.endsWith('\n\n')) text += '\n\n';

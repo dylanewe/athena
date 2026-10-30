@@ -1,3 +1,4 @@
+import type { ApiSettingsBridge } from './api-models';
 import type { InventoryBridge } from './inventory';
 import type { ModelBridge } from './models';
 import type { SourceBridge } from './sources';
@@ -26,7 +27,7 @@ export interface Message {
 export interface ConversationSummary {
   id: string;
   title: string;
-  kind?: 'demo' | 'chatgpt';
+  kind?: 'demo' | 'chatgpt' | 'api-key';
   model?: string;
 }
 export interface Conversation extends ConversationSummary {
@@ -43,6 +44,7 @@ export interface DemoJob {
   text: string;
 }
 export interface DesktopBridge {
+  apiModels: ApiSettingsBridge;
   chatgpt: ChatGPTBridge;
   sources: SourceBridge;
   inventory: InventoryBridge;

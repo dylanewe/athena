@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { ApiSettingsSnapshot } from './shared/api-models';
 import type { ChatGPTSnapshot } from './shared/chatgpt';
 import type { SourceResult, SourceException } from './shared/sources';
 import type { InventoryWorkspace } from './shared/inventory';
@@ -35,7 +36,23 @@ async function chatgptRequest(operation: string, payload?: unknown): Promise<Cha
   return reply.result;
 }
 
+async function apiModelRequest(operation: string, payload?: unknown): Promise<ApiSettingsSnapshot> {
+  const reply = await ipcRenderer.invoke('athena:api-models', operation, payload);
+  if (!reply.ok) throw new Error(reply.error);
+  return reply.result;
+}
+
 const bridge: DesktopBridge = {
+  apiModels: {
+    snapshot: () => apiModelRequest('snapshot'),
+    configure: json => apiModelRequest('configure', { json }),
+    importModels: () => apiModelRequest('importModels'),
+    select: (route, conversation, investigator) => apiModelRequest('select', { route, conversation, investigator }),
+    credential: (provider, key) => apiModelRequest('credential', { provider, key }),
+    revokeCredential: provider => apiModelRequest('revokeCredential', { provider }),
+    approveDestination: (id, approved) => apiModelRequest('approveDestination', { id, approved }),
+    approveHelper: (id, approved) => apiModelRequest('approveHelper', { id, approved }),
+  },
   chatgpt: {
     snapshot: () => chatgptRequest('snapshot'),
     connect: () => chatgptRequest('connect'),

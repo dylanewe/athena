@@ -9,6 +9,10 @@ import { Inventory } from './inventory';
 import { InventoryGateway } from './inventory-bridge';
 import { ModelSettings, ModelSettingsError } from './model-settings';
 import { ModelGateway } from './model-bridge';
+import { ApiSettings } from './api-settings';
+import { ApiModelGateway } from './api-model-bridge';
+import { ApiSettingsError } from './pi-model-config';
+import { runCredentialHelper } from './api-credentials';
 import { ConnectionProcess } from './connection-process';
 import { Sources } from './sources';
 import { SourceGateway } from './source-bridge';
@@ -36,6 +40,8 @@ let inventory: Inventory | undefined;
 let inventoryGateway: InventoryGateway | undefined;
 let modelSettings: ModelSettings | undefined;
 let modelGateway: ModelGateway | undefined;
+let apiSettings: ApiSettings | undefined;
+let apiGateway: ApiModelGateway | undefined;
 let sources: Sources | undefined;
 let sourceGateway: SourceGateway | undefined;
 let chatgpt: ChatGPTSettings | undefined;
@@ -78,6 +84,11 @@ function createWindow() {
     return result.canceled ? undefined : result.filePaths[0];
   });
   modelGateway = new ModelGateway(modelSettings!, { webContentsId: window.webContents.id, url: documentURL });
+  apiGateway = new ApiModelGateway(apiSettings!, { webContentsId: window.webContents.id, url: documentURL }, async () => {
+    if (!window || window.isDestroyed()) return;
+    const result = await dialog.showOpenDialog(window, { title: 'Import a trusted Pi models.json only (no auth, settings, or extensions)', properties: ['openFile'], filters: [{ name: 'Pi models configuration', extensions: ['json'] }] });
+    return result.canceled ? undefined : result.filePaths[0];
+  }, () => jobs?.revokeApiAuthority(), () => inventory!.snapshot().roots.map(root => root.path));
   sourceGateway = new SourceGateway(sources!, { webContentsId: window.webContents.id, url: documentURL });
   chatgptGateway = new ChatGPTGateway(chatgpt!, { webContentsId: window.webContents.id, url: documentURL }, url => shell.openExternal(url), () => jobs?.cancel());
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -86,7 +97,7 @@ function createWindow() {
   window.webContents.on('render-process-gone', () => { jobs?.cancel(); inventory?.cancel(); modelSettings?.cancel(); sourceGateway?.cancel(); chatgpt?.cancel(); });
   window.on('minimize', () => jobs?.lifecycle('minimize'));
   window.on('close', () => { jobs?.lifecycle('window-close'); inventory?.cancel(); modelSettings?.cancel(); sourceGateway?.cancel(); chatgpt?.cancel(); });
-  window.on('closed', () => { gateway = undefined; inventoryGateway = undefined; modelGateway = undefined; sourceGateway = undefined; chatgptGateway = undefined; window = undefined; });
+  window.on('closed', () => { gateway = undefined; inventoryGateway = undefined; modelGateway = undefined; apiGateway = undefined; sourceGateway = undefined; chatgptGateway = undefined; window = undefined; });
   void window.loadURL(documentURL);
 }
 
@@ -109,7 +120,7 @@ if (!app.requestSingleInstanceLock()) {
     }
   });
   app.on('window-all-closed', () => app.quit());
-  app.on('will-quit', () => { conversations?.close(); inventory?.close(); modelSettings?.close(); sources?.close(); });
+  app.on('will-quit', () => { conversations?.close(); inventory?.close(); modelSettings?.close(); apiSettings?.close(); sources?.close(); });
   void app.whenReady().then(() => {
     const stateDirectory = join(app.getPath('userData'), 'state');
     mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
@@ -133,6 +144,13 @@ if (!app.requestSingleInstanceLock()) {
       serviceName: 'Athena connection test', env: {}, stdio: 'ignore', cwd: stateDirectory,
     })), notify);
     chmodSync(modelDatabase, 0o600);
+    const apiDatabase = join(stateDirectory, 'api-models.sqlite');
+    apiSettings = new ApiSettings(apiDatabase, {
+      available: () => process.platform === 'darwin' && safeStorage.isEncryptionAvailable(),
+      encrypt: value => safeStorage.encryptString(value),
+      decrypt: bytes => safeStorage.decryptString(Buffer.from(bytes)),
+    }, runCredentialHelper(stateDirectory, { ...process.env }), { ...process.env }, amount => modelSettings!.reservePaidRequest(amount), notify);
+    chmodSync(apiDatabase, 0o600);
     chatgpt = new ChatGPTSettings(new ChatGPTStore(join(stateDirectory, 'chatgpt.sqlite'), {
       available: () => process.platform === 'darwin' && safeStorage.isEncryptionAvailable(),
       encrypt: value => safeStorage.encryptString(value),
@@ -142,7 +160,16 @@ if (!app.requestSingleInstanceLock()) {
     })), notify);
     jobs = new LiveSupervisor(conversations, chatgpt, sources, inventory, () => utilityProcess.fork(join(output, 'live.js'), [], {
       serviceName: 'Athena ChatGPT conversation', env: {}, stdio: 'ignore', cwd: stateDirectory,
-    }), notify);
+    }), notify, apiSettings);
+    ipcMain.handle('athena:api-models', async (event, operation: unknown, payload: unknown) => {
+      try {
+        if (!apiGateway || quitting) throw new Error();
+        const result = await apiGateway.dispatch({ webContentsId: event.sender.id, isMainFrame: event.senderFrame === event.sender.mainFrame, url: event.senderFrame?.url ?? '' }, operation, payload);
+        return { ok: true, result };
+      } catch (error) {
+        return { ok: false, error: error instanceof ApiSettingsError ? error.message : 'API-key settings action rejected. Check the configuration, protected storage, and selected models.' };
+      }
+    });
     ipcMain.handle('athena:chatgpt', async (event, operation: unknown, payload: unknown) => {
       try {
         if (!chatgptGateway || quitting) throw new Error();
@@ -177,7 +204,7 @@ if (!app.requestSingleInstanceLock()) {
         return { ok: true, workspace };
       } catch (error) {
         // Only application-authored errors, never SQL/native/provider exceptions.
-        return { ok: false, error: error instanceof LiveError || error instanceof ChatGPTError ? error.message : 'Request rejected. Select a conversation and try again.' };
+        return { ok: false, error: error instanceof LiveError || error instanceof ChatGPTError || error instanceof ApiSettingsError || error instanceof ModelSettingsError ? error.message : 'Request rejected. Select a conversation and try again.' };
       }
     });
     ipcMain.handle('athena:inventory', async (event, operation: unknown, payload: unknown) => {

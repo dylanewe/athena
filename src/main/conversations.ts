@@ -42,7 +42,7 @@ export class Conversations {
     );
     UPDATE messages SET status = 'cancelled', text = CASE
       WHEN id IN (SELECT message_id FROM live_attempts)
-      THEN text || char(10) || char(10) || 'ChatGPT conversation interrupted. Retry explicitly when ready.'
+      THEN text || char(10) || char(10) || 'Conversation interrupted. Retry explicitly when ready.'
       ELSE 'Demonstration interrupted. Send another message to try again.' END
       WHERE status = 'running';
     UPDATE live_attempts SET result = json_set(json_remove(result, '$.activity'), '$.status', 'cancelled', '$.usageComplete', json('false'))
@@ -56,7 +56,7 @@ export class Conversations {
 
   workspace(): Workspace {
     const conversations = this.db.prepare('SELECT id, title, binding FROM conversations ORDER BY rowid').all().map(row => ({
-      id: String(row.id), title: String(row.title), ...(row.binding ? { kind: 'chatgpt' as const, model: (JSON.parse(String(row.binding)) as ConversationBinding).model } : {}),
+      id: String(row.id), title: String(row.title), ...(row.binding ? { kind: (JSON.parse(String(row.binding)) as ConversationBinding).apiKey ? 'api-key' as const : 'chatgpt' as const, model: (JSON.parse(String(row.binding)) as ConversationBinding).model } : {}),
     })) as ConversationSummary[];
     const selectedId = this.db.prepare("SELECT value FROM settings WHERE key = 'selected'").get()?.value;
     const summary = conversations.find(conversation => conversation.id === selectedId);

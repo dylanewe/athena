@@ -1,5 +1,7 @@
 # DeepSeek connection configuration
 
+This document describes the unchanged fixed connection test. #6 adds independent [Pi-compatible API-key conversations](api-key-models.md), endpoint-bound approval, role configuration pinning, explicit import and credential helpers. Its paid requests share the persistent $1 gate below; the old test permission does not transfer to the new route.
+
 Athena owns its configuration in `src/main/deepseek-model.ts`, using Pi's `Model<'openai-completions'>` conventions. Its initial provider/model metadata is copied into the local `models.sqlite` on first launch and retained, not refreshed from Pi's catalog. No Pi auth files, repository credentials, shell keys, OAuth, subscriptions, or local endpoints are imported. Only `deepseek` / `deepseek-flash` / `openai-completions` is supported in this slice; incompatible saved configuration is rejected, never silently switched.
 
 ## Verified metadata — 2026-10-29

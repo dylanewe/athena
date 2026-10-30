@@ -21,7 +21,7 @@
   const draftKey = $derived(selected?.id ?? 'new');
   const active = $derived(workspace?.activeConversationId);
   const conversationUsage = $derived.by(() => {
-    if (selected?.kind !== 'chatgpt') return null;
+    if (!selected?.kind || selected.kind === 'demo') return null;
     const replies = selected.messages.filter(message => message.role === 'assistant');
     if (!replies.some(message => message.requests !== undefined)) return null;
     return {
@@ -39,8 +39,8 @@
     if (busy) return;
     const number = ++requestNumber;
     try {
-      const [next, settings] = await Promise.all([window.athena.workspace(), window.athena.chatgpt.snapshot()]);
-      if (number === requestNumber) { workspace = next; defaultModel = settings.selectedModel; }
+      const [next, settings, api] = await Promise.all([window.athena.workspace(), window.athena.chatgpt.snapshot(), window.athena.apiModels.snapshot()]);
+      if (number === requestNumber) { workspace = next; defaultModel = api.route === 'api-key' ? 'API key · ' + api.conversation : settings.selectedModel; }
     } catch { error = 'Could not load conversations. Restart Athena to try again.'; }
   }
 
@@ -124,7 +124,7 @@
         </button>
       {/each}
     </nav>
-    <div class="local-note"><span class="eyebrow">On this Mac</span><p>History is saved here.<br />Live questions go to ChatGPT.</p></div>
+    <div class="local-note"><span class="eyebrow">On this Mac</span><p>History is saved here.<br />Live questions use the pinned route.</p></div>
   </aside>
 
   {#if section === 'inventory'}
@@ -144,7 +144,7 @@
             {#each selected.messages as message (message.id)}
               <article class:user={message.role === 'user'} class="message">
                 <div class="message-heading"><strong>{message.role === 'user' ? 'You' : 'Athena'}</strong>
-                  {#if message.role === 'assistant'}<span class:problem={!['running', 'complete'].includes(message.status)}>{message.status === 'running' && workspace.saveError ? 'Not saved' : message.status === 'complete' && selected.kind !== 'chatgpt' ? 'Local demo' : message.status === 'limit' ? 'limit-paused' : message.status}</span>{/if}
+                  {#if message.role === 'assistant'}<span class:problem={!['running', 'complete'].includes(message.status)}>{message.status === 'running' && workspace.saveError ? 'Not saved' : message.status === 'complete' && !selected.model ? 'Local demo' : message.status === 'limit' ? 'limit-paused' : message.status}</span>{/if}
                 </div>
                 <p>{message.text}</p>
                 {#if message.status === 'running' && message.activity}<p class="draft-note">{message.activity}</p>{/if}
@@ -189,21 +189,21 @@
         <section class="chat-input" class:unsent={!selected} aria-label="Conversation composer">
           <div class="composer-heading">
             <div><div class="eyebrow">{selected ? 'Conversation' : 'Start with a question'}</div><h1>{selected?.title ?? 'New conversation'}</h1></div>
-            <span class="demo-badge">{selected && selected.kind !== 'chatgpt' ? 'Local demo · Read-only' : selected?.model ?? defaultModel ?? 'ChatGPT · Select a model'}</span>
+            <span class="demo-badge">{selected && !selected.model ? 'Local demo · Read-only' : selected?.model ?? defaultModel ?? 'ChatGPT · Select a model'}</span>
           </div>
           {#if !selected}<p class="draft-note">Send your first message to save this conversation. The selected model will suggest its title; a local title is kept if naming fails.</p>{/if}
-          {#if selected && selected.kind !== 'chatgpt'}<p class="draft-note">This saved demonstration is read-only. Start a new conversation to use ChatGPT.</p>{/if}
+          {#if selected && !selected.model}<p class="draft-note">This saved demonstration is read-only. Start a new conversation to use a configured provider.</p>{/if}
           <form class="composer" onsubmit={(event) => { event.preventDefault(); void send(); }}>
             <label for="message">Message</label>
             <textarea id="message" bind:this={messageInput} bind:value={drafts[draftKey]} maxlength={MAX_MESSAGE_LENGTH} rows="3"
-              disabled={busy || (!!selected && selected.kind !== 'chatgpt')} placeholder="Ask a question or investigate your repositories…"
+              disabled={busy || (!!selected && !selected.model)} placeholder="Ask a question or investigate your repositories…"
               onkeydown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); } }}></textarea>
             <div class="composer-actions">
               <span>{workspace.saveError ? 'Stopped · Result not saved' : active ? 'Working · 50 requests / 15 minutes maximum' : selected ? 'Saved locally' : 'Unsent'}</span>
               {#if active}
                 <button type="button" disabled={busy} onclick={() => change(() => window.athena.cancel())}>{workspace.saveError ? 'Retry saving' : 'Stop'}</button>
               {:else}
-                <button class="primary" aria-label="Send message" disabled={busy || (!!selected && selected.kind !== 'chatgpt') || !(drafts[draftKey] ?? '').trim()}>Send <span aria-hidden="true">↗</span></button>
+                <button class="primary" aria-label="Send message" disabled={busy || (!!selected && !selected.model) || !(drafts[draftKey] ?? '').trim()}>Send <span aria-hidden="true">↗</span></button>
               {/if}
             </div>
           </form>

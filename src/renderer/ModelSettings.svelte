@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import ChatGPTSettings from './ChatGPTSettings.svelte';
+  import ApiModelSettings from './ApiModelSettings.svelte';
   import { CONNECTION_MAX_TOKENS, CONNECTION_PROMPT, CONNECTION_TIMEOUT_MS, PROVIDER_CONSENT, type ModelWorkspace } from '../shared/models';
 
   let settings = $state<ModelWorkspace | null>(null);
@@ -51,7 +52,7 @@
     <span class="demo-badge">No automatic requests</span>
   </header>
   <div class="settings-content">
-    <p class="intro">Choose when Athena contacts a model. Conversations still use the local demonstration; connection testing never includes repository material.</p>
+    <p class="intro">Choose when Athena contacts a model. Route and role selections for new conversations are independent of the fixed DeepSeek connection test below. Connection testing never includes repository material.</p>
     {#if error}<div class="settings-error" role="alert">{error}</div>{/if}
     {#if settings}
       <section aria-label="Selected model">
@@ -133,7 +134,7 @@
 
       <section aria-label="Provider permission">
         <h2>Repository provider permission</h2>
-        <p>A successful connection test does not approve repository uploads. Provider approval is separate from folder, environment, secret, and paid-work permissions. No repository sending is implemented in this slice.</p>
+        <p>A successful connection test does not approve repository uploads. Provider approval is separate from folder, environment, secret, and paid-work permissions. This legacy DeepSeek test permission does not authorize the API-key conversation route; approve its exact endpoint below.</p>
         {#if settings.providerConsent}
           <p>{settings.providerConsent.text}</p>
           <p class="meta">Approved {new Date(settings.providerConsent.acceptedAt).toLocaleString()}</p>
@@ -147,6 +148,7 @@
     {:else}
       <p class="meta">Loading model settings…</p>
     {/if}
+    <ApiModelSettings />
     <ChatGPTSettings />
   </div>
 </main>

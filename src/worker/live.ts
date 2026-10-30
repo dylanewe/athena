@@ -18,6 +18,7 @@ parent.on('message', ({ data }: { data: LiveParentMessage }) => {
   started = true;
   void runLiveAgent(data.job, {
     access: async () => { const reply = await rpc({ type: 'access' }); if (!reply.token) throw new Error(); return reply.token; },
+    apiAccess: async (role, contextBytes) => { const reply = await rpc({ type: 'access', role, contextBytes }); if (!reply.grant) throw new Error(); return reply.grant; },
     source: async (operation, input) => { const reply = await rpc({ type: 'source', operation, input }); if (!reply.source) throw new Error(); return reply.source; },
     inspect: async ids => { const reply = await rpc({ type: 'inspect', ids }); if (!reply.evidence) throw new Error(); return reply.evidence; },
     progress: (text, activity) => parent.postMessage({ type: 'progress', text, activity }),

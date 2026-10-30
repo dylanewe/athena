@@ -167,7 +167,7 @@ test('read-only investigation uses global folder consent, renders evidence and b
 });
 
 test('renderer stays sandboxed with narrow bridge and rejects malformed retry requests', async () => {
-  expect(await page.evaluate(() => ({ node: typeof (globalThis as Record<string, unknown>).process, require: typeof (globalThis as Record<string, unknown>).require, bridge: Object.keys(window.athena).sort() }))).toEqual({ node: 'undefined', require: 'undefined', bridge: ['cancel','chatgpt','inventory','models','onChange','retry','select','send','sources','workspace'] });
+  expect(await page.evaluate(() => ({ node: typeof (globalThis as Record<string, unknown>).process, require: typeof (globalThis as Record<string, unknown>).require, bridge: Object.keys(window.athena).sort() }))).toEqual({ node: 'undefined', require: 'undefined', bridge: ['apiModels','cancel','chatgpt','inventory','models','onChange','retry','select','send','sources','workspace'] });
   expect(await application.evaluate(({ app, BrowserWindow }) => app.getAppMetrics().find(metric => metric.pid === BrowserWindow.getAllWindows()[0].webContents.getOSProcessId())?.sandboxed)).toBe(true);
   for (const url of ['https://example.com', 'file:///etc/hosts']) expect(await page.evaluate(async url => { try { await fetch(url); return 'accessible'; } catch { return 'denied'; } }, url)).toBe('denied');
   expect(await page.evaluate(async () => { try { await window.athena.retry('arbitrary-path'); return 'accepted'; } catch { return 'rejected'; } })).toBe('rejected');
@@ -182,7 +182,7 @@ test('another real renderer cannot use owner-only conversation, source, or crede
   });
   const outsider = await second;
   expect(await outsider.evaluate(async () => {
-    const results = await Promise.allSettled([window.athena.workspace(), window.athena.send(null, 'attack'), window.athena.retry('00000000-0000-4000-8000-000000000000'), window.athena.chatgpt.snapshot(), window.athena.chatgpt.connect(), window.athena.inventory.chooseFolder(), window.athena.models.test(), window.athena.sources.run('read', { root: '/', path: 'etc/hosts' })]);
+    const results = await Promise.allSettled([window.athena.workspace(), window.athena.send(null, 'attack'), window.athena.retry('00000000-0000-4000-8000-000000000000'), window.athena.chatgpt.snapshot(), window.athena.chatgpt.connect(), window.athena.inventory.chooseFolder(), window.athena.models.test(), window.athena.apiModels.snapshot(), window.athena.apiModels.credential('deepseek', 'fake-attack-key'), window.athena.apiModels.importModels(), window.athena.sources.run('read', { root: '/', path: 'etc/hosts' })]);
     return results.every(result => result.status === 'rejected');
   })).toBe(true);
 });
