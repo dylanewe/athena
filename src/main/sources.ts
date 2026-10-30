@@ -11,6 +11,7 @@ import { SOURCE_LIMITS as L, SOURCE_WARNING, type SourceCitation, type SourceEnt
 
 const skipped = new Set(['node_modules', 'vendor', 'vendors', 'bower_components', 'dist', 'build', 'out', 'target', 'coverage', '__pycache__', 'venv', 'env', 'pods', 'carthage']);
 const generated = /(?:\.min\.(?:js|css)|\.map|\.lock|\.generated\.[^.]+|\.g\.[^.]+|^package-lock\.json|^npm-shrinkwrap\.json|^pnpm-lock\.yaml)$/i;
+const credentialFormat = /\.(?:pem|key|p12|pfx|keystore|jks|tfstate|tfvars)$/i;
 const binary = /\.(?:pdf|png|jpe?g|gif|webp|ico|bmp|heic|svgz|zip|gz|tar|7z|rar|exe|dll|so|dylib|o|a|class|jar|wasm|woff2?|ttf|mp[34]|mov|sqlite3?|db|pyc)$/i;
 const within = (root: string, path: string) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
 class Denied extends Error { constructor(readonly reason: string, readonly overridable = false, readonly environment = false) { super(reason); } }
@@ -24,7 +25,7 @@ function protectedName(path: string): boolean {
   const parts = path.toLowerCase().split('/');
   if (parts.some(part => ['.git', '.ssh', '.aws', '.gnupg', '.kube', '.azure'].includes(part))) return true;
   // Examples are recognizable by filename, never by an instruction inside the file.
-  if (parts.some(name => /^(?:\.env(?:[._-].*)?|\.envrc(?:[._-].*)?|\.npmrc|\.yarnrc(?:\.yml)?|\.pypirc|\.netrc|_netrc|\.git-credentials|\.gitconfig|\.credentials|\.s3cfg|\.boto|\.dockercfg|\.htpasswd|\.pgpass|\.my\.cnf|service[-_]?account(?:[-_]?key)?\.json|credentials(?:[._-].*)?|secrets?(?:[._-].*)?|id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?|.*\.(?:pem|key|p12|pfx|keystore|jks|tfstate|tfvars))$/.test(name) && !environmentExample(name))) return true;
+  if (parts.some(name => (/^(?:\.env(?:[._-].*)?|\.envrc(?:[._-].*)?|\.npmrc|\.yarnrc(?:\.yml)?|\.pypirc|\.netrc|_netrc|\.git-credentials|\.gitconfig|\.credentials|\.s3cfg|\.boto|\.dockercfg|\.htpasswd|\.pgpass|\.my\.cnf|service[-_]?account(?:[-_]?key)?\.json|credentials(?:[._-].*)?|secrets?(?:[._-].*)?|id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?)$/.test(name) || credentialFormat.test(name)) && !environmentExample(name))) return true;
   return parts.includes('.docker') && parts.at(-1) === 'config.json';
 }
 function environmentExample(name: string): boolean {
@@ -37,7 +38,7 @@ interface Budget {
 interface Access { absolute: string; directory: boolean; owner: string | null }
 export interface EnvironmentAccess { root: string; path: string; valid(): boolean }
 function actualEnvironment(path: string): boolean {
-  return /^(?:\.env|\.envrc)(?:[._-].*)?$/i.test(basename(path)) && !environmentExample(basename(path));
+  return /^(?:\.env|\.envrc)(?:[._-].*)?$/i.test(basename(path)) && !environmentExample(basename(path)) && !credentialFormat.test(path);
 }
 
 /** Shared UI/tool boundary. Never executes Git, repository code, generators, or network operations. */

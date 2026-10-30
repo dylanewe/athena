@@ -19,6 +19,17 @@ async function newConversation() {
 }
 async function send(text: string) { await page.getByLabel('Message', { exact: true }).fill(text); await page.getByRole('button', { name: 'Send message' }).click(); }
 async function answered() { await expect(page.getByRole('log').getByText('Fixture response.', { exact: true }).last()).toBeVisible(); await expect.poll(() => page.evaluate(async () => (await window.athena.workspace()).activeConversationId)).toBeNull(); }
+async function investigateEnvironment(question: string, canary: string) {
+  const root = join(directory, 'repo'); mkdirSync(root); writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);
+  await installLiveFixture(application, directory, root, true);
+  await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] }); }, root);
+  await page.evaluate(() => window.athena.inventory.chooseFolder());
+  await page.getByRole('button', { name: 'Repositories', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'I understand the folder permission' }).check();
+  await page.getByRole('button', { name: 'Save consent and discover' }).click();
+  await expect.poll(() => page.evaluate(async () => (await window.athena.inventory.snapshot()).discovery.status)).not.toBe('running');
+  await newConversation(); await send(question);
+}
 async function pauseNextWorker() {
   await application.evaluate(({ utilityProcess }) => {
     const fork = utilityProcess.fork;
@@ -168,18 +179,10 @@ test('read-only investigation uses global folder consent, renders evidence and b
 
 test('environment permission UI separates local preview from outbound access and seals ephemeral output across restart', async () => {
   const canary = 'synthetic-desktop-env-7';
-  const root = join(directory, 'repo'); mkdirSync(root); writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);
   let logs = '';
   application.process().stdout?.on('data', chunk => { logs += String(chunk); });
   application.process().stderr?.on('data', chunk => { logs += String(chunk); });
-  await installLiveFixture(application, directory, root, true);
-  await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] }); }, root);
-  await page.evaluate(() => window.athena.inventory.chooseFolder());
-  await page.getByRole('button', { name: 'Repositories', exact: true }).click();
-  await page.getByRole('checkbox', { name: 'I understand the folder permission' }).check();
-  await page.getByRole('button', { name: 'Save consent and discover' }).click();
-  await expect.poll(() => page.evaluate(async () => (await window.athena.inventory.snapshot()).discovery.status)).not.toBe('running');
-  await newConversation(); await send('Inspect actual environment');
+  await investigateEnvironment('Inspect actual environment', canary);
   await expect(page.getByRole('region', { name: 'Environment-file permissions' })).toBeVisible();
   expect((await page.textContent('body'))?.includes(canary)).toBe(false);
   await page.getByRole('button', { name: 'Approve local inspection' }).click();
@@ -201,15 +204,7 @@ test('environment permission UI separates local preview from outbound access and
 
 test('local preview can be revoked from the UI without external permission and expires on restart', async () => {
   const canary = 'synthetic-desktop-env-7';
-  const root = join(directory, 'repo'); mkdirSync(root); writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);
-  await installLiveFixture(application, directory, root, true);
-  await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] }); }, root);
-  await page.evaluate(() => window.athena.inventory.chooseFolder());
-  await page.getByRole('button', { name: 'Repositories', exact: true }).click();
-  await page.getByRole('checkbox', { name: 'I understand the folder permission' }).check();
-  await page.getByRole('button', { name: 'Save consent and discover' }).click();
-  await expect.poll(() => page.evaluate(async () => (await window.athena.inventory.snapshot()).discovery.status)).not.toBe('running');
-  await newConversation(); await send('Inspect environment locally');
+  await investigateEnvironment('Inspect environment locally', canary);
   await page.getByRole('button', { name: 'Approve local inspection' }).click();
   await expect(page.getByLabel('Ephemeral local preview')).toContainText(canary);
   const permissionId = await page.evaluate(async () => (await window.athena.workspace()).environment![0].id);

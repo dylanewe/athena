@@ -113,8 +113,9 @@ test('approved environment access cannot escape or survive revocation during a p
   const canary = 'synthetic-revoked-open-7';
   await file('.env', 'PASSWORD=' + canary);
   await file('.aws/.env', 'PASSWORD=' + canary);
+  for (const path of ['.env.pem', '.env.key', '.env.tfstate', '.envrc.p12']) await file(path, 'PASSWORD=' + canary);
   const permission = { root, path: '.env', valid: () => true };
-  for (const path of ['../.env', '.aws/.env', '.git/.env']) {
+  for (const path of ['../.env', '.aws/.env', '.git/.env', '.env.pem', '.env.key', '.env.tfstate', '.envrc.p12']) {
     const result = await sources.run('read', { root, path }, undefined, { ...permission, path }).catch(() => null);
     expect(result?.entries.some(entry => entry.text?.includes(canary))).not.toBe(true);
     expect(result?.entries.some(entry => entry.environment)).not.toBe(true);
