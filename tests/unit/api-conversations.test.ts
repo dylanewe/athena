@@ -112,7 +112,7 @@ test('provider failure does not retry, fall back, or start another role request'
   expect(JSON.stringify(conversations.workspace())).not.toContain('secret raw provider error');
 });
 
-test('rechecks folder/secret boundaries and denies budget failures without HTTP', async () => {
+test('rechecks folder/secret boundaries and withholds protected environment files from HTTP', async () => {
   writeFileSync(join(root, '.env'), 'SECRET_KEY=never-send');
   scripts = [response(undefined, 'investigate', { question: 'Read source' }), response(undefined, 'sources_read', { root, path: '.env' }), response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: ['File withheld'], candidateKnowledgeChanges: [] }), response('File withheld.')];
   supervisor.start(null, 'Read source'); await idle();

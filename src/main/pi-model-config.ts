@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { Type, type Static, type TSchema } from 'typebox';
 import { Compile } from 'typebox/compile';
 import { parse, type ParseError } from 'jsonc-parser';
@@ -110,7 +111,11 @@ export function parseModelConfig(json: string): ConfiguredModel[] {
 export function endpoint(value: string): string {
   let url: URL;
   try { url = new URL(value); } catch { throw new ApiSettingsError('Models require an explicit HTTPS endpoint.'); }
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || !url.hostname.includes('.') || /^(localhost|127\.|0\.|\[|.*\.local$)/u.test(url.hostname)) throw new ApiSettingsError('Only hosted HTTPS API-key endpoints without credentials, query, or fragment are supported.');
+  const host = url.hostname;
+  const octets = isIP(host) === 4 ? host.split('.').map(Number) : [];
+  const [a = -1, b = -1, c = -1] = octets;
+  const privateIp = octets.length > 0 && (a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 168 || (b === 0 && (c === 0 || c === 2)))) || (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) || (a === 203 && b === 0 && c === 113));
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || !host.includes('.') || privateIp || /^(localhost|.*\.localhost$|\[|.*\.local$)/u.test(host)) throw new ApiSettingsError('Only hosted HTTPS API-key endpoints without credentials, query, or fragment are supported.');
   return url.href.replace(/\/$/u, '');
 }
 function validateModel(model: Model<Api>): void {
@@ -120,8 +125,8 @@ function validateModel(model: Model<Api>): void {
   if (!rates || rates.some(rate => [rate.input, rate.output, rate.cacheRead, rate.cacheWrite].some(n => !Number.isFinite(n) || n < 0))) throw new ApiSettingsError('Every model needs complete non-negative pricing, including cache rates, for the enabled $1 gate.');
   if (model.cost.tiers?.some(tier => !Number.isSafeInteger(tier.inputTokensAbove) || tier.inputTokensAbove < 0)) throw new ApiSettingsError('Pricing tiers require non-negative integer token thresholds.');
   // Sampling is free-form in Pi, but cannot override Athena authority, caps or routing.
-  const forbidden = /^(model|messages|input|tools|tool_choice|max_tokens|max_completion_tokens|max_output_tokens|stream|store|reasoning|service_tier|extra_body|provider|route|models)$/iu;
-  for (const params of [model.samplingParams, ...Object.values(model.samplingParamsByThinkingLevel ?? {})]) if (params && Object.keys(params).some(key => forbidden.test(key))) throw new ApiSettingsError('Sampling defaults cannot override Athena routing, tools, or paid-work limits.');
+  const forbidden = /^(model|messages|input|tools|tool_choice|max_tokens|max_completion_tokens|max_output_tokens|stream|store|reasoning|service_tier|extra_body|provider|route|models|n|best_of|num_generations|num_return_sequences|candidate_count)$/iu;
+  for (const params of [model.samplingParams, ...Object.values(model.samplingParamsByThinkingLevel ?? {})]) if (params && Object.keys(params).some(key => forbidden.test(key))) throw new ApiSettingsError('Sampling defaults cannot override Athena routing, tools, completion multiplicity, or paid-work limits.');
   const compat = model.compat as Record<string, unknown> | undefined;
   if (compat?.supportsMaxOutputTokens === false) throw new ApiSettingsError('This endpoint cannot enforce the required paid-request output cap.');
   if (compat?.supportsTools === false || compat?.supportsToolChoice === false) throw new ApiSettingsError('Agent models must support tool calling.');

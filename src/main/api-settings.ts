@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { API_OUTPUT_TOKENS, requestAllowance, type ApiConversationConfig, type ApiGrant, type ApiSettingsSnapshot, type ConversationRoute, type ModelRole, type PinnedModel } from '../shared/api-models';
 import type { CredentialProtection } from './model-settings';
 import { ApiSettingsError, DEFAULT_CONFIG, parseModelConfig, type ConfiguredModel } from './pi-model-config';
@@ -126,15 +127,15 @@ export class ApiSettings {
     let token: string;
     if (source !== undefined) token = await this.resolve(source, signal, stored !== undefined);
     else {
-      // Pi provider declares its API-key variable; never invoke its ambient/OAuth resolver.
-      const names: Record<string, string> = { deepseek: 'DEEPSEEK_API_KEY', openai: 'OPENAI_API_KEY', anthropic: 'ANTHROPIC_API_KEY',
-        groq: 'GROQ_API_KEY', cerebras: 'CEREBRAS_API_KEY', xai: 'XAI_API_KEY', openrouter: 'OPENROUTER_API_KEY', nvidia: 'NVIDIA_API_KEY',
-        mistral: 'MISTRAL_API_KEY', fireworks: 'FIREWORKS_API_KEY', together: 'TOGETHER_API_KEY', baseten: 'BASETEN_API_KEY',
-        minimax: 'MINIMAX_API_KEY', 'minimax-cn': 'MINIMAX_CN_API_KEY', moonshotai: 'MOONSHOT_API_KEY', 'kimi-coding': 'KIMI_API_KEY',
-        opencode: 'OPENCODE_API_KEY', 'opencode-go': 'OPENCODE_API_KEY', huggingface: 'HF_TOKEN', zai: 'ZAI_API_KEY' };
-      const name = names[provider];
-      if (!name || !this.env[name]) throw new ApiSettingsError('No API key resolved. Save a protected source or configure the provider API-key environment variable before launch.');
-      token = this.env[name]!;
+      // Delegate variable names and precedence to pinned Pi providers. Restrict the
+      // context to API-key/token environment values, never files, OAuth, WIF or ADC.
+      const auth = builtinProviders().find(p => p.id === provider)?.auth.apiKey;
+      const resolved = await auth?.resolve({ signal, ctx: {
+        env: async name => /(?:_API_KEY|_TOKEN)$/u.test(name) && !/OAUTH|FEDERATION|IDENTITY/u.test(name) ? this.env[name] : undefined,
+        fileExists: async () => false,
+      } });
+      if (!resolved?.auth.apiKey) throw new ApiSettingsError('No API key resolved. Save a protected source or configure the provider API-key environment variable before launch.');
+      token = resolved.auth.apiKey;
     }
     if (token.includes('sk-ant-oat')) throw new ApiSettingsError('OAuth/subscription tokens are outside the API-key route scope. Use a provider API key.');
     const headers: Record<string, string> = {};

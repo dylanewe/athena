@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { normalizeContext, type Api, type Model } from '@earendil-works/pi-ai';
 import { apiStream } from '../../src/worker/api-stream';
 import type { StreamObservation } from '../../src/worker/chatgpt-stream';
@@ -33,6 +33,21 @@ test.each([
   const result = await apiStream(model(api), context, { token: 'fake', headers: {} }, signal(), 64000, {}, async () => new Response(sse, { headers: { 'content-type': 'text/event-stream' } })).result();
   expect(result.stopReason).toBe('error');
 });
+test.each(['headers', 'body'])('owns the 20-second request deadline through stalled %s without discarding SDK cancellation', async phase => {
+  const original = AbortSignal.timeout;
+  const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => original(ms === 20_000 ? 10 : ms));
+  const parent = new AbortController();
+  let forwarded: AbortSignal | undefined;
+  try {
+    const result = await apiStream(model('openai-completions'), context, { token: 'fake', headers: {} }, parent.signal, 64000, {}, async (_url, init) => {
+      forwarded = init?.signal ?? undefined;
+      if (phase === 'headers') return new Promise<Response>((_resolve, reject) => forwarded!.addEventListener('abort', () => reject(new Error('private timeout error')), { once: true }));
+      return new Response(new ReadableStream<Uint8Array>(), { headers: { 'content-type': 'text/event-stream' } });
+    }).result();
+    expect(result.stopReason).toBe('error'); expect(parent.signal.aborted).toBe(false); expect(forwarded?.aborted).toBe(true); expect(forwarded).not.toBe(parent.signal);
+    expect(timeout).toHaveBeenCalledWith(20_000);
+  } finally { timeout.mockRestore(); }
+});
 test('no fabricated zero usage; payload overflow and provider errors are redacted without retries', async () => {
   const observation: StreamObservation = {};
   await apiStream(model('openai-completions'), context, { token: 'fake', headers: {} }, signal(), 64000, observation, async () => new Response(completions.replace(',"usage":{"prompt_tokens":12,"completion_tokens":4}', ''), { headers: { 'content-type': 'text/event-stream' } })).result();
@@ -42,4 +57,7 @@ test('no fabricated zero usage; payload overflow and provider errors are redacte
   expect(calls).toBe(1); expect(failed.errorMessage).not.toContain('sensitive-raw-provider-error');
   const overflow = await apiStream(model('openai-completions'), context, { token: 'fake', headers: {} }, signal(), 1, {}, async () => { throw new Error('HTTP must not be called'); }).result();
   expect(overflow.stopReason).toBe('error');
+  let multiplicitySent = false;
+  const multiple = await apiStream({ ...model('openai-completions'), samplingParams: { n: 20 } }, context, { token: 'fake', headers: {} }, signal(), 64000, {}, async () => { multiplicitySent = true; return new Response(completions); }).result();
+  expect(multiple.stopReason).toBe('error'); expect(multiplicitySent).toBe(false);
 });

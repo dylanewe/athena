@@ -82,6 +82,17 @@ describe('Athena API-key settings boundary', () => {
     expect(interpolateCredential('FAKE_KEY', { FAKE_KEY: 'not-this' })).toBe('FAKE_KEY');
     expect(() => interpolateCredential('$MISSING', {})).toThrow('unset');
   });
+  it('delegates built-in API-key environment semantics to Pi, including regional providers', async () => {
+    const f = fixture(undefined, { MOONSHOT_API_KEY: 'fake-regional-key', ANTHROPIC_OAUTH_TOKEN: 'not-an-api-key' });
+    f.service.configure(JSON.stringify({ providers: { 'moonshotai-cn': { baseUrl: 'https://api.moonshot.cn/v1' } } }));
+    const ref = f.service.snapshot().models[0]!.ref;
+    f.service.select('api-key', ref, ref); approve(f.service);
+    await expect(f.service.grant(f.service.conversationConfig(), 'conversation', 10, signal())).resolves.toMatchObject({ token: 'fake-regional-key' });
+    f.service.configure(JSON.stringify({ providers: { anthropic: { baseUrl: 'https://api.anthropic.com' } } }));
+    const anthropicRef = f.service.snapshot().models[0]!.ref;
+    f.service.select('api-key', anthropicRef, anthropicRef); approve(f.service);
+    await expect(f.service.grant(f.service.conversationConfig(), 'conversation', 10, signal())).rejects.toThrow('No API key resolved');
+  });
   it('approves exact helpers before execution, reruns models helpers, caches stored helpers and blocks changed commands', async () => {
     const { service, helper, reserve } = fixture();
     const json = custom().replace('$FAKE_KEY', '!secret-manager first'); service.configure(json); const pinned = selectFake(service);
@@ -145,7 +156,8 @@ describe('Athena API-key settings boundary', () => {
   it.each([
     '{bad', '{"providers":{},"requiredNewFeature":true}', custom({ cost: undefined }), custom({ cost: { input: 0 } }),
     custom({ compat: { unknownRequiredCapability: true } }), custom({ api: 'unknown-api' }), custom({ maxTokens: 0 }),
-    custom({ samplingParams: { max_tokens: 999999 } }), custom({ baseUrl: 'http://localhost:8000' }),
+    custom({ samplingParams: { max_tokens: 999999 } }), custom({ samplingParams: { n: 20 } }), custom({ samplingParams: { best_of: 20 } }),
+    custom({ baseUrl: 'http://localhost:8000' }), custom({ baseUrl: 'https://192.168.1.10/v1' }), custom({ baseUrl: 'https://10.0.0.1/v1' }), custom({ baseUrl: 'https://172.16.0.1/v1' }), custom({ baseUrl: 'https://169.254.169.254/v1' }), custom({ baseUrl: 'https://2130706433/v1' }), custom({ baseUrl: 'https://[::1]/v1' }),
     '{"providers":{"deepseek":{"modelOverrides":{"unknown":{"name":"ignored?"}}}}}',
   ])('rejects invalid/unsupported configuration without mutating existing state: %s', json => {
     const { service } = fixture(); const before = service.snapshot();

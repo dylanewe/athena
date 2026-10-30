@@ -11,23 +11,35 @@ export function apiStream(model: Model<Api>, context: TranscriptContext, grant: 
   const stream = model.api === 'openai-completions' ? completions : model.api === 'openai-responses' ? responses : model.api === 'anthropic-messages' ? anthropic : undefined;
   if (!stream) throw new Error('Unsupported API.');
   const base = new URL(model.baseUrl);
+  // Own the deadline through streamed-body consumption, and preserve SDK aborts.
+  const deadline = AbortSignal.any([signal, AbortSignal.timeout(20_000)]);
   const safeFetch: typeof fetch = async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
     const prefix = base.pathname.replace(/\/$/u, '');
     if (url.origin !== base.origin || !url.pathname.startsWith(prefix + '/') || (url.search && !(model.api === 'anthropic-messages' && url.search === '?beta=true')) || url.hash) throw new Error('Endpoint changed.');
-    const response = await http(input, { ...init, redirect: 'error', signal });
+    const requestSignal = AbortSignal.any([deadline, ...(init?.signal ? [init.signal] : [])]);
+    const response = await http(input, { ...init, redirect: 'error', signal: requestSignal });
     if (!response.body) return response;
     let size = 0;
-    const bounded = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({ transform(chunk, controller) {
-      size += chunk.byteLength;
-      if (size > 8 * 1024 * 1024) throw new Error('Response exceeded limit.');
-      controller.enqueue(chunk);
-    } }));
+    let abort: (() => void) | undefined;
+    const bounded = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+      start(controller) {
+        abort = () => controller.error(new Error('Request cancelled or timed out.'));
+        if (requestSignal.aborted) abort();
+        else requestSignal.addEventListener('abort', abort, { once: true });
+      },
+      transform(chunk, controller) {
+        size += chunk.byteLength;
+        if (size > 8 * 1024 * 1024) throw new Error('Response exceeded limit.');
+        controller.enqueue(chunk);
+      },
+      flush() { if (abort) requestSignal.removeEventListener('abort', abort); },
+    }));
     return new Response(bounded, { status: response.status, statusText: response.statusText, headers: response.headers });
   };
   let terminal = false, anthropicStop = false;
   const raw = stream(model as never, context, {
-    apiKey: grant.token, headers: grant.headers, signal, fetch: safeFetch, maxRetries: 0, timeoutMs: 20_000,
+    apiKey: grant.token, headers: grant.headers, signal: deadline, fetch: safeFetch, maxRetries: 0, timeoutMs: 20_000,
     maxTokens: API_OUTPUT_TOKENS, reasoning: undefined, cacheRetention: 'none', transport: 'sse',
     onProviderStreamEvent(event) {
       type Usage = { input_tokens: number; output_tokens: number; prompt_tokens: number; completion_tokens: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; prompt_tokens_details?: { cached_tokens?: number }; input_tokens_details?: { cached_tokens?: number } };
@@ -50,6 +62,7 @@ export function apiStream(model: Model<Api>, context: TranscriptContext, grant: 
     onPayload(payload) {
       const body = payload as Record<string, unknown>;
       const cap = body.max_tokens ?? body.max_completion_tokens ?? body.max_output_tokens;
+      if (['n', 'best_of', 'num_generations', 'num_return_sequences', 'candidate_count'].some(key => body[key] !== undefined && body[key] !== 1)) throw new Error('Multiple paid completions are not permitted.');
       if (body.model !== model.id || typeof cap !== 'number' || cap < 1 || cap > API_OUTPUT_TOKENS) throw new Error('Provider request does not enforce the pinned model and output cap.');
       if (Buffer.byteLength(JSON.stringify(payload)) > Math.min(allowance, model.inputLimits?.maxRequestBytes ?? allowance)) throw new Error('Serialized request exceeded its reserved input allowance.');
       checkBeforeModelSend(payload);
