@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { checkBeforeModelSend, environmentValues } from './secret-check';
+import { EPHEMERAL_NOTICE } from '../shared/environment';
 import type { Message as PiMessage } from '@earendil-works/pi-ai';
 import type { Exploration } from '../shared/investigation';
 import { LIVE_LIMITS, type ConversationBinding, type Evidence, type LiveResult } from '../shared/live';
@@ -15,6 +17,17 @@ function firstPromptTitle(text: string): string {
 export class Conversations {
   private readonly db: DatabaseSync;
   private closed = false;
+  private readonly ephemeral = new Map<string, Partial<Message>>();
+  private readonly sensitiveValues = new Set<string>();
+
+  rememberEnvironment(text: string): void { for (const value of environmentValues(text)) this.sensitiveValues.add(value); }
+  assertClean(material: unknown): void {
+    checkBeforeModelSend(material);
+    const serialized = JSON.stringify(material) ?? '';
+    for (const value of this.sensitiveValues) {
+      if (serialized.includes(JSON.stringify(value).slice(1, -1))) throw new Error('Known environment content withheld.');
+    }
+  }
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
@@ -34,6 +47,7 @@ export class Conversations {
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     `);
     const columns = this.db.prepare('PRAGMA table_info(conversations)').all().map(row => row.name);
+    if (!columns.includes('sealed')) this.db.exec('ALTER TABLE conversations ADD COLUMN sealed INTEGER NOT NULL DEFAULT 0');
     if (!columns.includes('binding')) this.db.exec('ALTER TABLE conversations ADD COLUMN binding TEXT');
     if (!columns.includes('model_title')) this.db.exec('ALTER TABLE conversations ADD COLUMN model_title INTEGER NOT NULL DEFAULT 0');
     this.db.exec(`CREATE TABLE IF NOT EXISTS live_attempts (
@@ -48,6 +62,7 @@ export class Conversations {
     UPDATE live_attempts SET result = json_set(json_remove(result, '$.activity'), '$.status', 'cancelled', '$.usageComplete', json('false'))
       WHERE json_extract(result, '$.status') = 'running';`);
     const attempts = this.db.prepare('PRAGMA table_info(live_attempts)').all().map(row => row.name);
+    if (!attempts.includes('ephemeral')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN ephemeral INTEGER NOT NULL DEFAULT 0');
     if (!attempts.includes('exploration')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN exploration TEXT');
     this.db.exec(`UPDATE live_attempts SET result = json_set(result, '$.investigation.status', 'partial'),
       exploration = json_set(exploration, '$.result.status', 'partial')
@@ -55,8 +70,8 @@ export class Conversations {
   }
 
   workspace(): Workspace {
-    const conversations = this.db.prepare('SELECT id, title, binding FROM conversations ORDER BY rowid').all().map(row => ({
-      id: String(row.id), title: String(row.title), ...(row.binding ? { kind: (JSON.parse(String(row.binding)) as ConversationBinding).apiKey ? 'api-key' as const : 'chatgpt' as const, model: (JSON.parse(String(row.binding)) as ConversationBinding).model } : {}),
+    const conversations = this.db.prepare('SELECT id, title, binding, sealed FROM conversations ORDER BY rowid').all().map(row => ({
+      id: String(row.id), title: String(row.title), ...(row.sealed ? { sealed: true } : {}), ...(row.binding ? { kind: (JSON.parse(String(row.binding)) as ConversationBinding).apiKey ? 'api-key' as const : 'chatgpt' as const, model: (JSON.parse(String(row.binding)) as ConversationBinding).model } : {}),
     })) as ConversationSummary[];
     const selectedId = this.db.prepare("SELECT value FROM settings WHERE key = 'selected'").get()?.value;
     const summary = conversations.find(conversation => conversation.id === selectedId);
@@ -66,6 +81,7 @@ export class Conversations {
     for (const message of messages) {
       const attempt = this.db.prepare('SELECT result, evidence FROM live_attempts WHERE message_id = ?').get(message.id);
       if (attempt?.result) Object.assign(message, JSON.parse(String(attempt.result)), { evidence: JSON.parse(String(attempt.evidence)) });
+      Object.assign(message, this.ephemeral.get(message.id));
     }
     const active = this.db.prepare("SELECT conversation_id FROM messages WHERE status = 'running'").get();
     return {
@@ -123,6 +139,7 @@ export class Conversations {
 
   liveContext(id: string): { history: PiMessage[]; evidence: Evidence[] } {
     this.binding(id);
+    if (this.db.prepare('SELECT sealed FROM conversations WHERE id = ?').get(id)?.sealed) return { history: [], evidence: [] };
     const row = this.db.prepare(`SELECT a.history, a.evidence FROM live_attempts a JOIN messages m ON m.id = a.message_id
       WHERE m.conversation_id = ? AND m.status = 'complete' ORDER BY m.rowid DESC LIMIT 1`).get(id);
     return row ? { history: JSON.parse(String(row.history)), evidence: JSON.parse(String(row.evidence)) } : { history: [], evidence: [] };
@@ -140,7 +157,9 @@ export class Conversations {
       if (last?.id !== retryId) throw new Error('Only the latest incomplete attempt can be retried.');
       prompt = String(previous.prompt); userId = String(previous.user_id);
     }
+    if (id && this.db.prepare('SELECT sealed FROM conversations WHERE id = ?').get(id)?.sealed) throw new Error('Ephemeral investigation is sealed. Start a new conversation.');
     if (!prompt.trim() || prompt.length > MAX_MESSAGE_LENGTH || prompt.includes('\0')) throw new Error('Invalid message.');
+    this.assertClean(prompt);
     if (id && JSON.stringify(this.binding(id)) !== JSON.stringify(binding)) throw new Error('Conversation identity changed.');
     const messageId = randomUUID();
     this.transaction(() => {
@@ -163,7 +182,27 @@ export class Conversations {
     return { conversationId: String(row.conversation_id), prompt: String(row.prompt) };
   }
 
+  /** Commit the safe marker BEFORE releasing any actual environment contents. */
+  markEphemeral(messageId: string): void {
+    this.transaction(() => {
+      this.db.prepare('UPDATE conversations SET sealed = 1 WHERE id = (SELECT conversation_id FROM messages WHERE id = ?)').run(messageId);
+      this.db.prepare("UPDATE messages SET text = ? WHERE id = ?").run(EPHEMERAL_NOTICE, messageId);
+      this.db.prepare("UPDATE live_attempts SET ephemeral = 1, history = '[]', evidence = '[]', exploration = NULL, result = ? WHERE message_id = ?")
+        .run(JSON.stringify({ status: 'running', ephemeral: true, text: EPHEMERAL_NOTICE }), messageId);
+    });
+  }
+
+  private protect(messageId: string, material: unknown): boolean {
+    if (this.db.prepare('SELECT ephemeral FROM live_attempts WHERE message_id = ?').get(messageId)?.ephemeral) return true;
+    try { this.assertClean(material); return false; }
+    catch { this.markEphemeral(messageId); return true; }
+  }
+
   progressLive(messageId: string, text: string, activity: string, reported?: Pick<LiveResult, 'usage' | 'requests' | 'usageComplete'>): void {
+    if (this.protect(messageId, { text, activity, reported })) {
+      this.ephemeral.set(messageId, { text, activity, ...reported, ephemeral: true });
+      return;
+    }
     this.transaction(() => {
       this.progress(messageId, text);
       this.db.prepare("UPDATE live_attempts SET result = json_patch(COALESCE(result, '{}'), ?) WHERE message_id = ?").run(JSON.stringify({ status: 'running', activity, ...reported }), messageId);
@@ -176,20 +215,28 @@ export class Conversations {
   }
 
   progressExploration(messageId: string, exploration: Exploration, evidence: Evidence[]): void {
+    if (this.protect(messageId, { exploration, evidence })) return;
     this.db.prepare(`UPDATE live_attempts SET exploration = ?, evidence = ?, result = json_patch(COALESCE(result, '{}'), ?)
       WHERE message_id = ?`).run(JSON.stringify(exploration), JSON.stringify(evidence), JSON.stringify({ investigation: exploration.result }), messageId);
   }
 
   finishLive(messageId: string, result: LiveResult, evidence: Evidence[]): void {
+    if (this.protect(messageId, { result, evidence })) {
+      const status = result.status;
+      this.ephemeral.set(messageId, { text: result.text, status, ephemeral: true, requests: result.requests, usage: result.usage, usageComplete: result.usageComplete, activity: undefined });
+      result = { status, text: EPHEMERAL_NOTICE, history: [], requests: result.requests, usage: result.usage, usageComplete: result.usageComplete };
+      evidence = [];
+    }
     const history = JSON.stringify(result.history);
     if (Buffer.byteLength(history) > LIVE_LIMITS.historyBytes) throw new Error('History exceeds the local limit.');
     const { history: _history, reason: _reason, exploration, title: _title, ...publicResult } = result;
+    const ephemeral = !!this.db.prepare('SELECT ephemeral FROM live_attempts WHERE message_id = ?').get(messageId)?.ephemeral;
     this.transaction(() => {
       if (result.title) this.db.prepare(`UPDATE conversations SET title = ?, model_title = 1 WHERE model_title = 0
         AND id = (SELECT conversation_id FROM messages WHERE id = ?)`).run(result.title, messageId);
       this.finish(messageId, result.status === 'partial' || result.status === 'limit' ? 'failed' : result.status, result.text);
       this.db.prepare('UPDATE live_attempts SET history = ?, evidence = ?, result = ?, exploration = ? WHERE message_id = ?')
-        .run(result.status === 'complete' ? history : '[]', JSON.stringify(evidence), JSON.stringify({ ...publicResult, ...(exploration ? { investigation: exploration.result } : {}) }), exploration ? JSON.stringify(exploration) : null, messageId);
+        .run(result.status === 'complete' ? history : '[]', JSON.stringify(evidence), JSON.stringify({ ...publicResult, ...(ephemeral ? { ephemeral: true } : {}), ...(exploration ? { investigation: exploration.result } : {}) }), exploration ? JSON.stringify(exploration) : null, messageId);
     });
   }
 

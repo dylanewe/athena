@@ -80,6 +80,26 @@ test('real Pi agents use separate pinned API-key providers, preserve source boun
   expect(binding.apiKey?.investigator.model.id).toBe('investigator-one');
 });
 
+test('API-key outbound environment approval propagates across separately pinned roles without persisting echoes or bypassing reservations', async () => {
+  const canary = 'synthetic-api-environment-7';
+  writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);
+  scripts = [response(undefined, 'investigate', { question: 'Read configuration' }), response(undefined, 'sources_read', { root, path: '.env' }),
+    response(undefined, 'finish_investigation', { findings: [{ claim: 'PASSWORD=' + canary, support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: [], candidateKnowledgeChanges: [] }), response('PASSWORD=' + canary)];
+  supervisor.start(null, 'Read configuration');
+  await expect.poll(() => supervisor.environmentPermissions().length).toBe(1);
+  supervisor.environment(supervisor.environmentPermissions()[0].id, 'external'); await idle();
+  expect(requests.map(r => r.body.model)).toEqual(['main-one', 'investigator-one', 'investigator-one', 'main-one']);
+  expect(reservations).toHaveLength(4);
+  expect(JSON.stringify(requests[2].body).includes(canary)).toBe(true);
+  expect(JSON.stringify(requests[3].body).includes(canary)).toBe(true);
+  const conversation = conversations.workspace().selected!;
+  expect(conversation.messages.at(-1)).toMatchObject({ status: 'complete', ephemeral: true });
+  expect(conversation.messages.at(-1)?.text.includes(canary)).toBe(true);
+  expect(conversations.liveContext(conversation.id)).toEqual({ history: [], evidence: [] });
+  conversations.close(); conversations = new Conversations(join(directory, 'conversations.sqlite'));
+  expect(JSON.stringify(conversations.workspace()).includes(canary)).toBe(false);
+});
+
 test('edits during a job and between jobs never change an existing conversation; new conversations use new settings', async () => {
   const original = http;
   http = async (...args) => { settings.configure(configuration('Changed', 'https://changed.example/v1')); return original(...args); };
@@ -115,7 +135,10 @@ test('provider failure does not retry, fall back, or start another role request'
 test('rechecks folder/secret boundaries and withholds protected environment files from HTTP', async () => {
   writeFileSync(join(root, '.env'), 'SECRET_KEY=never-send');
   scripts = [response(undefined, 'investigate', { question: 'Read source' }), response(undefined, 'sources_read', { root, path: '.env' }), response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: ['File withheld'], candidateKnowledgeChanges: [] }), response('File withheld.')];
-  supervisor.start(null, 'Read source'); await idle();
+  supervisor.start(null, 'Read source');
+  await expect.poll(() => supervisor.environmentPermissions().length).toBe(1);
+  supervisor.environment(supervisor.environmentPermissions()[0].id, 'deny');
+  await idle();
   expect(JSON.stringify(requests)).not.toContain('never-send');
   expect(conversations.workspace().selected!.messages.at(-1)!.evidence).toEqual([]);
 });

@@ -7,7 +7,7 @@ import type { StreamObservation } from './chatgpt-stream';
 import { checkBeforeModelSend } from '../main/secret-check';
 
 /** API-key transport only. Never chooses credentials, endpoint, route, or another model. */
-export function apiStream(model: Model<Api>, context: TranscriptContext, grant: ApiGrant, signal: AbortSignal, allowance: number, observation: StreamObservation, http: typeof fetch = fetch): AssistantMessageEventStream {
+export function apiStream(model: Model<Api>, context: TranscriptContext, grant: ApiGrant, signal: AbortSignal, allowance: number, observation: StreamObservation, http: typeof fetch = fetch, check: (material: unknown) => void = checkBeforeModelSend): AssistantMessageEventStream {
   const stream = model.api === 'openai-completions' ? completions : model.api === 'openai-responses' ? responses : model.api === 'anthropic-messages' ? anthropic : undefined;
   if (!stream) throw new Error('Unsupported API.');
   const base = new URL(model.baseUrl);
@@ -65,7 +65,7 @@ export function apiStream(model: Model<Api>, context: TranscriptContext, grant: 
       if (['n', 'best_of', 'num_generations', 'num_return_sequences', 'candidate_count'].some(key => body[key] !== undefined && body[key] !== 1)) throw new Error('Multiple paid completions are not permitted.');
       if (body.model !== model.id || typeof cap !== 'number' || cap < 1 || cap > API_OUTPUT_TOKENS) throw new Error('Provider request does not enforce the pinned model and output cap.');
       if (Buffer.byteLength(JSON.stringify(payload)) > Math.min(allowance, model.inputLimits?.maxRequestBytes ?? allowance)) throw new Error('Serialized request exceeded its reserved input allowance.');
-      checkBeforeModelSend(payload);
+      check(payload);
       return payload;
     },
   });

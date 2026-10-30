@@ -13,4 +13,4 @@ export interface LiveStart { apiKey?: ApiConversationConfig; model: string; prom
 export type LiveRequest = { type: 'access'; id: number; role?: ModelRole; contextBytes?: number } | { type: 'source'; id: number; operation: SourceOperation; input: SourceRequest } | { type: 'inspect'; id: number; ids: string[] };
 export type LiveCheckpoint = Pick<LiveResult, 'exploration' | 'title'>;
 export type LiveWorkerMessage = LiveRequest | { type: 'checkpoint'; checkpoint: LiveCheckpoint } | { type: 'usage'; request: number; usage?: ChatGPTUsage } | { type: 'progress'; text: string; activity: string } | { type: 'result'; result: LiveResult };
-export type LiveParentMessage = { type: 'start'; job: LiveStart } | { type: 'reply'; id: number; token?: string; grant?: ApiGrant; source?: SourceResult & { evidence: Evidence[] }; evidence?: Evidence[]; error?: string };
+export type LiveParentMessage = { type: 'start'; job: LiveStart } | { type: 'reply'; id: number; token?: string; grant?: ApiGrant; ephemeral?: boolean; source?: SourceResult & { evidence: Evidence[] }; evidence?: Evidence[]; error?: string };

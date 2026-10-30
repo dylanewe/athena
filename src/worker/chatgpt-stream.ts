@@ -15,7 +15,7 @@ export interface StreamObservation { usage?: ChatGPTUsage; failure?: ChatGPTFail
 
 /** Direct Pi wire adapter only: no provider registry, ambient auth, or OAuth ownership. */
 export function chatgptStream(model: string, context: TranscriptContext, token: string, signal: AbortSignal,
-  observation: StreamObservation = {}, http: typeof fetch = globalThis.fetch, eventLimit = 512 * 1024): AssistantMessageEventStream {
+  observation: StreamObservation = {}, http: typeof fetch = globalThis.fetch, eventLimit = 512 * 1024, check: (material: unknown) => void = checkBeforeModelSend): AssistantMessageEventStream {
   const output = createAssistantMessageEventStream();
   void (async () => {
     let sent = false, completed = false;
@@ -37,7 +37,7 @@ export function chatgptStream(model: string, context: TranscriptContext, token: 
           signal.throwIfAborted();
           if (sent || String(url) !== `${RESOURCE}/responses` || options?.method !== 'POST' || typeof options.body !== 'string') return fail('protocol');
           if (Buffer.byteLength(options.body) > 2 * 1024 * 1024) return fail('context');
-          checkBeforeModelSend(options.body);
+          check(options.body);
           sent = true;
           const response = await http(url, { ...options, redirect: 'error' });
           if (!response.ok) {

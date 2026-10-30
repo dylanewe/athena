@@ -13,7 +13,7 @@ const skipped = new Set(['node_modules', 'vendor', 'vendors', 'bower_components'
 const generated = /(?:\.min\.(?:js|css)|\.map|\.lock|\.generated\.[^.]+|\.g\.[^.]+|^package-lock\.json|^npm-shrinkwrap\.json|^pnpm-lock\.yaml)$/i;
 const binary = /\.(?:pdf|png|jpe?g|gif|webp|ico|bmp|heic|svgz|zip|gz|tar|7z|rar|exe|dll|so|dylib|o|a|class|jar|wasm|woff2?|ttf|mp[34]|mov|sqlite3?|db|pyc)$/i;
 const within = (root: string, path: string) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
-class Denied extends Error { constructor(readonly reason: string, readonly overridable = false) { super(reason); } }
+class Denied extends Error { constructor(readonly reason: string, readonly overridable = false, readonly environment = false) { super(reason); } }
 class Stopped extends Error { constructor(readonly reason: string) { super(reason); } }
 function location(value: unknown): string {
   if (typeof value !== 'string' || !value || value.length > 4096 || isAbsolute(value) || /[\u0000-\u001f\\]/.test(value) ||
@@ -28,13 +28,17 @@ function protectedName(path: string): boolean {
   return parts.includes('.docker') && parts.at(-1) === 'config.json';
 }
 function environmentExample(name: string): boolean {
-  return /^(?:\.env(?:[._-].*)?|\.envrc|\.npmrc|credentials[._-].*|secrets?[._-].*|.*\.tfvars)[._-](?:example|sample|template|dist)$/i.test(name);
+  return /^(?:\.env(?:[._-].*)?|\.envrc(?:[._-].*)?|\.npmrc|credentials[._-].*|secrets?[._-].*|.*\.tfvars)[._-](?:example|sample|template|dist)$/i.test(name);
 }
 interface Budget {
   deadline: number; signal?: AbortSignal; scanned: number; bytes: number; output: number;
   check(): void;
 }
 interface Access { absolute: string; directory: boolean; owner: string | null }
+export interface EnvironmentAccess { root: string; path: string; valid(): boolean }
+function actualEnvironment(path: string): boolean {
+  return /^(?:\.env|\.envrc)(?:[._-].*)?$/i.test(basename(path)) && !environmentExample(basename(path));
+}
 
 /** Shared UI/tool boundary. Never executes Git, repository code, generators, or network operations. */
 export class Sources {
@@ -60,7 +64,7 @@ export class Sources {
     return this.exceptions();
   }
 
-  async run(operation: SourceOperation, input: SourceRequest, signal?: AbortSignal): Promise<SourceResult> {
+  async run(operation: SourceOperation, input: SourceRequest, signal?: AbortSignal, permission?: EnvironmentAccess): Promise<SourceResult> {
     if (!['list', 'search', 'read'].includes(operation)) throw new Denied('Unsupported source operation.');
     const root = this.root(input.root);
     const path = location(input.path);
@@ -71,7 +75,7 @@ export class Sources {
     const budget: Budget = {
       deadline: performance.now() + L.milliseconds, signal, scanned: 0, bytes: 0, output: 1024,
       check() {
-        if (this.signal?.aborted) throw new Stopped('cancelled');
+        if (this.signal?.aborted || (permission && !permission.valid())) throw new Stopped('cancelled');
         if (timedOut || performance.now() >= this.deadline) throw new Stopped('Time limit reached.');
       },
     };
@@ -87,10 +91,10 @@ export class Sources {
       if (++budget.scanned > L.entries) throw new Stopped('Entry limit reached.');
       if (depth > L.depth) throw new Stopped('Directory depth limit reached.');
       let access: Access;
-      try { access = await this.access(root, name, budget); }
+      try { access = await this.access(root, name, budget, permission); }
       catch (error) {
         if (error instanceof Stopped) throw error;
-        push({ path: name, kind: 'file', reason: error instanceof Denied ? error.reason : 'Unavailable or unsafe path.', overridable: error instanceof Denied && error.overridable });
+        push({ path: name, kind: 'file', reason: error instanceof Denied ? error.reason : 'Unavailable or unsafe path.', overridable: error instanceof Denied && error.overridable, ...(error instanceof Denied && error.environment ? { environment: true } : {}) });
         return;
       }
       if (access.directory) {
@@ -112,7 +116,8 @@ export class Sources {
       try {
         const content = await this.text(root, name, budget, L.fileBytes);
         if (/^\s*(?:\/\*[\s\S]{0,300})?[^\n]*(?:@generated|automatically generated|do not edit)/im.test(content.slice(0, 1024)) && !this.included(root, name)) throw new Denied('Generated material (default exclusion).', true);
-        if (suspectedSecret(content)) throw new Denied('Suspected secret; content withheld.');
+        const ephemeral = actualEnvironment(name) && permission?.root === root && permission.path === name && permission.valid();
+        if (!ephemeral && suspectedSecret(content)) throw new Denied('Suspected secret; content withheld.');
         const lines = content.split(/\r?\n/);
         const identity = createHash('sha256').update(content).digest('hex');
         const revision = access.owner ? await this.revision(root, access.owner, budget) : null;
@@ -125,7 +130,7 @@ export class Sources {
           const max = Math.min(16 * 1024, L.outputBytes - budget.output - 2048);
           if (Buffer.byteLength(value) > max) throw new Denied('Excerpt exceeds output-byte limit; request a smaller line range.');
           const citation: SourceCitation = { folder: root, repository, path: name, start: first, end: last, revision, contentIdentity: `sha256:${identity}` };
-          push({ path: name, kind: 'file', citation, text: value });
+          push({ path: name, kind: 'file', citation, text: value, ...(ephemeral ? { ephemeral: true } : {}) });
         };
         if (operation === 'read') {
           if (start > lines.length) push({ path: name, kind: 'file', reason: 'Requested range is past end of file.' });
@@ -179,14 +184,17 @@ export class Sources {
     try { const stat = await lstat(join(path, '.git')); return stat.isDirectory() || stat.isFile(); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
   }
-  private async access(root: string, path: string, budget: Budget): Promise<Access> {
+  private async access(root: string, path: string, budget: Budget, permission?: EnvironmentAccess): Promise<Access> {
     budget.check();
-    if (protectedName(`${root}/${path}`)) throw new Denied('Environment/credential file or Git internals are protected.');
+    const environment = actualEnvironment(path) && !protectedName(`${root}/${path.split('/').slice(0, -1).join('/')}`);
+    if (protectedName(`${root}/${path}`) && !environment) throw new Denied('Environment/credential file or Git internals are protected.');
     const absolute = await this.safePath(root, path);
     const stat = await lstat(absolute);
+    const approved = environment && stat.isFile() && permission?.root === root && permission.path === path && permission.valid();
+    if (environment && !approved) throw new Denied('Actual environment file is protected; current-investigation permission required.', false, stat.isFile() && stat.size <= L.fileBytes);
     if (!stat.isDirectory() && !stat.isFile()) throw new Denied('Only regular text files and directories are supported.');
     // An exact file exception may traverse excluded ancestors, but never admits sibling files.
-    const override = this.included(root, path) || (stat.isDirectory() && this.includes.some(item => item.root === root && (path === '.' || item.path.startsWith(path + '/'))));
+    const override = approved || this.included(root, path) || (stat.isDirectory() && this.includes.some(item => item.root === root && (path === '.' || item.path.startsWith(path + '/'))));
     let owner: string | null = null;
     const rules: { base: string; matcher: Ignore }[] = [];
     const parts = path === '.' ? [] : path.split('/');
@@ -222,7 +230,7 @@ export class Sources {
     if (!stat.isDirectory()) {
       const name = basename(path);
       if (binary.test(name)) throw new Denied('Unsupported binary/media format.');
-      if (!this.included(root, path) && (generated.test(name) || (name.startsWith('.') && !environmentExample(name)))) throw new Denied('Hidden/generated file (default exclusion).', true);
+      if (!approved && !this.included(root, path) && (generated.test(name) || (name.startsWith('.') && !environmentExample(name)))) throw new Denied('Hidden/generated file (default exclusion).', true);
       if (stat.size > L.fileBytes) throw new Denied('File exceeds 256 KiB input limit; unsupported without a complete secret check.');
     }
     return { absolute, directory: stat.isDirectory(), owner };

@@ -6,7 +6,7 @@ import { checkBeforeModelSend } from './secret-check';
 import type { SourceOperation } from '../shared/sources';
 
 /** Local capabilities only. Caller supplies the authorized, cancellable job boundary. */
-export function sourceTools(sources: Pick<Sources, 'run'>): AgentTool[] {
+export function sourceTools(sources: Pick<Sources, 'run'>, check: (material: unknown) => void = checkBeforeModelSend): AgentTool[] {
   return (['list', 'search', 'read'] as const).map((operation: SourceOperation): AgentTool => ({
     name: `sources_${operation}`,
     label: `Sources: ${operation}`,
@@ -21,7 +21,7 @@ export function sourceTools(sources: Pick<Sources, 'run'>): AgentTool[] {
       try {
         const result = await sources.run(operation, sourceRequest(operation, params), signal);
         // Includes filenames, citations, and all tool-facing metadata, not only excerpts.
-        checkBeforeModelSend(result);
+        check(result);
         return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { status: result.status } };
       } catch {
         return { content: [{ type: 'text', text: 'Source request rejected by access or secret checks.' }], details: {}, isError: true };

@@ -1,3 +1,4 @@
+import { EnvironmentContext } from './environment-context';
 import { apiStream } from './api-stream';
 import { requestAllowance, type ApiGrant, type ModelRole } from '../shared/api-models';
 import { Agent, type AgentTool, type StreamFn } from '@earendil-works/pi-agent-core';
@@ -28,6 +29,7 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
   let exploration: Exploration | undefined, title: string | undefined;
   const usage: ChatGPTUsage = { input: 0, output: 0, cachedInput: 0 };
   const observations: StreamObservation[] = [];
+  const environment = new EnvironmentContext();
   const agents = new Set<Agent>();
   const finalizedText: string[] = [];
   let progressTimer: ReturnType<typeof setTimeout> | undefined;
@@ -57,7 +59,7 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
         if (!capabilities.apiAccess) throw new Error('API-key authority unavailable.');
         const grant = await capabilities.apiAccess(role, bytes);
         signal.throwIfAborted(); requests++;
-        const output = apiStream(job.apiKey[role].model, context, grant, requestSignal, requestAllowance(bytes), observation, http);
+        const output = apiStream(job.apiKey[role].model, context, grant, requestSignal, requestAllowance(bytes), observation, http, environment.check);
         // Observe result without introducing another consumer of the event iterator.
         void output.result().then(result => {
           if (!['stop', 'toolUse'].includes(result.stopReason)) observation.failure = 'unavailable';
@@ -66,7 +68,7 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
       }
       const token = await capabilities.access();
       signal.throwIfAborted(); requests++;
-      return chatgptStream(job.model, context, token, requestSignal, observation, http);
+      return chatgptStream(job.model, context, token, requestSignal, observation, http, undefined, environment.check);
     } catch {
       if (job.apiKey && !limited && observations.length) observations.at(-1)!.failure = 'unavailable';
       // Agent's stream contract encodes preparation failures as protocol events.
@@ -109,7 +111,12 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
   };
   const investigate = investigatorTool(job.roots, {
     createAgent: (tools, prompt) => createAgent('investigator', tools, prompt),
-    source: (operation, input) => capabilities.source(operation, input),
+    source: async (operation, input) => {
+      const result = await capabilities.source(operation, input);
+      environment.observe(result);
+      return result;
+    },
+    check: environment.check,
     checkpoint: value => { exploration = value; capabilities.checkpoint?.({ exploration }); },
     limit: notice => { limited = true; limitNotice = notice; abort(); },
     progress: value => { activity = value; progress(); },

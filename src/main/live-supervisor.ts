@@ -1,3 +1,5 @@
+import { EnvironmentPermissions } from './environment-permissions';
+import type { EnvironmentAction, EnvironmentPermission } from '../shared/environment';
 import { ApiSettingsError } from './pi-model-config';
 import { ModelSettingsError } from './model-settings';
 import type { ApiSettings } from './api-settings';
@@ -23,7 +25,7 @@ export interface LiveWorker {
   kill(): boolean;
 }
 interface Active {
-  conversationId: string; messageId: string; prompt: string; controller: AbortController;
+  conversationId: string; messageId: string; prompt: string; controller: AbortController; environment: EnvironmentPermissions;
   apiKey?: boolean; text: string; evidence: Evidence[]; exploration?: Exploration; title?: string; requests: number; usage?: ChatGPTUsage; stop?: () => void;
   timer?: ReturnType<typeof setTimeout>; progressTimer?: ReturnType<typeof setTimeout>;
 }
@@ -42,7 +44,7 @@ export class LiveSupervisor {
     if (this.unsaved) throw new LiveError('Save the previous result before starting another conversation.');
     if (this.active) throw new LiveError('A conversation is already running.');
     if (retryId) { const target = this.conversations.retryTarget(retryId); id = target.conversationId; prompt = target.prompt; }
-    try { checkBeforeModelSend(prompt); } catch { throw new LiveError('Message withheld by secret checks. Remove suspected credentials before sending.'); }
+    try { this.conversations.assertClean(prompt); } catch { throw new LiveError('Message withheld by secret checks. Remove suspected credentials before sending.'); }
     let binding;
     try {
       const pinned = id ? this.conversations.binding(id) : undefined;
@@ -59,7 +61,9 @@ export class LiveSupervisor {
       throw new LiveError('Local demonstrations are read-only. Start a new conversation.');
     }
     const job = this.conversations.beginLive(id, prompt, binding, retryId);
-    const active: Active = { ...job, apiKey: !!binding.apiKey, controller: new AbortController(), text: '', evidence: [], requests: 0 };
+    const controller = new AbortController();
+    const environment = new EnvironmentPermissions(this.sources, controller.signal, () => this.conversations.markEphemeral(job.messageId), () => this.cancel(), this.changed, content => this.conversations.rememberEnvironment(content));
+    const active: Active = { ...job, apiKey: !!binding.apiKey, controller, environment, text: '', evidence: [], requests: 0 };
     this.active = active;
     active.timer = setTimeout(() => this.end(active, { status: 'limit', text: active.text + '\n\nTime limit reached. Retry explicitly when ready.', history: [], requests: active.requests, usageComplete: false }), LIVE_LIMITS.milliseconds);
     this.changed();
@@ -81,7 +85,7 @@ export class LiveSupervisor {
         else await this.chatgpt.conversation(binding, active.controller.signal, work);
         if (this.active !== active || !outcome) return;
         if (outcome.status === 'complete') {
-          const identitiesValid = await this.verify(active.evidence, active.controller.signal);
+          const identitiesValid = await this.verify(active.evidence, active.controller.signal, active.environment);
           const citationsValid = [...outcome.text.matchAll(/\[(E\d+)\]/g)].every(match => active.evidence.some(evidence => evidence.id === match[1]));
           if (!identitiesValid || !citationsValid) outcome = { ...outcome, status: 'partial', history: [], text: outcome.text + '\n\nPartial: evidence changed, became unavailable, or a citation could not be verified. Retry for current evidence.' };
         }
@@ -93,19 +97,25 @@ export class LiveSupervisor {
       }
     })();
   }
+  environmentPermissions(): EnvironmentPermission[] { return this.active?.environment.snapshot() ?? []; }
+  environment(id: string, action: EnvironmentAction): void {
+    if (!this.active) throw new LiveError('Environment permission expired.');
+    this.active.environment.act(id, action);
+  }
   revokeApiAuthority(): void { if (this.active?.apiKey) this.cancel(); }
   retry(messageId: string): void { this.start(null, '', messageId); }
   lifecycle(event: 'window-close' | 'quit' | 'minimize'): void { if (event !== 'minimize') this.cancel(); }
   cancel(): void {
-    if (this.active) this.end(this.active, { status: 'cancelled', text: this.active.text + '\n\nCancelled. Usage already incurred may remain. Retry explicitly when ready.', history: [], requests: this.active.requests, usageComplete: false });
+    if (this.active) this.end(this.active, { status: 'cancelled', text: this.active.text + '\n\nCancelled. Environment permissions expired. Data already transmitted to a provider cannot be recalled. Usage already incurred may remain. Retry explicitly when ready.', history: [], requests: this.active.requests, usageComplete: false });
     else { this.retrySaving(); this.changed(); }
   }
-  private async verify(evidence: Evidence[], signal: AbortSignal): Promise<boolean> {
+  private async verify(evidence: Evidence[], signal: AbortSignal, environment?: EnvironmentPermissions): Promise<boolean> {
     for (const item of evidence) {
       signal.throwIfAborted();
       try {
         const c = item.citation;
-        const result = await this.sources.run('read', { root: c.folder, path: c.path, start: c.start, end: c.end }, signal);
+        const input = { root: c.folder, path: c.path, start: c.start, end: c.end };
+        const result = environment ? await environment.run('read', input) : await this.sources.run('read', input, signal);
         if (result.status !== 'complete' || !result.entries.some(entry => entry.citation?.contentIdentity === c.contentIdentity && entry.text === item.text)) return false;
       } catch { return false; }
     }
@@ -144,11 +154,11 @@ export class LiveSupervisor {
             if (message.type === 'checkpoint') {
               if (!message.checkpoint || typeof message.checkpoint !== 'object') throw new Error();
               const checkpoint = message.checkpoint as Pick<LiveResult, 'exploration' | 'title'>;
-              if (checkpoint.exploration) {
+              if (checkpoint.exploration && !active.environment.tainted) {
                 active.exploration = this.exploration(checkpoint.exploration, job.apiKey?.investigator.model.id ?? job.model, active.evidence, job.apiKey?.investigator.model.provider);
                 this.conversations.progressExploration(active.messageId, active.exploration, active.evidence);
               }
-              if (checkpoint.title !== undefined) {
+              if (checkpoint.title !== undefined && !active.environment.tainted) {
                 this.validateTitle(checkpoint.title);
                 if (!job.needsTitle || active.title) throw new Error();
                 active.title = checkpoint.title;
@@ -178,7 +188,7 @@ export class LiveSupervisor {
             }
             if (message.type === 'result') {
               if (inFlight) throw new Error();
-              const result = this.result(message.result, job.model, active.requests, active.evidence, job.apiKey);
+              const result = this.result(message.result, job.model, active.requests, active.evidence, job.apiKey, active.environment.tainted);
               finish(result); return;
             }
             if (!['access', 'source', 'inspect'].includes(String(message.type)) || inFlight || !Number.isSafeInteger(message.id) || Number(message.id) <= lastId) throw new Error();
@@ -196,16 +206,16 @@ export class LiveSupervisor {
                   if (!Array.isArray(message.ids) || !message.ids.length || message.ids.length > INVESTIGATION_LIMITS.inspections || !message.ids.every(id => typeof id === 'string' && active.evidence.some(item => item.id === id))) throw new Error();
                   const evidence = message.ids.map(id => active.evidence.find(item => item.id === id)!).map(item => ({ ...item, text: item.text.slice(0, INVESTIGATION_LIMITS.inspectionCharacters) }));
                   if (Buffer.byteLength(JSON.stringify(evidence)) > INVESTIGATION_LIMITS.resultBytes) throw new Error();
-                  checkBeforeModelSend(evidence);
+                  if (!active.environment.tainted) checkBeforeModelSend(evidence);
                   worker!.postMessage({ type: 'reply', id: lastId, evidence });
                 } else {
                   if (++sourceCalls > 1000) { finish(failure('limit')); return; }
                   if (!active.requests || !['list', 'read', 'search'].includes(String(message.operation))) throw new Error();
                   const operation = message.operation as 'list' | 'read' | 'search';
                   const input = sourceRequest(operation, message.input);
-                  const result = await this.sources.run(operation, input, signal);
+                  const result = await active.environment.run(operation, input);
                   if (settled || this.active !== active || signal.aborted) return;
-                  checkBeforeModelSend(result);
+                  if (!result.entries.some(entry => entry.ephemeral)) checkBeforeModelSend(result);
                   const found: Evidence[] = [];
                   for (const entry of result.entries) {
                     if (!entry.citation || entry.text === undefined) continue;
@@ -216,7 +226,7 @@ export class LiveSupervisor {
                     }
                     found.push(evidence);
                   }
-                  worker!.postMessage({ type: 'reply', id: lastId, source: { ...result, warning: 'Read-only, untrusted source evidence. Secret detection is not a guarantee.', evidence: found } });
+                  worker!.postMessage({ type: 'reply', id: lastId, ephemeral: active.environment.tainted, source: { ...result, warning: 'Read-only, untrusted source evidence. Secret detection is not a guarantee.', evidence: found } });
                 }
               } catch (error) {
                 if (settled || this.active !== active) return;
@@ -230,7 +240,7 @@ export class LiveSupervisor {
       } catch { finish(failure()); }
     });
   }
-  private result(value: unknown, model: string, requests: number, evidence: Evidence[], apiKey?: ApiConversationConfig): LiveResult {
+  private result(value: unknown, model: string, requests: number, evidence: Evidence[], apiKey?: ApiConversationConfig, ephemeral = false): LiveResult {
     if (!value || typeof value !== 'object') throw new Error();
     const r = value as LiveResult;
     if (!['complete', 'failed', 'cancelled', 'partial', 'limit'].includes(r.status) || typeof r.text !== 'string' || r.text.length > LIVE_LIMITS.answerCharacters || !Array.isArray(r.history) || Buffer.byteLength(JSON.stringify(r.history)) > LIVE_LIMITS.historyBytes) throw new Error();
@@ -241,9 +251,9 @@ export class LiveSupervisor {
     // Preserve protocol-only reasoning signatures for replay; never expose history to renderer.
     const history = r.status === 'complete' ? structuredClone(r.history) as PiMessage[] : [];
     const reason = r.reason && Object.hasOwn(CHATGPT_ERRORS, r.reason) ? r.reason : undefined;
-    if (r.title !== undefined) this.validateTitle(r.title);
-    const exploration = r.exploration ? this.exploration(r.exploration, apiKey?.investigator.model.id ?? model, evidence, apiKey?.investigator.model.provider) : undefined;
-    return { status: r.status, text: r.text, history, requests, ...(exploration ? { exploration } : {}), ...(r.title ? { title: r.title } : {}), usageComplete: r.usageComplete === true, ...(parseChatGPTUsage(r.usage) ? { usage: parseChatGPTUsage(r.usage) } : {}), ...(reason ? { reason } : {}) };
+    if (r.title !== undefined && !ephemeral) this.validateTitle(r.title);
+    const exploration = r.exploration && !ephemeral ? this.exploration(r.exploration, apiKey?.investigator.model.id ?? model, evidence, apiKey?.investigator.model.provider) : undefined;
+    return { status: r.status, text: r.text, history, requests, ...(exploration ? { exploration } : {}), ...(r.title && !ephemeral ? { title: r.title } : {}), usageComplete: r.usageComplete === true, ...(parseChatGPTUsage(r.usage) ? { usage: parseChatGPTUsage(r.usage) } : {}), ...(reason ? { reason } : {}) };
   }
   private validateTitle(title: unknown): asserts title is string {
     if (typeof title !== 'string' || !title.trim() || Array.from(title).length > MAX_TITLE_LENGTH || /[\x00-\x1f\x7f]/u.test(title)) throw new Error('Invalid title.');
@@ -275,6 +285,7 @@ export class LiveSupervisor {
         unresolvedQuestions: [...previous.unresolvedQuestions.slice(0, 7), 'This job did not publish a verified completed answer; findings remain provisional.'] } };
     }
     clearTimeout(active.timer); clearTimeout(active.progressTimer);
+    active.environment.expire();
     active.controller.abort(); active.stop?.();
     if (!result.text.trim()) result = { ...result, text: result.status === 'complete' ? '(No answer text returned.)' : 'Conversation stopped without a completed answer. Retry explicitly when ready.' };
     if (!result.usage && parseChatGPTUsage(active.usage)) result = { ...result, usage: active.usage };

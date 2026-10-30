@@ -17,6 +17,17 @@ export function suspectedSecret(text: string): boolean {
   return false;
 }
 
+/** Values stay memory-only; callers must not use this as a durable redaction policy. */
+export function environmentValues(text: string): string[] {
+  const values = new Set([text]);
+  for (const line of text.split(/\r?\n/)) {
+    values.add(line);
+    const value = /^\s*(?:export\s+)?[\w.-]+\s*=\s*(.*?)\s*$/.exec(line)?.[1];
+    if (value) values.add(value.replace(/^(['"])([\s\S]*)\1$/, '$2'));
+  }
+  return [...values].filter(value => value.trim());
+}
+
 /** Call at the final model-request boundary, including composed context and tool outputs. */
 export function checkBeforeModelSend(material: unknown): void {
   const serialized = JSON.stringify(material);

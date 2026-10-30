@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import EnvironmentPermissions from './EnvironmentPermissions.svelte';
   import InventoryView from './Inventory.svelte';
   import SourcesView from './Sources.svelte';
   import ModelSettingsView from './ModelSettings.svelte';
@@ -17,6 +18,7 @@
   let messageInput = $state<HTMLTextAreaElement>();
   let transcript = $state<HTMLDivElement>();
   let requestNumber = 0;
+  const sealedSeen = new Set<string>();
   const selected = $derived(composingNew ? null : workspace?.selected);
   const draftKey = $derived(selected?.id ?? 'new');
   const active = $derived(workspace?.activeConversationId);
@@ -40,7 +42,11 @@
     const number = ++requestNumber;
     try {
       const [next, settings, api] = await Promise.all([window.athena.workspace(), window.athena.chatgpt.snapshot(), window.athena.apiModels.snapshot()]);
-      if (number === requestNumber) { workspace = next; defaultModel = api.route === 'api-key' ? 'API key · ' + api.conversation : settings.selectedModel; }
+      if (number === requestNumber) {
+        for (const conversation of next.conversations) if (conversation.sealed && !sealedSeen.has(conversation.id)) {
+          sealedSeen.add(conversation.id); drafts = { new: '' }; inspected = {};
+        }
+        workspace = next; defaultModel = api.route === 'api-key' ? 'API key · ' + api.conversation : settings.selectedModel; }
     } catch { error = 'Could not load conversations. Restart Athena to try again.'; }
   }
 
@@ -135,6 +141,9 @@
     <ModelSettingsView />
   {:else}
     <main>
+      {#if workspace?.environment?.length}
+        <EnvironmentPermissions permissions={workspace.environment} {busy} act={(id, action) => { void change(() => window.athena.environment(id, action)); }} />
+      {/if}
       {#if error || workspace?.saveError}<div class="error" role="alert">{error || workspace?.saveError}</div>{/if}
       {#if !workspace}
         <p class="empty-copy">Loading your conversations…</p>
@@ -146,6 +155,7 @@
                 <div class="message-heading"><strong>{message.role === 'user' ? 'You' : 'Athena'}</strong>
                   {#if message.role === 'assistant'}<span class:problem={!['running', 'complete'].includes(message.status)}>{message.status === 'running' && workspace.saveError ? 'Not saved' : message.status === 'complete' && !selected.model ? 'Local demo' : message.status === 'limit' ? 'limit-paused' : message.status}</span>{/if}
                 </div>
+                {#if message.ephemeral}<p class="draft-note">Ephemeral · Not saved · May contain sensitive values</p>{/if}
                 <p>{message.text}</p>
                 {#if message.status === 'running' && message.activity}<p class="draft-note">{message.activity}</p>{/if}
                 {#if message.investigation}
@@ -179,7 +189,7 @@
                     {/each}
                   </details>
                 {/if}
-                {#if selected.kind === 'chatgpt' && message.role === 'assistant' && !['running', 'complete'].includes(message.status) && selected.messages.at(-1)?.id === message.id}
+                {#if !selected.sealed && selected.kind === 'chatgpt' && message.role === 'assistant' && !['running', 'complete'].includes(message.status) && selected.messages.at(-1)?.id === message.id}
                   <button type="button" disabled={busy || !!active} onclick={() => change(() => window.athena.retry(message.id))}>Retry</button>
                 {/if}
               </article>
@@ -193,17 +203,18 @@
           </div>
           {#if !selected}<p class="draft-note">Send your first message to save this conversation. The selected model will suggest its title; a local title is kept if naming fails.</p>{/if}
           {#if selected && !selected.model}<p class="draft-note">This saved demonstration is read-only. Start a new conversation to use a configured provider.</p>{/if}
+          {#if selected?.sealed}<p class="draft-note">This ephemeral investigation is sealed. Start a new conversation. Unsent drafts were cleared to avoid retaining derived sensitive content.</p>{/if}
           <form class="composer" onsubmit={(event) => { event.preventDefault(); void send(); }}>
             <label for="message">Message</label>
             <textarea id="message" bind:this={messageInput} bind:value={drafts[draftKey]} maxlength={MAX_MESSAGE_LENGTH} rows="3"
-              disabled={busy || (!!selected && !selected.model)} placeholder="Ask a question or investigate your repositories…"
+              disabled={busy || selected?.sealed || (!!selected && !selected.model)} placeholder="Ask a question or investigate your repositories…"
               onkeydown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); } }}></textarea>
             <div class="composer-actions">
               <span>{workspace.saveError ? 'Stopped · Result not saved' : active ? 'Working · 50 requests / 15 minutes maximum' : selected ? 'Saved locally' : 'Unsent'}</span>
               {#if active}
                 <button type="button" disabled={busy} onclick={() => change(() => window.athena.cancel())}>{workspace.saveError ? 'Retry saving' : 'Stop'}</button>
               {:else}
-                <button class="primary" aria-label="Send message" disabled={busy || (!!selected && !selected.model) || !(drafts[draftKey] ?? '').trim()}>Send <span aria-hidden="true">↗</span></button>
+                <button class="primary" aria-label="Send message" disabled={busy || selected?.sealed || (!!selected && !selected.model) || !(drafts[draftKey] ?? '').trim()}>Send <span aria-hidden="true">↗</span></button>
               {/if}
             </div>
           </form>

@@ -96,6 +96,7 @@ const bridge: DesktopBridge = {
   send: (conversationId, text) => request('send', { conversationId, text }),
   cancel: () => request('cancel'),
   retry: messageId => request('retry', { messageId }),
+  environment: (id, action) => request('environment', { id, action }),
   onChange(listener) {
     // Do not leak the privileged IPC event or allow a renderer-selected channel.
     const notify = () => listener();

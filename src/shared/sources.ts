@@ -22,6 +22,8 @@ export interface SourceEntry {
   kind: 'file' | 'directory';
   reason?: string;
   overridable?: boolean;
+  environment?: boolean;
+  ephemeral?: boolean;
   citation?: SourceCitation;
   text?: string;
 }

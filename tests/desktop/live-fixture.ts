@@ -4,7 +4,7 @@ import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 /** Isolated fake saved registration; OAuth itself is exercised in chatgpt.spec.ts. */
-export async function installLiveFixture(application: ElectronApplication, directory: string, root?: string) {
+export async function installLiveFixture(application: ElectronApplication, directory: string, root?: string, environment = false) {
   const fixture = join(directory, 'live-worker-fixture.mjs');
   writeFileSync(fixture, `
     const frame = value => 'data: ' + JSON.stringify(value) + '\\n\\n';
@@ -28,11 +28,11 @@ export async function installLiveFixture(application: ElectronApplication, direc
       if (${JSON.stringify(root ?? '')}) {
         if (hasTool('investigate') && !called('investigate')) return call('investigate', {question:'Find the exported answer'});
         if (hasTool('sources_read')) {
-          if (!called('sources_read')) return call('sources_read', {root:${JSON.stringify(root ?? '')},path:'answer.ts',start:1,end:1});
-          return call('finish_investigation', {findings:[{claim:'The value is 42',support:'source',evidenceIds:['E1']}],unresolvedQuestions:['Runtime behavior was not observed'],candidateKnowledgeChanges:['Constant location could be remembered']});
+          if (!called('sources_read')) return call('sources_read', {root:${JSON.stringify(root ?? '')},path:${JSON.stringify(environment ? '.env' : 'answer.ts')},start:1,end:1});
+          return call('finish_investigation', {findings:[{claim:${JSON.stringify(environment ? 'PASSWORD=synthetic-desktop-env-7' : 'The value is 42')},support:'source',evidenceIds:['E1']}],unresolvedQuestions:['Runtime behavior was not observed'],candidateKnowledgeChanges:['Constant location could be remembered']});
         }
       }
-      const text = ${JSON.stringify(root ? 'The answer is 42 [E1], answer.ts:1.' : 'Fixture response.')};
+      const text = ${JSON.stringify(environment ? 'PASSWORD=synthetic-desktop-env-7' : root ? 'The answer is 42 [E1], answer.ts:1.' : 'Fixture response.')};
       const item = {type:'message',id:'msg_1',role:'assistant',content:[{type:'output_text',text,annotations:[]}]};
       return new Response(new TextEncoder().encode(frame({type:'response.output_item.added',output_index:0,item:{...item,content:[]}}) + frame({type:'response.content_part.added',output_index:0,content_index:0,part:{type:'output_text',text:'',annotations:[]}}) + frame({type:'response.output_text.delta',output_index:0,content_index:0,delta:text}) + frame({type:'response.output_item.done',output_index:0,item}) + complete));
     };

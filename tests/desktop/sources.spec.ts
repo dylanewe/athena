@@ -56,7 +56,7 @@ test('browse/search/read across approved Git and non-Git material with citations
 
 test('blocks actual environments, secrets and symlink escapes through the real preload and IPC; examples remain eligible', async () => {
   await read('.env');
-  await expect(page.getByText('Environment/credential file or Git internals are protected.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Actual environment file is protected; current-investigation permission required.', { exact: true })).toBeVisible();
   await expect(page.locator('pre')).toHaveCount(0);
   await read('.env.example');
   await expect(page.locator('pre')).toContainText('PORT=3000');

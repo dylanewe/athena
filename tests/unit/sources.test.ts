@@ -88,6 +88,45 @@ test('denies environment/credential files before any content open through list, 
   expect(JSON.stringify(search)).not.toContain('actual sensitive content');
 });
 
+test('exceptional environment access is exact-file, cancellable and never becomes a saved exception', async () => {
+  await file('.env.local', 'PASSWORD=synthetic-env-canary-7');
+  await file('.env.other', 'PASSWORD=synthetic-other-canary-7');
+  const denied = await read('.env.local');
+  expect(denied.entries[0]).toMatchObject({ environment: true, reason: expect.stringContaining('protected') });
+  expect(denied.bytesRead).toBe(0);
+  let valid = true;
+  const permission = { root, path: '.env.local', valid: () => valid };
+  const approved = await sources.run('read', { root, path: '.env.local' }, undefined, permission);
+  expect(approved.entries[0].text === 'PASSWORD=synthetic-env-canary-7').toBe(true);
+  expect(approved.entries[0].ephemeral).toBe(true);
+  expect((await sources.run('read', { root, path: '.env.other' }, undefined, permission)).entries[0].text).toBeUndefined();
+  valid = false;
+  const revoked = await sources.run('read', { root, path: '.env.local' }, undefined, permission);
+  expect(revoked.status).toBe('cancelled');
+  expect(revoked.entries.some(entry => entry.text !== undefined)).toBe(false);
+  expect(sources.exceptions()).toEqual([]);
+  await symlink(join(root, '.env.local'), join(root, '.env.link'));
+  expect((await sources.run('read', { root, path: '.env.link' }, undefined, { ...permission, path: '.env.link', valid: () => true })).entries[0].environment).not.toBe(true);
+});
+
+test('approved environment access cannot escape or survive revocation during a pending file open', async () => {
+  const canary = 'synthetic-revoked-open-7';
+  await file('.env', 'PASSWORD=' + canary);
+  await file('.aws/.env', 'PASSWORD=' + canary);
+  const permission = { root, path: '.env', valid: () => true };
+  for (const path of ['../.env', '.aws/.env', '.git/.env']) {
+    const result = await sources.run('read', { root, path }, undefined, { ...permission, path }).catch(() => null);
+    expect(result?.entries.some(entry => entry.text?.includes(canary))).not.toBe(true);
+    expect(result?.entries.some(entry => entry.environment)).not.toBe(true);
+  }
+  const original = (await vi.importActual<typeof fs>('node:fs/promises')).open;
+  let valid = true;
+  vi.spyOn(fs, 'open').mockImplementation(async (...args) => { const fd = await original(...args); valid = false; return fd; });
+  const result = await sources.run('read', { root, path: '.env' }, undefined, { ...permission, valid: () => valid });
+  expect(result.status).toBe('cancelled');
+  expect(JSON.stringify(result).includes(canary)).toBe(false);
+});
+
 test('unapproved roots are rejected before opening content or metadata', async () => {
   const opened = vi.spyOn(fs, 'open');
   await expect(sources.run('read', { root: directory, path: 'outside.md' })).rejects.toThrow('Folder permission');
@@ -95,8 +134,8 @@ test('unapproved roots are rejected before opening content or metadata', async (
 });
 
 test('recognizable environment examples are eligible, but examples and ordinary files still undergo full-file secret checks', async () => {
-  for (const path of ['.env.example', '.env.local.template', '.env.production.sample']) await file(path, 'API_KEY=your-key\nPORT=3000');
-  for (const path of ['.env.example', '.env.local.template', '.env.production.sample']) expect((await read(path)).entries[0].text).toContain('PORT=3000');
+  for (const path of ['.env.example', '.env.local.template', '.env.production.sample', '.envrc.local.template']) await file(path, 'API_KEY=your-key\nPORT=3000');
+  for (const path of ['.env.example', '.env.local.template', '.env.production.sample', '.envrc.local.template']) expect((await read(path)).entries[0].text).toContain('PORT=3000');
   await file('.env.example', 'API_KEY=sk-abcdefghijklmnopqrstuvwxyz');
   await file('notes.md', 'harmless first line\npassword: "sensitive-value"');
   for (const path of ['.env.example', 'notes.md']) {

@@ -1,8 +1,11 @@
+import type { EnvironmentAction, EnvironmentPermission } from '../shared/environment';
 import type { Conversations } from './conversations';
 interface JobControls {
   start(id: string | null, text: string): void;
   cancel(): void;
   retry?(messageId: string): void;
+  environment?(id: string, action: EnvironmentAction): void;
+  environmentPermissions?(): EnvironmentPermission[];
   readonly saveError: string | undefined;
 }
 import { MAX_MESSAGE_LENGTH, type Workspace } from '../shared/contracts';
@@ -43,13 +46,19 @@ export class DesktopGateway {
         this.jobs.retry(identifier(input.messageId));
         break;
       }
+      case 'environment': {
+        const input = object(payload, ['id', 'action']);
+        if (!this.jobs.environment || !['local', 'external', 'deny', 'revoke'].includes(String(input.action))) throw new Error('Invalid desktop request.');
+        this.jobs.environment(identifier(input.id), input.action as EnvironmentAction);
+        break;
+      }
       case 'cancel':
         noPayload(payload);
         this.jobs.cancel();
         break;
       default: throw new Error('Invalid desktop request.');
     }
-    return { ...this.conversations.workspace(), saveError: this.jobs.saveError };
+    return { ...this.conversations.workspace(), saveError: this.jobs.saveError, environment: this.jobs.environmentPermissions?.() ?? [] };
   }
 }
 

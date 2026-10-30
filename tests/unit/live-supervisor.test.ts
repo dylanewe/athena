@@ -1,6 +1,7 @@
 import { beforeEach, afterEach, expect, test, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Conversations } from '../../src/main/conversations';
@@ -61,6 +62,149 @@ class Worker extends EventEmitter {
   rpc(type: string, extra = {}) { return new Promise<Extract<LiveParentMessage, { type: 'reply' }>>(resolve => { const id = ++this.next; this.pending.set(id, resolve); queueMicrotask(() => this.emit('message', { type, id, ...extra })); }); }
   kill() { this.killed = true; this.controller.abort(); return true; }
 }
+test('local-only approval previews ephemerally without granting the delegated agent contents', async () => {
+  writeFileSync(join(root, '.env'), 'PASSWORD=synthetic-local-canary-7');
+  scripted(investigationScripts(root, 'The actual file was withheld.', '.env'));
+  jobs.start(null, 'Inspect configuration');
+  await expect.poll(() => jobs.environmentPermissions().length).toBe(1);
+  const permission = jobs.environmentPermissions()[0];
+  expect(JSON.stringify(permission).includes('synthetic-local-canary-7')).toBe(false);
+  jobs.environment(permission.id, 'local');
+  await expect.poll(() => jobs.environmentPermissions()[0]?.preview?.includes('synthetic-local-canary-7')).toBe(true);
+  expect(requests).toHaveLength(2);
+  jobs.environment(permission.id, 'deny');
+  await idle();
+  expect(JSON.stringify(requests).includes('synthetic-local-canary-7')).toBe(false);
+  expect(JSON.stringify(db.workspace()).includes('synthetic-local-canary-7')).toBe(false);
+  expect(jobs.environmentPermissions()).toEqual([]);
+  expect(() => jobs.start(null, 'Explain synthetic-local-canary-7')).toThrow('secret checks');
+  expect(db.workspace().conversations).toHaveLength(1);
+});
+
+test('outbound approval reaches child and main contexts but echoes, titles and tool history never reach durable storage', async () => {
+  const canary = 'synthetic-outbound-canary-7';
+  writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);
+  scripted([
+    functionResponse('investigate', { question: 'Inspect environment' }), toolResponse(root, true, '.env'),
+    functionResponse('finish_investigation', { findings: [{ claim: 'PASSWORD=' + canary, support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: [], candidateKnowledgeChanges: [canary] }),
+    functionResponse('set_conversation_title', { title: canary }), textResponse('PASSWORD=' + canary),
+  ]);
+  jobs.start(null, 'Inspect environment');
+  await expect.poll(() => jobs.environmentPermissions().length).toBe(1);
+  jobs.environment(jobs.environmentPermissions()[0].id, 'external');
+  await idle();
+  expect(requests).toHaveLength(5);
+  expect(JSON.stringify(requests[2]).includes(canary)).toBe(true);
+  expect(JSON.stringify(requests[3]).includes(canary)).toBe(true);
+  expect(db.workspace().selected?.messages.at(-1)).toMatchObject({ status: 'complete', ephemeral: true });
+  expect(db.workspace().selected?.messages.at(-1)?.text.includes(canary)).toBe(true);
+  const conversation = db.workspace().selected!;
+  expect(conversation.title.includes(canary)).toBe(false);
+  expect(db.exploration(conversation.messages.at(-1)!.id)).toBeUndefined();
+  expect(db.liveContext(conversation.id)).toEqual({ history: [], evidence: [] });
+  expect(() => jobs.start(conversation.id, 'Explain more')).toThrow('new conversation');
+  expect(() => jobs.start(null, 'Echo ' + canary)).toThrow('secret checks');
+  expect(jobs.environmentPermissions()).toEqual([]);
+  db.close(); db = new Conversations(join(directory, 'conversations.sqlite'));
+  expect(JSON.stringify(db.workspace()).includes(canary)).toBe(false);
+});
+
+test.each(['cancel', 'failure'] as const)('environment permissions expire on %s without carrying local contents into the next investigation', async outcome => {
+  writeFileSync(join(root, '.env'), 'PASSWORD=synthetic-expiration-7');
+  scripted(investigationScripts(root, 'Withheld', '.env'));
+  jobs.start(null, 'Inspect configuration');
+  await expect.poll(() => jobs.environmentPermissions().length).toBe(1);
+  const { id } = jobs.environmentPermissions()[0];
+  jobs.environment(id, 'local');
+  await expect.poll(() => jobs.environmentPermissions()[0]?.preview !== undefined).toBe(true);
+  if (outcome === 'cancel') jobs.cancel(); else workers[0].emit('exit');
+  await idle();
+  expect(jobs.environmentPermissions()).toEqual([]);
+  expect(() => jobs.environment(id, 'external')).toThrow('expired');
+  scripted(investigationScripts(root, 'Withheld', '.env'));
+  jobs.start(null, 'Inspect configuration again');
+  await expect.poll(() => jobs.environmentPermissions().length).toBe(1);
+  expect(jobs.environmentPermissions()[0]).toMatchObject({ local: false, external: false });
+  jobs.environment(jobs.environmentPermissions()[0].id, 'deny'); await idle();
+  expect(JSON.stringify(requests).includes('synthetic-expiration-7')).toBe(false);
+});
+
+test('revoking an outbound permission stops child sends and retains only safe state even after provider exposure', async () => {
+  const canary = 'synthetic-revocation-7';
+  writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);
+  const scripts = [functionResponse('investigate', { question: 'Read configuration' }), toolResponse(root, true, '.env')];
+  http = async (_url, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    if (scripts.length) return new Response(new TextEncoder().encode(scripts.shift()));
+    return new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error(canary)), { once: true }));
+  };
+  jobs.start(null, 'Inspect configuration');
+  await expect.poll(() => jobs.environmentPermissions().length).toBe(1);
+  const { id } = jobs.environmentPermissions()[0]; jobs.environment(id, 'external');
+  await expect.poll(() => requests.length).toBe(3);
+  jobs.environment(id, 'revoke'); await idle();
+  expect(workers[0].killed).toBe(true);
+  expect(jobs.environmentPermissions()).toEqual([]);
+  expect(db.workspace().selected?.messages.at(-1)).toMatchObject({ status: 'cancelled', ephemeral: true, text: expect.stringContaining('cannot be recalled') });
+  expect(readdirSync(directory).filter(file => file.startsWith('conversations.sqlite')).some(file => readFileSync(join(directory, file)).includes(canary))).toBe(false);
+  expect(requests).toHaveLength(3);
+});
+
+test('a failed safe-marker commit cannot authorize or read outbound environment content', async () => {
+  const canary = 'synthetic-marker-7'; writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);
+  scripted(investigationScripts(root, 'Withheld', '.env'));
+  jobs.start(null, 'Inspect configuration');
+  await expect.poll(() => jobs.environmentPermissions().length).toBe(1);
+  const { id } = jobs.environmentPermissions()[0];
+  const lock = new DatabaseSync(join(directory, 'conversations.sqlite'));
+  try {
+    lock.exec('BEGIN IMMEDIATE');
+    expect(() => jobs.environment(id, 'external')).toThrow();
+    expect(jobs.environmentPermissions()[0].external).toBe(false);
+    expect(JSON.stringify(requests).includes(canary)).toBe(false);
+  } finally { lock.exec('ROLLBACK'); lock.close(); }
+  jobs.environment(id, 'deny'); await idle();
+});
+
+test('wall-clock expiry releases a waiting environment decision without carrying authority into retries', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  writeFileSync(join(root, '.env'), 'PASSWORD=synthetic-timeout-7');
+  scripted(investigationScripts(root, 'Withheld', '.env'));
+  jobs.start(null, 'Inspect configuration');
+  await vi.waitFor(() => expect(jobs.environmentPermissions()).toHaveLength(1));
+  const { id } = jobs.environmentPermissions()[0];
+  await vi.advanceTimersByTimeAsync(LIVE_LIMITS.milliseconds);
+  expect(jobs.environmentPermissions()).toEqual([]);
+  expect(() => jobs.environment(id, 'external')).toThrow('expired');
+  expect(workers[0].killed).toBe(true);
+  expect(db.workspace().selected?.messages.at(-1)?.status).toBe('limit');
+  expect(JSON.stringify(requests).includes('synthetic-timeout-7')).toBe(false);
+});
+
+test('save retries after exposed output cannot persist tool, answer or error canaries', async () => {
+  const canary = 'synthetic-save-retry-7'; writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);
+  const scripts = [functionResponse('investigate', { question: 'Read configuration' }), toolResponse(root, true, '.env')];
+  http = async (_url, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    if (scripts.length) return new Response(new TextEncoder().encode(scripts.shift()));
+    return new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error(canary)), { once: true }));
+  };
+  jobs.start(null, 'Inspect configuration');
+  await expect.poll(() => jobs.environmentPermissions().length).toBe(1);
+  jobs.environment(jobs.environmentPermissions()[0].id, 'external');
+  await expect.poll(() => requests.length).toBe(3);
+  workers[0].emit('message', { type: 'progress', text: canary, activity: canary });
+  const lock = new DatabaseSync(join(directory, 'conversations.sqlite'));
+  try {
+    lock.exec('BEGIN IMMEDIATE'); jobs.cancel();
+    expect(jobs.saveError).toBeDefined();
+    expect(jobs.environmentPermissions()).toEqual([]);
+  } finally { lock.exec('ROLLBACK'); lock.close(); }
+  jobs.cancel(); await idle();
+  expect(jobs.saveError).toBeUndefined();
+  expect(readdirSync(directory).filter(file => file.startsWith('conversations.sqlite')).some(file => readFileSync(join(directory, file)).includes(canary))).toBe(false);
+});
+
 async function idle() { await expect.poll(() => db.workspace().activeConversationId).toBeNull(); }
 beforeEach(async () => {
   directory = realpathSync(mkdtempSync(join(tmpdir(), 'athena-live-'))); root = join(directory, 'repo'); mkdirSync(root); writeFileSync(join(root, 'answer.ts'), 'export const answer = 42;\n');
@@ -267,7 +411,12 @@ test.each(['.env', '../outside.ts'])('tool calls cannot bypass source policy for
   writeFileSync(join(root, '.env'), 'password=real-private-value');
   writeFileSync(join(directory, 'outside.ts'), 'outside-private-content');
   scripted(investigationScripts(root, 'Source access was denied.', path));
-  jobs.start(null, 'Read the file'); await idle();
+  jobs.start(null, 'Read the file');
+  if (path === '.env') {
+    await expect.poll(() => jobs.environmentPermissions().length).toBe(1);
+    jobs.environment(jobs.environmentPermissions()[0].id, 'deny');
+  }
+  await idle();
   expect(JSON.stringify(requests)).not.toMatch(/real-private-value|outside-private-content/);
   expect(db.workspace().selected!.messages.at(-1)?.evidence).toEqual([]);
 });

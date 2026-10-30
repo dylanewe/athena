@@ -1,3 +1,4 @@
+import type { EnvironmentAction, EnvironmentPermission } from './environment';
 import type { ApiSettingsBridge } from './api-models';
 import type { InventoryBridge } from './inventory';
 import type { ModelBridge } from './models';
@@ -23,12 +24,14 @@ export interface Message {
   usageComplete?: boolean;
   requests?: number;
   activity?: string;
+  ephemeral?: boolean;
 }
 export interface ConversationSummary {
   id: string;
   title: string;
   kind?: 'demo' | 'chatgpt' | 'api-key';
   model?: string;
+  sealed?: boolean;
 }
 export interface Conversation extends ConversationSummary {
   messages: Message[];
@@ -38,6 +41,7 @@ export interface Workspace {
   selected: Conversation | null;
   activeConversationId: string | null;
   saveError?: string;
+  environment?: EnvironmentPermission[];
 }
 export interface DemoJob {
   messageId: string;
@@ -54,5 +58,6 @@ export interface DesktopBridge {
   send(conversationId: string | null, text: string): Promise<Workspace>;
   cancel(): Promise<Workspace>;
   retry(messageId: string): Promise<Workspace>;
+  environment(id: string, action: EnvironmentAction): Promise<Workspace>;
   onChange(listener: () => void): () => void;
 }

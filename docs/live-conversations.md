@@ -54,6 +54,8 @@ Cancellation kills the utility immediately. If refresh was already started, the 
 
 ## Persistence and privacy
 
+[#7 adds exceptional environment-file approval](environment-access.md) without changing either route's pinned models or cost/usage controls. Local previews never enter either agent context. Outbound actual-environment approval seals the conversation before release; all subsequent derived results/history/evidence/exploration/titles are ephemeral, with only a safe placeholder and numeric usage/status persisted. Follow-up sends and retries on sealed conversations are blocked. Revocation stops the job but cannot recall already-transmitted data. The ordinary persistence behavior below applies to unexposed eligible-source investigations.
+
 `conversations.sqlite` migrates legacy conversations in place, preserving IDs, selection, and titles. Live conversations store a non-secret registration fingerprint and model. Attempts retain separate user-question identity, public outcome, usage, structured completed main Pi history, evidence, and a separate investigator exploration checkpoint. Incomplete attempts are visible but excluded from later model context. Retry uses preceding completed history; it never replays an unfinished tool call. Abrupt interruption retains streamed text already persisted, marks the attempt cancelled, and makes no provider request on restart.
 
 History is not silently compacted or summarized. Reasoning text is not displayed; protocol signatures needed for stateless replay remain in internal history. That internal history is never exposed through renderer IPC. Renderer receives only public text/status/usage/evidence. Errors are application-authored categories, not raw provider bodies, headers, tokens, or native exceptions.

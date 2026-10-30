@@ -1,5 +1,5 @@
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, realpathSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, realpathSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -166,8 +166,67 @@ test('read-only investigation uses global folder consent, renders evidence and b
   await send('Explain more'); await expect(page.getByRole('log')).toContainText('Saved evidence changed');
 });
 
+test('environment permission UI separates local preview from outbound access and seals ephemeral output across restart', async () => {
+  const canary = 'synthetic-desktop-env-7';
+  const root = join(directory, 'repo'); mkdirSync(root); writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);
+  let logs = '';
+  application.process().stdout?.on('data', chunk => { logs += String(chunk); });
+  application.process().stderr?.on('data', chunk => { logs += String(chunk); });
+  await installLiveFixture(application, directory, root, true);
+  await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] }); }, root);
+  await page.evaluate(() => window.athena.inventory.chooseFolder());
+  await page.getByRole('button', { name: 'Repositories', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'I understand the folder permission' }).check();
+  await page.getByRole('button', { name: 'Save consent and discover' }).click();
+  await expect.poll(() => page.evaluate(async () => (await window.athena.inventory.snapshot()).discovery.status)).not.toBe('running');
+  await newConversation(); await send('Inspect actual environment');
+  await expect(page.getByRole('region', { name: 'Environment-file permissions' })).toBeVisible();
+  expect((await page.textContent('body'))?.includes(canary)).toBe(false);
+  await page.getByRole('button', { name: 'Approve local inspection' }).click();
+  await expect(page.getByLabel('Ephemeral local preview')).toContainText(canary);
+  expect(await page.evaluate(async () => (await window.athena.workspace()).environment?.[0].external)).toBe(false);
+  await page.getByRole('button', { name: 'Approve external processing' }).click();
+  await expect.poll(() => page.evaluate(async () => (await window.athena.workspace()).activeConversationId)).toBeNull();
+  await expect(page.getByRole('log')).toContainText('Ephemeral · Not saved');
+  expect((await page.getByRole('log').textContent())?.includes(canary)).toBe(true);
+  await expect(page.getByLabel('Message', { exact: true })).toBeDisabled();
+  expect(readdirSync(join(directory, 'state')).some(file => readFileSync(join(directory, 'state', file)).includes(canary))).toBe(false);
+  expect(logs.includes(canary)).toBe(false);
+  await application.close(); await launch();
+  expect((await page.textContent('body'))?.includes(canary)).toBe(false);
+  await expect(page.getByRole('log')).toContainText('derived output was not saved');
+  await expect(page.getByRole('region', { name: 'Environment-file permissions' })).toHaveCount(0);
+  await expect(page.getByLabel('Message', { exact: true })).toBeDisabled();
+});
+
+test('local preview can be revoked from the UI without external permission and expires on restart', async () => {
+  const canary = 'synthetic-desktop-env-7';
+  const root = join(directory, 'repo'); mkdirSync(root); writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);
+  await installLiveFixture(application, directory, root, true);
+  await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] }); }, root);
+  await page.evaluate(() => window.athena.inventory.chooseFolder());
+  await page.getByRole('button', { name: 'Repositories', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'I understand the folder permission' }).check();
+  await page.getByRole('button', { name: 'Save consent and discover' }).click();
+  await expect.poll(() => page.evaluate(async () => (await window.athena.inventory.snapshot()).discovery.status)).not.toBe('running');
+  await newConversation(); await send('Inspect environment locally');
+  await page.getByRole('button', { name: 'Approve local inspection' }).click();
+  await expect(page.getByLabel('Ephemeral local preview')).toContainText(canary);
+  const permissionId = await page.evaluate(async () => (await window.athena.workspace()).environment![0].id);
+  await page.getByRole('button', { name: 'Revoke and stop investigation' }).click();
+  await expect(page.getByRole('region', { name: 'Environment-file permissions' })).toHaveCount(0);
+  await expect(page.getByRole('log')).toContainText('cannot be recalled');
+  expect((await page.getByRole('log').textContent())?.includes(canary)).toBe(false);
+  await send('Explain ' + canary);
+  await expect(page.getByRole('alert')).toContainText('secret checks');
+  expect(readdirSync(join(directory, 'state')).some(file => readFileSync(join(directory, 'state', file)).includes(canary))).toBe(false);
+  await application.close(); await launch();
+  expect(await page.evaluate(async id => { try { await window.athena.environment(id, 'external'); return true; } catch { return false; } }, permissionId)).toBe(false);
+  expect((await page.textContent('body'))?.includes(canary)).toBe(false);
+});
+
 test('renderer stays sandboxed with narrow bridge and rejects malformed retry requests', async () => {
-  expect(await page.evaluate(() => ({ node: typeof (globalThis as Record<string, unknown>).process, require: typeof (globalThis as Record<string, unknown>).require, bridge: Object.keys(window.athena).sort() }))).toEqual({ node: 'undefined', require: 'undefined', bridge: ['apiModels','cancel','chatgpt','inventory','models','onChange','retry','select','send','sources','workspace'] });
+  expect(await page.evaluate(() => ({ node: typeof (globalThis as Record<string, unknown>).process, require: typeof (globalThis as Record<string, unknown>).require, bridge: Object.keys(window.athena).sort() }))).toEqual({ node: 'undefined', require: 'undefined', bridge: ['apiModels','cancel','chatgpt','environment','inventory','models','onChange','retry','select','send','sources','workspace'] });
   expect(await application.evaluate(({ app, BrowserWindow }) => app.getAppMetrics().find(metric => metric.pid === BrowserWindow.getAllWindows()[0].webContents.getOSProcessId())?.sandboxed)).toBe(true);
   for (const url of ['https://example.com', 'file:///etc/hosts']) expect(await page.evaluate(async url => { try { await fetch(url); return 'accessible'; } catch { return 'denied'; } }, url)).toBe('denied');
   expect(await page.evaluate(async () => { try { await window.athena.retry('arbitrary-path'); return 'accepted'; } catch { return 'rejected'; } })).toBe('rejected');

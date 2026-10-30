@@ -2,7 +2,6 @@ import type { Agent, AgentTool } from '@earendil-works/pi-agent-core';
 import type { Message } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import { sourceTools } from '../main/source-tools';
-import { checkBeforeModelSend } from '../main/secret-check';
 import { LIVE_LIMITS, type Evidence, type LiveStart } from '../shared/live';
 import { findingsSchema, INVESTIGATION_LIMITS, validFindings, type Exploration, type InvestigatorResult } from '../shared/investigation';
 import type { LiveCapabilities } from './live-agent';
@@ -13,6 +12,7 @@ interface InvestigatorRuntime {
   createAgent(tools: AgentTool[], systemPrompt: string): Agent;
   source: LiveCapabilities['source'];
   checkpoint(exploration: Exploration): void;
+  check(material: unknown): void;
   limit(notice: string): void;
   progress(activity: string): void;
 }
@@ -44,7 +44,7 @@ export function investigatorTool(roots: LiveStart['roots'], runtime: Investigato
         if (!scope.includes(location)) { if (scope.length < INVESTIGATION_LIMITS.scope) scope.push(location); else scopeTruncated = true; }
         runtime.progress(`Investigator: ${operation} ${input.path}`.slice(0, 200));
         return result;
-      } });
+      } }, runtime.check);
       const finish: AgentTool = {
         name: 'finish_investigation', label: 'Return findings',
         description: 'Finish with bounded findings, evidence IDs, unresolved questions, and candidate knowledge changes (proposals only, never writes). Source-supported findings require observed evidence; interpretation is explicitly uncertain. No runtime observation is available.',
@@ -56,7 +56,7 @@ export function investigatorTool(roots: LiveStart['roots'], runtime: Investigato
           const candidate: InvestigatorResult = { ...value, status: 'complete', inspectedScope: scope, scopeTruncated,
             evidence: observed.filter(item => ids.has(item.id)).map(item => ({ ...item, text: item.text.slice(0, INVESTIGATION_LIMITS.excerpt) })) };
           if (Buffer.byteLength(JSON.stringify(candidate)) > INVESTIGATION_LIMITS.resultBytes) throw new Error('Findings exceed the bounded result limit.');
-          checkBeforeModelSend(candidate);
+          runtime.check(candidate);
           summary = candidate;
           return { content: [{ type: 'text', text: 'Findings retained.' }], details: {}, terminate: true };
         },
@@ -78,7 +78,7 @@ export function investigatorTool(roots: LiveStart['roots'], runtime: Investigato
       investigator.finishTurn = async () => summary ? { action: 'end' } : undefined;
       try { await investigator.prompt((params as { question: string }).question); }
       finally { checkpoint(); }
-      checkBeforeModelSend(exploration!.result);
+      runtime.check(exploration!.result);
       return { content: [{ type: 'text', text: JSON.stringify(exploration!.result) }], details: {} };
     },
   };
