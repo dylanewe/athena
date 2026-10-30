@@ -1,5 +1,10 @@
 import type { Conversations } from './conversations';
-import type { JobSupervisor } from './supervisor';
+interface JobControls {
+  start(id: string | null, text: string): void;
+  cancel(): void;
+  retry?(messageId: string): void;
+  readonly saveError: string | undefined;
+}
 import { MAX_MESSAGE_LENGTH, type Workspace } from '../shared/contracts';
 
 /** Caller metadata is derived by main from Electron, never from a renderer payload. */
@@ -12,7 +17,7 @@ export interface Caller {
 export class DesktopGateway {
   constructor(
     private readonly conversations: Conversations,
-    private readonly jobs: JobSupervisor,
+    private readonly jobs: JobControls,
     private readonly owner: { webContentsId: number; url: string },
   ) {}
 
@@ -30,6 +35,12 @@ export class DesktopGateway {
       case 'send': {
         const input = object(payload, ['conversationId', 'text']);
         this.jobs.start(input.conversationId === null ? null : identifier(input.conversationId), text(input.text, MAX_MESSAGE_LENGTH));
+        break;
+      }
+      case 'retry': {
+        const input = object(payload, ['messageId']);
+        if (!this.jobs.retry) throw new Error('Retry unavailable.');
+        this.jobs.retry(identifier(input.messageId));
         break;
       }
       case 'cancel':

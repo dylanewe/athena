@@ -4,6 +4,9 @@
   import SourcesView from './Sources.svelte';
   import ModelSettingsView from './ModelSettings.svelte';
   import { MAX_MESSAGE_LENGTH, type Workspace } from '../shared/contracts';
+  import type { Evidence } from '../shared/live';
+  let defaultModel = $state<string | null>(null);
+  let inspected = $state<Record<string, string>>({});
 
   let section = $state<'conversation' | 'inventory' | 'models' | 'sources'>('conversation');
   let workspace = $state<Workspace | null>(null);
@@ -17,14 +20,27 @@
   const selected = $derived(composingNew ? null : workspace?.selected);
   const draftKey = $derived(selected?.id ?? 'new');
   const active = $derived(workspace?.activeConversationId);
+  const conversationUsage = $derived.by(() => {
+    if (selected?.kind !== 'chatgpt') return null;
+    const replies = selected.messages.filter(message => message.role === 'assistant');
+    if (!replies.some(message => message.requests !== undefined)) return null;
+    return {
+      requests: replies.reduce((sum, message) => sum + (message.requests ?? 0), 0),
+      input: replies.reduce((sum, message) => sum + (message.usage?.input ?? 0), 0),
+      output: replies.reduce((sum, message) => sum + (message.usage?.output ?? 0), 0),
+      cachedInput: replies.reduce((sum, message) => sum + (message.usage?.cachedInput ?? 0), 0),
+      reported: replies.some(message => message.usage !== undefined),
+      complete: replies.every(message => message.usageComplete === true),
+    };
+  });
 
   async function load() {
     // A mutation owns its response. Notifications during it are refreshed after it settles.
     if (busy) return;
     const number = ++requestNumber;
     try {
-      const next = await window.athena.workspace();
-      if (number === requestNumber) workspace = next;
+      const [next, settings] = await Promise.all([window.athena.workspace(), window.athena.chatgpt.snapshot()]);
+      if (number === requestNumber) { workspace = next; defaultModel = settings.selectedModel; }
     } catch { error = 'Could not load conversations. Restart Athena to try again.'; }
   }
 
@@ -36,8 +52,8 @@
     try {
       workspace = await action();
       return true;
-    } catch {
-      error = 'Could not save this change. Your draft is still here. Try again.';
+    } catch (failure) {
+      error = (failure instanceof Error ? failure.message : 'Could not save this change.') + ' Your draft is still here.';
       return false;
     } finally { busy = false; void load(); }
   }
@@ -65,6 +81,16 @@
       drafts[key] = '';
       composingNew = false;
     }
+  }
+
+  async function inspectEvidence(key: string, evidence: Evidence) {
+    const c = evidence.citation;
+    inspected[key] = 'Checking current file…';
+    try {
+      const result = await window.athena.sources.run('read', { root: c.folder, path: c.path, start: c.start, end: c.end });
+      const entry = result.entries.find(entry => entry.citation);
+      inspected[key] = entry ? `${entry.citation?.contentIdentity === c.contentIdentity ? 'Matches cited content.' : 'Changed since this answer — do not treat this as the cited version.'}\n\n${entry.text}` : 'Current file is unavailable or withheld by source policy.';
+    } catch { inspected[key] = 'Current file could not be inspected. Finish other source browsing and retry.'; }
   }
 
   onMount(() => {
@@ -98,7 +124,7 @@
         </button>
       {/each}
     </nav>
-    <div class="local-note"><span class="eyebrow">On this Mac</span><p>Conversations stay here.<br />Close Athena. Pick up later.</p></div>
+    <div class="local-note"><span class="eyebrow">On this Mac</span><p>History is saved here.<br />Live questions go to ChatGPT.</p></div>
   </aside>
 
   {#if section === 'inventory'}
@@ -118,9 +144,25 @@
             {#each selected.messages as message (message.id)}
               <article class:user={message.role === 'user'} class="message">
                 <div class="message-heading"><strong>{message.role === 'user' ? 'You' : 'Athena'}</strong>
-                  {#if message.role === 'assistant'}<span class:problem={message.status === 'failed' || message.status === 'cancelled'}>{message.status === 'running' && workspace.saveError ? 'Not saved' : message.status === 'complete' ? 'Local demo' : message.status}</span>{/if}
+                  {#if message.role === 'assistant'}<span class:problem={!['running', 'complete'].includes(message.status)}>{message.status === 'running' && workspace.saveError ? 'Not saved' : message.status === 'complete' && selected.kind !== 'chatgpt' ? 'Local demo' : message.status}</span>{/if}
                 </div>
                 <p>{message.text}</p>
+                {#if message.status === 'running' && message.activity}<p class="draft-note">{message.activity}</p>{/if}
+                {#if message.evidence?.length}
+                  <details class="evidence"><summary>Inspected evidence ({message.evidence.length})</summary>
+                    {#each message.evidence as evidence (evidence.id)}
+                      <details><summary>[{evidence.id}] {evidence.citation.path}:{evidence.citation.start}–{evidence.citation.end}</summary>
+                        <p class="draft-note">{evidence.citation.folder} · {evidence.citation.revision ?? 'Revision unavailable'} · {evidence.citation.contentIdentity}</p>
+                        <pre>{evidence.text}</pre>
+                        <button type="button" onclick={() => inspectEvidence(`${message.id}:${evidence.id}`, evidence)}>Inspect current file</button>
+                        {#if inspected[`${message.id}:${evidence.id}`]}<pre>{inspected[`${message.id}:${evidence.id}`]}</pre>{/if}
+                      </details>
+                    {/each}
+                  </details>
+                {/if}
+                {#if selected.kind === 'chatgpt' && message.role === 'assistant' && !['running', 'complete'].includes(message.status) && selected.messages.at(-1)?.id === message.id}
+                  <button type="button" disabled={busy || !!active} onclick={() => change(() => window.athena.retry(message.id))}>Retry</button>
+                {/if}
               </article>
             {/each}
           </div>
@@ -128,25 +170,39 @@
         <section class="chat-input" class:unsent={!selected} aria-label="Conversation composer">
           <div class="composer-heading">
             <div><div class="eyebrow">{selected ? 'Conversation' : 'Start with a question'}</div><h1>{selected?.title ?? 'New conversation'}</h1></div>
-            <span class="demo-badge">Local demo</span>
+            <span class="demo-badge">{selected && selected.kind !== 'chatgpt' ? 'Local demo · Read-only' : selected?.model ?? defaultModel ?? 'ChatGPT · Select a model'}</span>
           </div>
           {#if !selected}<p class="draft-note">Send your first message to save this conversation. Its title will be derived locally from your prompt.</p>{/if}
+          {#if selected && selected.kind !== 'chatgpt'}<p class="draft-note">This saved demonstration is read-only. Start a new conversation to use ChatGPT.</p>{/if}
           <form class="composer" onsubmit={(event) => { event.preventDefault(); void send(); }}>
             <label for="message">Message</label>
             <textarea id="message" bind:this={messageInput} bind:value={drafts[draftKey]} maxlength={MAX_MESSAGE_LENGTH} rows="3"
-              disabled={busy} placeholder="Ask a question to try the local demo…"
+              disabled={busy || (!!selected && selected.kind !== 'chatgpt')} placeholder="Ask a question or investigate your repositories…"
               onkeydown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); } }}></textarea>
             <div class="composer-actions">
-              <span>{workspace.saveError ? 'Demonstration stopped · Result not saved' : active ? 'Demonstration running. No paid work.' : selected ? 'Saved locally · No repository access · No model charges' : 'Unsent · No repository access · No model charges'}</span>
+              <span>{workspace.saveError ? 'Stopped · Result not saved' : active ? 'Working · 50 requests / 15 minutes maximum' : selected ? 'Saved locally' : 'Unsent'}</span>
               {#if active}
-                <button type="button" disabled={busy} onclick={() => change(() => window.athena.cancel())}>{workspace.saveError ? 'Retry saving' : 'Stop demonstration'}</button>
+                <button type="button" disabled={busy} onclick={() => change(() => window.athena.cancel())}>{workspace.saveError ? 'Retry saving' : 'Stop'}</button>
               {:else}
-                <button class="primary" aria-label="Send message" disabled={busy || !(drafts[draftKey] ?? '').trim()}>Send <span aria-hidden="true">↗</span></button>
+                <button class="primary" aria-label="Send message" disabled={busy || (!!selected && selected.kind !== 'chatgpt') || !(drafts[draftKey] ?? '').trim()}>Send <span aria-hidden="true">↗</span></button>
               {/if}
             </div>
           </form>
+          {#if conversationUsage}
+            <p class="draft-note" aria-label="Conversation usage">
+              {conversationUsage.requests} model {conversationUsage.requests === 1 ? 'request' : 'requests'} · {conversationUsage.reported ? `${conversationUsage.input} input · ${conversationUsage.output} output · ${conversationUsage.cachedInput} cached input tokens` : 'Token usage unavailable'}{conversationUsage.complete ? '' : ' · Usage may be incomplete'} · No dollar estimate
+            </p>
+          {/if}
         </section>
       {/if}
     </main>
   {/if}
 </div>
+
+<style>
+  .evidence { border-left: 2px solid var(--accent); padding: 8px 12px; margin: 12px 0; }
+  .evidence details { padding: 8px 0; }
+  .evidence summary { cursor: pointer; overflow-wrap: anywhere; }
+  .evidence pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
+  .evidence .draft-note { overflow-wrap: anywhere; }
+</style>

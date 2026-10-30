@@ -4,3 +4,6 @@ test-results/
 playwright-report/
 *.log
 .DS_Store
+chatgpt.sqlite*
+chatgpt-credentials.json*
+.chatgpt-credentials.json*

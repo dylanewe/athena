@@ -93,5 +93,5 @@ test('folder consent, local discovery, documentation hints, and launch-time redi
   await expect(page.getByRole('heading', { name: 'new-repository', exact: true })).toBeVisible();
   await expect(page.getByLabel('Documentation starting directories for atlas')).toHaveValue('handbook\nreference');
   expect(await page.evaluate(async () => (await window.athena.inventory.snapshot()).roots[0].consent)).toBe(FOLDER_CONSENT);
-  expect(await application.evaluate(({ app }) => app.getAppMetrics().some(metric => metric.name === 'Athena demonstration'))).toBe(false);
+  expect(await application.evaluate(({ app }) => app.getAppMetrics().some(metric => metric.name === 'Athena demonstration' || metric.name === 'Athena ChatGPT conversation'))).toBe(false);
 });

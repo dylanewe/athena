@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { ChatGPTSnapshot } from './shared/chatgpt';
 import type { SourceResult, SourceException } from './shared/sources';
 import type { InventoryWorkspace } from './shared/inventory';
 import type { ModelWorkspace } from './shared/models';
@@ -28,7 +29,25 @@ async function sourceRequest(operation: string, payload?: unknown): Promise<unkn
   return reply.result;
 }
 
+async function chatgptRequest(operation: string, payload?: unknown): Promise<ChatGPTSnapshot> {
+  const reply = await ipcRenderer.invoke('athena:chatgpt', operation, payload);
+  if (!reply.ok) throw new Error(reply.error);
+  return reply.result;
+}
+
 const bridge: DesktopBridge = {
+  chatgpt: {
+    snapshot: () => chatgptRequest('snapshot'),
+    connect: () => chatgptRequest('connect'),
+    enablePlan: () => chatgptRequest('enablePlan'),
+    refreshModels: () => chatgptRequest('refreshModels'),
+    selectModel: id => chatgptRequest('selectModel', { id }),
+    test: () => chatgptRequest('test'),
+    cancel: () => chatgptRequest('cancel'),
+    disconnect: () => chatgptRequest('disconnect'),
+    forget: () => chatgptRequest('forget'),
+    openUsage: async () => { await chatgptRequest('openUsage'); },
+  },
   sources: {
     run: (operation, input) => sourceRequest(operation, input) as Promise<SourceResult>,
     cancel: () => sourceRequest('cancel') as Promise<void>,
@@ -59,6 +78,7 @@ const bridge: DesktopBridge = {
   select: conversationId => request('select', { conversationId }),
   send: (conversationId, text) => request('send', { conversationId, text }),
   cancel: () => request('cancel'),
+  retry: messageId => request('retry', { messageId }),
   onChange(listener) {
     // Do not leak the privileged IPC event or allow a renderer-selected channel.
     const notify = () => listener();

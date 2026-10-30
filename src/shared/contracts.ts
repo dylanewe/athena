@@ -1,22 +1,31 @@
 import type { InventoryBridge } from './inventory';
 import type { ModelBridge } from './models';
 import type { SourceBridge } from './sources';
+import type { ChatGPTBridge, ChatGPTUsage } from './chatgpt';
+import type { Evidence } from './live';
 
 export const MAX_TITLE_LENGTH = 100;
 export const MAX_MESSAGE_LENGTH = 8_000;
 export const MAX_WORKER_TEXT_LENGTH = 16_000;
 
-export type MessageStatus = 'running' | 'complete' | 'failed' | 'cancelled';
+export type MessageStatus = 'running' | 'complete' | 'failed' | 'cancelled' | 'partial' | 'limit';
 
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
   text: string;
   status: MessageStatus;
+  evidence?: Evidence[];
+  usage?: ChatGPTUsage;
+  usageComplete?: boolean;
+  requests?: number;
+  activity?: string;
 }
 export interface ConversationSummary {
   id: string;
   title: string;
+  kind?: 'demo' | 'chatgpt';
+  model?: string;
 }
 export interface Conversation extends ConversationSummary {
   messages: Message[];
@@ -32,6 +41,7 @@ export interface DemoJob {
   text: string;
 }
 export interface DesktopBridge {
+  chatgpt: ChatGPTBridge;
   sources: SourceBridge;
   inventory: InventoryBridge;
   models: ModelBridge;
@@ -39,5 +49,6 @@ export interface DesktopBridge {
   select(conversationId: string): Promise<Workspace>;
   send(conversationId: string | null, text: string): Promise<Workspace>;
   cancel(): Promise<Workspace>;
+  retry(messageId: string): Promise<Workspace>;
   onChange(listener: () => void): () => void;
 }

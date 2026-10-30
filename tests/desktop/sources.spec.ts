@@ -51,7 +51,7 @@ test('browse/search/read across approved Git and non-Git material with citations
   expect(await page.locator('script').evaluateAll(elements => elements.some(element => element.textContent?.includes('not executable')))).toBe(false);
   await page.setViewportSize({ width: 640, height: 520 });
   await expect(page.getByRole('button', { name: 'Read range', exact: true })).toBeVisible();
-  expect(await application.evaluate(({ app }) => app.getAppMetrics().some(metric => metric.name?.includes('connection') || metric.name?.includes('demonstration')))).toBe(false);
+  expect(await application.evaluate(({ app }) => app.getAppMetrics().some(metric => metric.name?.includes('connection') || metric.name?.includes('demonstration') || metric.name?.includes('ChatGPT')))).toBe(false);
 });
 
 test('blocks actual environments, secrets and symlink escapes through the real preload and IPC; examples remain eligible', async () => {

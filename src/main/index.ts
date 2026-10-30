@@ -1,10 +1,10 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, safeStorage, session, utilityProcess } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, safeStorage, session, shell, utilityProcess } from 'electron';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Conversations } from './conversations';
 import { DesktopGateway } from './bridge';
-import { JobSupervisor } from './supervisor';
+import { LiveSupervisor, LiveError } from './live-supervisor';
 import { Inventory } from './inventory';
 import { InventoryGateway } from './inventory-bridge';
 import { ModelSettings, ModelSettingsError } from './model-settings';
@@ -12,6 +12,11 @@ import { ModelGateway } from './model-bridge';
 import { ConnectionProcess } from './connection-process';
 import { Sources } from './sources';
 import { SourceGateway } from './source-bridge';
+import { ChatGPTStore } from './chatgpt-store';
+import { ChatGPTOAuth, ChatGPTError } from './chatgpt-protocol';
+import { ChatGPTSettings } from './chatgpt-settings';
+import { ChatGPTProcess } from './chatgpt-process';
+import { ChatGPTGateway } from './chatgpt-bridge';
 
 app.setName('Athena');
 app.enableSandbox();
@@ -25,7 +30,7 @@ const rendererDirectory = join(output, 'renderer');
 const documentURL = pathToFileURL(join(rendererDirectory, 'index.html')).href;
 let window: BrowserWindow | undefined;
 let conversations: Conversations | undefined;
-let jobs: JobSupervisor | undefined;
+let jobs: LiveSupervisor | undefined;
 let gateway: DesktopGateway | undefined;
 let inventory: Inventory | undefined;
 let inventoryGateway: InventoryGateway | undefined;
@@ -33,6 +38,10 @@ let modelSettings: ModelSettings | undefined;
 let modelGateway: ModelGateway | undefined;
 let sources: Sources | undefined;
 let sourceGateway: SourceGateway | undefined;
+let chatgpt: ChatGPTSettings | undefined;
+let chatgptGateway: ChatGPTGateway | undefined;
+let chatgptClosed = false;
+let quitting = false;
 
 function notify() {
   if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
@@ -70,13 +79,14 @@ function createWindow() {
   });
   modelGateway = new ModelGateway(modelSettings!, { webContentsId: window.webContents.id, url: documentURL });
   sourceGateway = new SourceGateway(sources!, { webContentsId: window.webContents.id, url: documentURL });
+  chatgptGateway = new ChatGPTGateway(chatgpt!, { webContentsId: window.webContents.id, url: documentURL }, url => shell.openExternal(url), () => jobs?.cancel());
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.on('will-attach-webview', event => event.preventDefault());
-  window.webContents.on('render-process-gone', () => { jobs?.cancel(); inventory?.cancel(); modelSettings?.cancel(); sourceGateway?.cancel(); });
+  window.webContents.on('render-process-gone', () => { jobs?.cancel(); inventory?.cancel(); modelSettings?.cancel(); sourceGateway?.cancel(); chatgpt?.cancel(); });
   window.on('minimize', () => jobs?.lifecycle('minimize'));
-  window.on('close', () => { jobs?.lifecycle('window-close'); inventory?.cancel(); modelSettings?.cancel(); sourceGateway?.cancel(); });
-  window.on('closed', () => { gateway = undefined; inventoryGateway = undefined; modelGateway = undefined; sourceGateway = undefined; window = undefined; });
+  window.on('close', () => { jobs?.lifecycle('window-close'); inventory?.cancel(); modelSettings?.cancel(); sourceGateway?.cancel(); chatgpt?.cancel(); });
+  window.on('closed', () => { gateway = undefined; inventoryGateway = undefined; modelGateway = undefined; sourceGateway = undefined; chatgptGateway = undefined; window = undefined; });
   void window.loadURL(documentURL);
 }
 
@@ -87,7 +97,17 @@ if (!app.requestSingleInstanceLock()) {
     if (window?.isMinimized()) window.restore();
     window?.focus();
   });
-  app.on('before-quit', () => { jobs?.lifecycle('quit'); inventory?.cancel(); modelSettings?.cancel(); sourceGateway?.cancel(); });
+  app.on('before-quit', event => {
+    jobs?.lifecycle('quit'); inventory?.cancel(); modelSettings?.cancel(); sourceGateway?.cancel(); chatgpt?.cancel();
+    if (chatgpt && !chatgptClosed) {
+      event.preventDefault();
+      if (quitting) return;
+      quitting = true;
+      chatgptGateway = undefined;
+      // A refresh may already have rotated remotely. Wait for its bounded request and durable commit.
+      void chatgpt.close().catch(() => {}).finally(() => { chatgptClosed = true; app.quit(); });
+    }
+  });
   app.on('window-all-closed', () => app.quit());
   app.on('will-quit', () => { conversations?.close(); inventory?.close(); modelSettings?.close(); sources?.close(); });
   void app.whenReady().then(() => {
@@ -102,11 +122,6 @@ if (!app.requestSingleInstanceLock()) {
     const sourceDatabase = join(stateDirectory, 'sources.sqlite');
     sources = new Sources(sourceDatabase, inventory);
     chmodSync(sourceDatabase, 0o600);
-    jobs = new JobSupervisor(conversations, () => utilityProcess.fork(join(output, 'worker.js'), [], {
-      serviceName: 'Athena demonstration',
-      // Do not inherit provider keys, shell setup, or other secrets from the launching environment.
-      env: {}, stdio: 'ignore', cwd: stateDirectory,
-    }), notify);
     const modelDatabase = join(stateDirectory, 'models.sqlite');
     modelSettings = new ModelSettings(modelDatabase, {
       // On macOS safeStorage encrypts using a key held in the login Keychain.
@@ -118,6 +133,25 @@ if (!app.requestSingleInstanceLock()) {
       serviceName: 'Athena connection test', env: {}, stdio: 'ignore', cwd: stateDirectory,
     })), notify);
     chmodSync(modelDatabase, 0o600);
+    chatgpt = new ChatGPTSettings(new ChatGPTStore(join(stateDirectory, 'chatgpt.sqlite'), {
+      available: () => process.platform === 'darwin' && safeStorage.isEncryptionAvailable(),
+      encrypt: value => safeStorage.encryptString(value),
+      decrypt: bytes => safeStorage.decryptString(Buffer.from(bytes)),
+    }), new ChatGPTOAuth(url => shell.openExternal(url)), new ChatGPTProcess(() => utilityProcess.fork(join(output, 'chatgpt.js'), [], {
+      serviceName: 'Athena ChatGPT test', env: {}, stdio: 'ignore', cwd: stateDirectory,
+    })), notify);
+    jobs = new LiveSupervisor(conversations, chatgpt, sources, inventory, () => utilityProcess.fork(join(output, 'live.js'), [], {
+      serviceName: 'Athena ChatGPT conversation', env: {}, stdio: 'ignore', cwd: stateDirectory,
+    }), notify);
+    ipcMain.handle('athena:chatgpt', async (event, operation: unknown, payload: unknown) => {
+      try {
+        if (!chatgptGateway || quitting) throw new Error();
+        const result = await chatgptGateway.dispatch({ webContentsId: event.sender.id, isMainFrame: event.senderFrame === event.sender.mainFrame, url: event.senderFrame?.url ?? '' }, operation, payload);
+        return { ok: true, result };
+      } catch (error) {
+        return { ok: false, error: error instanceof ChatGPTError ? error.message : 'ChatGPT action rejected. Finish the current operation and check the connection and selected model.' };
+      }
+    });
     ipcMain.handle('athena:models', (event, operation: unknown, payload: unknown) => {
       try {
         if (!modelGateway) throw new Error('No model settings.');
@@ -141,9 +175,9 @@ if (!app.requestSingleInstanceLock()) {
           url: event.senderFrame?.url ?? '',
         }, operation, payload);
         return { ok: true, workspace };
-      } catch {
-        // Never serialize SQL, filesystem paths, or arbitrary native exceptions into the UI.
-        return { ok: false, error: 'Request rejected. Select a conversation and try again.' };
+      } catch (error) {
+        // Only application-authored errors, never SQL/native/provider exceptions.
+        return { ok: false, error: error instanceof LiveError || error instanceof ChatGPTError ? error.message : 'Request rejected. Select a conversation and try again.' };
       }
     });
     ipcMain.handle('athena:inventory', async (event, operation: unknown, payload: unknown) => {

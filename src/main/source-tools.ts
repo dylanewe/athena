@@ -5,8 +5,8 @@ import { sourceRequest } from './source-bridge';
 import { checkBeforeModelSend } from './secret-check';
 import type { SourceOperation } from '../shared/sources';
 
-/** Local capabilities only. Caller must separately enforce provider permission and paid-work consent. */
-export function sourceTools(sources: Sources): AgentTool[] {
+/** Local capabilities only. Caller supplies the authorized, cancellable job boundary. */
+export function sourceTools(sources: Pick<Sources, 'run'>): AgentTool[] {
   return (['list', 'search', 'read'] as const).map((operation: SourceOperation): AgentTool => ({
     name: `sources_${operation}`,
     label: `Sources: ${operation}`,

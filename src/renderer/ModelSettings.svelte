@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import ChatGPTSettings from './ChatGPTSettings.svelte';
   import { CONNECTION_MAX_TOKENS, CONNECTION_PROMPT, CONNECTION_TIMEOUT_MS, PROVIDER_CONSENT, type ModelWorkspace } from '../shared/models';
 
   let settings = $state<ModelWorkspace | null>(null);
@@ -146,6 +147,7 @@
     {:else}
       <p class="meta">Loading model settings…</p>
     {/if}
+    <ChatGPTSettings />
   </div>
 </main>
 
