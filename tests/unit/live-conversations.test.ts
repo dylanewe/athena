@@ -22,6 +22,25 @@ test('restart retains interrupted streamed text without replaying its unfinished
 
 const binding = { model: 'fixture-model', registration: 'registration-fingerprint' };
 const answer: LiveResult = { status: 'complete', text: 'Hello', history: [{ role: 'user', content: 'Hi', timestamp: 1 }], requests: 1, usageComplete: false };
+test('restart marks checkpointed findings provisional and retains detailed exploration outside public history', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'athena-exploration-'));
+  let db = new Conversations(join(directory, 'conversations.sqlite'));
+  try {
+    const job = db.beginLive(null, 'Investigate', binding);
+    db.progressLive(job.messageId, '', 'Investigator finished');
+    const exploration = { history: [{ role: 'user' as const, content: 'PRIVATE_EXPLORATION', timestamp: 1 }], result: {
+      status: 'complete' as const, findings: [], evidence: [], inspectedScope: ['repo/answer.ts'], scopeTruncated: false, unresolvedQuestions: [], candidateKnowledgeChanges: [],
+    } };
+    db.progressExploration(job.messageId, exploration, []);
+    db.close(); db = new Conversations(join(directory, 'conversations.sqlite'));
+    expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'cancelled', investigation: { status: 'partial' } });
+    expect(db.exploration(job.messageId)?.history).toEqual(exploration.history);
+    expect(db.exploration(job.messageId)?.result.status).toBe('partial');
+    expect(JSON.stringify(db.workspace())).not.toContain('PRIVATE_EXPLORATION');
+    expect(db.liveContext(job.conversationId).history).toEqual([]);
+  } finally { db.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('new live conversations pin identity and retain completed context; demonstrations cannot acquire live authority', () => {
   const db = new Conversations(':memory:');
   const demo = db.begin(null, 'Demo'); db.finish(demo.messageId, 'complete', 'Local demo');

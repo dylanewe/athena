@@ -7,7 +7,6 @@ import { pathToFileURL } from 'node:url';
 export async function installLiveFixture(application: ElectronApplication, directory: string, root?: string) {
   const fixture = join(directory, 'live-worker-fixture.mjs');
   writeFileSync(fixture, `
-    let calls = 0;
     const frame = value => 'data: ' + JSON.stringify(value) + '\\n\\n';
     const complete = frame({type:'response.completed', response:{status:'completed', usage:{input_tokens:10,output_tokens:4}}});
     globalThis.fetch = async (url, options) => {
@@ -15,10 +14,23 @@ export async function installLiveFixture(application: ElectronApplication, direc
       const body = JSON.parse(options.body);
       if (body.store !== false || body.stream !== true || body.max_output_tokens || body.temperature) throw new Error('Wrong payload');
       if (new Headers(options.headers).get('authorization') !== 'Bearer desktop-live-oauth') throw new Error('Wrong authority');
-      calls++;
-      if (${JSON.stringify(root ?? '')} && !body.input.some(item => item.type === 'function_call_output')) {
-        const item = {type:'function_call',id:'fc_1',call_id:'call_1',name:'sources_read',arguments:JSON.stringify({root:${JSON.stringify(root ?? '')},path:'answer.ts',start:1,end:1})};
+      const hasTool = name => body.tools?.some(tool => tool.name === name);
+      const called = name => body.input.some(item => item.type === 'function_call' && item.name === name);
+      const call = (name, args) => {
+        const item = {type:'function_call',id:'fc_1',call_id:'call_' + name,name,arguments:JSON.stringify(args)};
         return new Response(new TextEncoder().encode(frame({type:'response.output_item.added',output_index:0,item:{...item,arguments:''}}) + frame({type:'response.function_call_arguments.delta',output_index:0,delta:item.arguments}) + frame({type:'response.output_item.done',output_index:0,item}) + complete));
+      };
+      if (hasTool('set_conversation_title') && !called('set_conversation_title')) {
+        const question = body.input.find(item => item.role === 'user');
+        const title = 'Topic: ' + question.content.map(part => part.text ?? '').join('');
+        return call('set_conversation_title', {title: title.slice(0, 100)});
+      }
+      if (${JSON.stringify(root ?? '')}) {
+        if (hasTool('investigate') && !called('investigate')) return call('investigate', {question:'Find the exported answer'});
+        if (hasTool('sources_read')) {
+          if (!called('sources_read')) return call('sources_read', {root:${JSON.stringify(root ?? '')},path:'answer.ts',start:1,end:1});
+          return call('finish_investigation', {findings:[{claim:'The value is 42',support:'source',evidenceIds:['E1']}],unresolvedQuestions:['Runtime behavior was not observed'],candidateKnowledgeChanges:['Constant location could be remembered']});
+        }
       }
       const text = ${JSON.stringify(root ? 'The answer is 42 [E1], answer.ts:1.' : 'Fixture response.')};
       const item = {type:'message',id:'msg_1',role:'assistant',content:[{type:'output_text',text,annotations:[]}]};

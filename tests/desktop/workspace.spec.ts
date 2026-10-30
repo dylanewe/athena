@@ -49,23 +49,23 @@ test('unsent drafts stay local and unpersisted; no model or catalog request on l
 
 test('real Pi utility conversation streams, persists, switches, and continues after restart without manual catalog refresh', async () => {
   await newConversation(); await send('What can Athena do today?'); await answered();
-  await expect(page.getByRole('region', { name: 'Conversation composer' }).getByLabel('Conversation usage')).toContainText('1 model request · 10 input · 4 output');
+  await expect(page.getByRole('region', { name: 'Conversation composer' }).getByLabel('Conversation usage')).toContainText('2 model requests · 20 input · 8 output');
   await expect(page.getByRole('log')).not.toContainText('No dollar estimate');
   await newConversation();
   await expect(page.getByLabel('Conversation usage')).toHaveCount(0);
   await send('Second investigation'); await answered();
-  await page.getByRole('button', { name: 'What can Athena do today?', exact: true }).click();
+  await page.getByRole('button', { name: 'Topic: What can Athena do today?', exact: true }).click();
   await application.close(); await launch();
-  await expect(page.getByRole('heading', { name: 'What can Athena do today?', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Topic: What can Athena do today?', exact: true })).toBeVisible();
   await expect(page.getByRole('log').getByText('Fixture response.', { exact: true })).toBeVisible();
   expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: unknown }).liveFixture)).toEqual({ catalog: 0, workers: 0 });
   await send('Follow up'); await answered();
-  await expect(page.getByLabel('Conversation usage')).toContainText('2 model requests · 20 input · 8 output');
+  await expect(page.getByLabel('Conversation usage')).toContainText('3 model requests · 30 input · 12 output');
   await expect(page.getByRole('log')).not.toContainText('No dollar estimate');
   expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: { catalog: number } }).liveFixture.catalog)).toBe(1);
-  await page.getByRole('button', { name: 'Second investigation', exact: true }).click();
+  await page.getByRole('button', { name: 'Topic: Second investigation', exact: true }).click();
   await expect(page.getByRole('log').getByText('Follow up', { exact: true })).toHaveCount(0);
-  await expect(page.getByLabel('Conversation usage')).toContainText('1 model request · 10 input · 4 output');
+  await expect(page.getByLabel('Conversation usage')).toContainText('2 model requests · 20 input · 8 output');
 });
 
 test('failed first save retains the draft and creates no empty sidebar entry', async () => {
@@ -85,7 +85,7 @@ test('draft survives navigation and another conversation finishing', async () =>
   await newConversation(); await page.getByLabel('Message', { exact: true }).fill('A future investigation'); resume();
   await expect.poll(() => page.evaluate(async () => (await window.athena.workspace()).activeConversationId)).toBeNull();
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('A future investigation');
-  await page.getByRole('button', { name: 'Saved conversation', exact: true }).click(); await answered();
+  await page.getByRole('button', { name: 'Topic: Saved conversation', exact: true }).click(); await answered();
   await newConversation(); await expect(page.getByLabel('Message', { exact: true })).toHaveValue('A future investigation');
   await page.getByRole('button', { name: 'Repositories', exact: true }).click(); await page.getByRole('button', { name: 'Repositories', exact: true }).click();
   await expect(page.getByLabel('Message', { exact: true })).toHaveValue('A future investigation');
@@ -152,6 +152,11 @@ test('read-only investigation uses global folder consent, renders evidence and b
   await newConversation(); await send('Inspect the answer');
   await expect(page.getByRole('log')).toContainText('The answer is 42 [E1]');
   await expect.poll(() => page.evaluate(async () => (await window.athena.workspace()).selected?.messages.at(-1)?.status)).toBe('complete');
+  await page.getByText('Investigation · complete', { exact: true }).click();
+  await expect(page.getByRole('log')).toContainText('Inspected scope');
+  await expect(page.getByRole('log')).toContainText(root + '/answer.ts');
+  await expect(page.getByRole('log')).toContainText('Runtime behavior was not observed');
+  await expect(page.getByRole('log')).toContainText('Candidate knowledge changes (not applied)');
   await page.getByText('Inspected evidence (1)', { exact: true }).click();
   await page.getByText('[E1] answer.ts:1–1', { exact: true }).click();
   await expect(page.getByRole('log')).toContainText('export const answer = 42;');

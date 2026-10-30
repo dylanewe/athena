@@ -7,6 +7,8 @@ import type { Sources } from './sources';
 import type { Inventory } from './inventory';
 import { sourceRequest } from './source-bridge';
 import { checkBeforeModelSend } from './secret-check';
+import { MAX_TITLE_LENGTH } from '../shared/contracts';
+import { INVESTIGATION_LIMITS, validFindings, type Exploration } from '../shared/investigation';
 import { LIVE_LIMITS, type Evidence, type LiveParentMessage, type LiveResult, type LiveStart } from '../shared/live';
 
 export class LiveError extends Error {}
@@ -18,7 +20,7 @@ export interface LiveWorker {
 }
 interface Active {
   conversationId: string; messageId: string; prompt: string; controller: AbortController;
-  text: string; evidence: Evidence[]; requests: number; usage?: ChatGPTUsage; stop?: () => void;
+  text: string; evidence: Evidence[]; exploration?: Exploration; title?: string; requests: number; usage?: ChatGPTUsage; stop?: () => void;
   timer?: ReturnType<typeof setTimeout>; progressTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -57,7 +59,7 @@ export class LiveSupervisor {
           const snapshot = this.inventory.snapshot();
           const roots = snapshot.roots.map(root => ({ path: root.path, repositories: snapshot.repositories.filter(repo => repo.path === root.path || repo.path.startsWith(root.path + '/')).map(repo => ({ name: repo.name, path: repo.path })) }));
           checkBeforeModelSend({ history: previous.history, roots });
-          outcome = await this.run(active, { model: binding.model, prompt: job.prompt, history: previous.history, roots }, access, signal);
+          outcome = await this.run(active, { model: binding.model, prompt: job.prompt, history: previous.history, roots, ...this.conversations.naming(job.conversationId) }, access, signal);
           if (outcome.reason) throw new ChatGPTError(outcome.reason);
         });
         if (this.active !== active || !outcome) return;
@@ -121,6 +123,20 @@ export class LiveSupervisor {
           try {
             if (!value || typeof value !== 'object') throw new Error();
             const message = value as Record<string, unknown>;
+            if (message.type === 'checkpoint') {
+              if (!message.checkpoint || typeof message.checkpoint !== 'object') throw new Error();
+              const checkpoint = message.checkpoint as Pick<LiveResult, 'exploration' | 'title'>;
+              if (checkpoint.exploration) {
+                active.exploration = this.exploration(checkpoint.exploration, job.model, active.evidence);
+                this.conversations.progressExploration(active.messageId, active.exploration, active.evidence);
+              }
+              if (checkpoint.title !== undefined) {
+                this.validateTitle(checkpoint.title);
+                if (!job.needsTitle || active.title) throw new Error();
+                active.title = checkpoint.title;
+              }
+              this.changed(); return;
+            }
             if (message.type === 'usage') {
               if (!Number.isSafeInteger(message.request) || Number(message.request) <= lastUsage || message.request !== active.requests) throw new Error();
               lastUsage = Number(message.request);
@@ -144,10 +160,10 @@ export class LiveSupervisor {
             }
             if (message.type === 'result') {
               if (inFlight) throw new Error();
-              const result = this.result(message.result, job.model, active.requests);
+              const result = this.result(message.result, job.model, active.requests, active.evidence);
               finish(result); return;
             }
-            if (!['access', 'source'].includes(String(message.type)) || inFlight || !Number.isSafeInteger(message.id) || Number(message.id) <= lastId) throw new Error();
+            if (!['access', 'source', 'inspect'].includes(String(message.type)) || inFlight || !Number.isSafeInteger(message.id) || Number(message.id) <= lastId) throw new Error();
             lastId = Number(message.id); inFlight = true;
             void (async () => {
               try {
@@ -156,6 +172,13 @@ export class LiveSupervisor {
                   authority = access();
                   const token = await authority;
                   if (!settled && this.active === active && !signal.aborted) { active.requests++; worker!.postMessage({ type: 'reply', id: lastId, token }); }
+                } else if (message.type === 'inspect') {
+                  if (++sourceCalls > 1000) { finish(failure('limit')); return; }
+                  if (!Array.isArray(message.ids) || !message.ids.length || message.ids.length > INVESTIGATION_LIMITS.inspections || !message.ids.every(id => typeof id === 'string' && active.evidence.some(item => item.id === id))) throw new Error();
+                  const evidence = message.ids.map(id => active.evidence.find(item => item.id === id)!).map(item => ({ ...item, text: item.text.slice(0, INVESTIGATION_LIMITS.inspectionCharacters) }));
+                  if (Buffer.byteLength(JSON.stringify(evidence)) > INVESTIGATION_LIMITS.resultBytes) throw new Error();
+                  checkBeforeModelSend(evidence);
+                  worker!.postMessage({ type: 'reply', id: lastId, evidence });
                 } else {
                   if (++sourceCalls > 1000) { finish(failure('limit')); return; }
                   if (!active.requests || !['list', 'read', 'search'].includes(String(message.operation))) throw new Error();
@@ -188,7 +211,7 @@ export class LiveSupervisor {
       } catch { finish(failure()); }
     });
   }
-  private result(value: unknown, model: string, requests: number): LiveResult {
+  private result(value: unknown, model: string, requests: number, evidence: Evidence[]): LiveResult {
     if (!value || typeof value !== 'object') throw new Error();
     const r = value as LiveResult;
     if (!['complete', 'failed', 'cancelled', 'partial', 'limit'].includes(r.status) || typeof r.text !== 'string' || r.text.length > LIVE_LIMITS.answerCharacters || !Array.isArray(r.history) || Buffer.byteLength(JSON.stringify(r.history)) > LIVE_LIMITS.historyBytes) throw new Error();
@@ -199,11 +222,39 @@ export class LiveSupervisor {
     // Preserve protocol-only reasoning signatures for replay; never expose history to renderer.
     const history = r.status === 'complete' ? structuredClone(r.history) as PiMessage[] : [];
     const reason = r.reason && Object.hasOwn(CHATGPT_ERRORS, r.reason) ? r.reason : undefined;
-    return { status: r.status, text: r.text, history, requests, usageComplete: r.usageComplete === true, ...(parseChatGPTUsage(r.usage) ? { usage: parseChatGPTUsage(r.usage) } : {}), ...(reason ? { reason } : {}) };
+    if (r.title !== undefined) this.validateTitle(r.title);
+    const exploration = r.exploration ? this.exploration(r.exploration, model, evidence) : undefined;
+    return { status: r.status, text: r.text, history, requests, ...(exploration ? { exploration } : {}), ...(r.title ? { title: r.title } : {}), usageComplete: r.usageComplete === true, ...(parseChatGPTUsage(r.usage) ? { usage: parseChatGPTUsage(r.usage) } : {}), ...(reason ? { reason } : {}) };
+  }
+  private validateTitle(title: unknown): asserts title is string {
+    if (typeof title !== 'string' || !title.trim() || Array.from(title).length > MAX_TITLE_LENGTH || /[\x00-\x1f\x7f]/u.test(title)) throw new Error('Invalid title.');
+    checkBeforeModelSend(title);
+  }
+  private exploration(value: Exploration, model: string, evidence: Evidence[]): Exploration {
+    const result = value.result;
+    if (Buffer.byteLength(JSON.stringify(value)) > LIVE_LIMITS.historyBytes || !Array.isArray(value.history) || !result || !['complete', 'partial'].includes(result.status) ||
+        !Array.isArray(result.evidence) || result.evidence.length > INVESTIGATION_LIMITS.references || !validFindings({ findings: result.findings, unresolvedQuestions: result.unresolvedQuestions, candidateKnowledgeChanges: result.candidateKnowledgeChanges }, evidence) ||
+        !Array.isArray(result.inspectedScope) || result.inspectedScope.length > INVESTIGATION_LIMITS.scope || !result.inspectedScope.every(path => typeof path === 'string' && path.length <= 512) || typeof result.scopeTruncated !== 'boolean' ||
+        Buffer.byteLength(JSON.stringify(result)) > INVESTIGATION_LIMITS.resultBytes) throw new Error('Invalid investigation result.');
+    for (const item of result.evidence) {
+      if (!evidence.some(observed => observed.id === item.id && JSON.stringify(observed.citation) === JSON.stringify(item.citation) && observed.text.slice(0, INVESTIGATION_LIMITS.excerpt) === item.text)) throw new Error('Unknown investigation evidence.');
+    }
+    if (result.findings.some(finding => finding.evidenceIds.some(id => !result.evidence.some(item => item.id === id)))) throw new Error('Missing evidence reference.');
+    for (const message of value.history) {
+      if (!message || !['user', 'assistant', 'toolResult'].includes(message.role) || (message.role === 'assistant' && (message.model !== model || message.provider !== 'openai'))) throw new Error('Invalid exploration history.');
+    }
+    checkBeforeModelSend(value);
+    return structuredClone(value);
   }
   private end(active: Active, result: LiveResult): void {
     if (this.active !== active) return;
     this.active = undefined;
+    result = { ...result, ...(active.exploration && !result.exploration ? { exploration: active.exploration } : {}), ...(active.title && !result.title ? { title: active.title } : {}) };
+    if (result.status !== 'complete' && result.exploration) {
+      const previous = result.exploration.result;
+      result.exploration = { ...result.exploration, result: { ...previous, status: 'partial',
+        unresolvedQuestions: [...previous.unresolvedQuestions.slice(0, 7), 'This job did not publish a verified completed answer; findings remain provisional.'] } };
+    }
     clearTimeout(active.timer); clearTimeout(active.progressTimer);
     active.controller.abort(); active.stop?.();
     if (!result.text.trim()) result = { ...result, text: result.status === 'complete' ? '(No answer text returned.)' : 'Conversation stopped without a completed answer. Retry explicitly when ready.' };

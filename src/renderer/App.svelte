@@ -144,10 +144,29 @@
             {#each selected.messages as message (message.id)}
               <article class:user={message.role === 'user'} class="message">
                 <div class="message-heading"><strong>{message.role === 'user' ? 'You' : 'Athena'}</strong>
-                  {#if message.role === 'assistant'}<span class:problem={!['running', 'complete'].includes(message.status)}>{message.status === 'running' && workspace.saveError ? 'Not saved' : message.status === 'complete' && selected.kind !== 'chatgpt' ? 'Local demo' : message.status}</span>{/if}
+                  {#if message.role === 'assistant'}<span class:problem={!['running', 'complete'].includes(message.status)}>{message.status === 'running' && workspace.saveError ? 'Not saved' : message.status === 'complete' && selected.kind !== 'chatgpt' ? 'Local demo' : message.status === 'limit' ? 'limit-paused' : message.status}</span>{/if}
                 </div>
                 <p>{message.text}</p>
                 {#if message.status === 'running' && message.activity}<p class="draft-note">{message.activity}</p>{/if}
+                {#if message.investigation}
+                  <details class="evidence"><summary>Investigation · {message.status === 'running' ? 'in progress' : message.investigation.status}</summary>
+                    <p class="draft-note">Static source inspection, not runtime observation.</p>
+                    <strong>Inspected scope</strong>
+                    <ul>{#each message.investigation.inspectedScope as location}<li>{location}</li>{/each}</ul>
+                    {#if message.investigation.scopeTruncated}<p class="draft-note">Scope display is truncated; detailed exploration is retained locally.</p>{/if}
+                    {#each message.investigation.findings as finding}
+                      <p>{finding.claim} · {finding.support === 'source' ? 'Source-supported' : 'Uncertain interpretation'} {finding.evidenceIds.map(id => `[${id}]`).join(' ')}</p>
+                    {/each}
+                    {#if message.investigation.unresolvedQuestions.length}
+                      <strong>Unresolved questions</strong>
+                      <ul>{#each message.investigation.unresolvedQuestions as question}<li>{question}</li>{/each}</ul>
+                    {/if}
+                    {#if message.investigation.candidateKnowledgeChanges.length}
+                      <strong>Candidate knowledge changes (not applied)</strong>
+                      <ul>{#each message.investigation.candidateKnowledgeChanges as change}<li>{change}</li>{/each}</ul>
+                    {/if}
+                  </details>
+                {/if}
                 {#if message.evidence?.length}
                   <details class="evidence"><summary>Inspected evidence ({message.evidence.length})</summary>
                     {#each message.evidence as evidence (evidence.id)}
@@ -172,7 +191,7 @@
             <div><div class="eyebrow">{selected ? 'Conversation' : 'Start with a question'}</div><h1>{selected?.title ?? 'New conversation'}</h1></div>
             <span class="demo-badge">{selected && selected.kind !== 'chatgpt' ? 'Local demo · Read-only' : selected?.model ?? defaultModel ?? 'ChatGPT · Select a model'}</span>
           </div>
-          {#if !selected}<p class="draft-note">Send your first message to save this conversation. Its title will be derived locally from your prompt.</p>{/if}
+          {#if !selected}<p class="draft-note">Send your first message to save this conversation. The selected model will suggest its title; a local title is kept if naming fails.</p>{/if}
           {#if selected && selected.kind !== 'chatgpt'}<p class="draft-note">This saved demonstration is read-only. Start a new conversation to use ChatGPT.</p>{/if}
           <form class="composer" onsubmit={(event) => { event.preventDefault(); void send(); }}>
             <label for="message">Message</label>
@@ -203,6 +222,7 @@
   .evidence { border-left: 2px solid var(--accent); padding: 8px 12px; margin: 12px 0; }
   .evidence details { padding: 8px 0; }
   .evidence summary { cursor: pointer; overflow-wrap: anywhere; }
+  .evidence li { overflow-wrap: anywhere; }
   .evidence pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
   .evidence .draft-note { overflow-wrap: anywhere; }
 </style>

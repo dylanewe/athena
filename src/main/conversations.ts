@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { Message as PiMessage } from '@earendil-works/pi-ai';
+import type { Exploration } from '../shared/investigation';
 import { LIVE_LIMITS, type ConversationBinding, type Evidence, type LiveResult } from '../shared/live';
 import { DatabaseSync } from 'node:sqlite';
 import { MAX_MESSAGE_LENGTH, MAX_TITLE_LENGTH, type ConversationSummary, type DemoJob, type Message, type MessageStatus, type Workspace } from '../shared/contracts';
 
-// Temporary local excerpt; replace with approved model naming during live integration (#5).
+// Immediate local fallback until the job supplies a valid model-derived title.
 function firstPromptTitle(text: string): string {
   const characters = Array.from(text.replace(/\s+/gu, ' '));
   return characters.length <= MAX_TITLE_LENGTH ? characters.join('') : characters.slice(0, MAX_TITLE_LENGTH - 1).join('').trimEnd() + '…';
@@ -34,6 +35,7 @@ export class Conversations {
     `);
     const columns = this.db.prepare('PRAGMA table_info(conversations)').all().map(row => row.name);
     if (!columns.includes('binding')) this.db.exec('ALTER TABLE conversations ADD COLUMN binding TEXT');
+    if (!columns.includes('model_title')) this.db.exec('ALTER TABLE conversations ADD COLUMN model_title INTEGER NOT NULL DEFAULT 0');
     this.db.exec(`CREATE TABLE IF NOT EXISTS live_attempts (
       message_id TEXT PRIMARY KEY REFERENCES messages(id), user_id TEXT NOT NULL,
       prompt TEXT NOT NULL, history TEXT NOT NULL DEFAULT '[]', evidence TEXT NOT NULL DEFAULT '[]', result TEXT
@@ -45,6 +47,11 @@ export class Conversations {
       WHERE status = 'running';
     UPDATE live_attempts SET result = json_set(json_remove(result, '$.activity'), '$.status', 'cancelled', '$.usageComplete', json('false'))
       WHERE json_extract(result, '$.status') = 'running';`);
+    const attempts = this.db.prepare('PRAGMA table_info(live_attempts)').all().map(row => row.name);
+    if (!attempts.includes('exploration')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN exploration TEXT');
+    this.db.exec(`UPDATE live_attempts SET result = json_set(result, '$.investigation.status', 'partial'),
+      exploration = json_set(exploration, '$.result.status', 'partial')
+      WHERE json_extract(result, '$.status') = 'cancelled' AND json_extract(result, '$.investigation.status') = 'complete';`);
   }
 
   workspace(): Workspace {
@@ -107,6 +114,13 @@ export class Conversations {
     return JSON.parse(String(row.binding)) as ConversationBinding;
   }
 
+  naming(id: string): { needsTitle: boolean; titlePrompt?: string } {
+    this.requireConversation(id);
+    if (this.db.prepare('SELECT model_title FROM conversations WHERE id = ?').get(id)?.model_title) return { needsTitle: false };
+    const first = this.db.prepare("SELECT text FROM messages WHERE conversation_id = ? AND role = 'user' ORDER BY rowid LIMIT 1").get(id);
+    return { needsTitle: true, titlePrompt: String(first?.text ?? '') };
+  }
+
   liveContext(id: string): { history: PiMessage[]; evidence: Evidence[] } {
     this.binding(id);
     const row = this.db.prepare(`SELECT a.history, a.evidence FROM live_attempts a JOIN messages m ON m.id = a.message_id
@@ -156,14 +170,26 @@ export class Conversations {
     });
   }
 
+  exploration(messageId: string): Exploration | undefined {
+    const row = this.db.prepare('SELECT exploration FROM live_attempts WHERE message_id = ?').get(messageId);
+    return row?.exploration ? JSON.parse(String(row.exploration)) as Exploration : undefined;
+  }
+
+  progressExploration(messageId: string, exploration: Exploration, evidence: Evidence[]): void {
+    this.db.prepare(`UPDATE live_attempts SET exploration = ?, evidence = ?, result = json_patch(COALESCE(result, '{}'), ?)
+      WHERE message_id = ?`).run(JSON.stringify(exploration), JSON.stringify(evidence), JSON.stringify({ investigation: exploration.result }), messageId);
+  }
+
   finishLive(messageId: string, result: LiveResult, evidence: Evidence[]): void {
     const history = JSON.stringify(result.history);
     if (Buffer.byteLength(history) > LIVE_LIMITS.historyBytes) throw new Error('History exceeds the local limit.');
-    const { history: _history, reason: _reason, ...publicResult } = result;
+    const { history: _history, reason: _reason, exploration, title: _title, ...publicResult } = result;
     this.transaction(() => {
+      if (result.title) this.db.prepare(`UPDATE conversations SET title = ?, model_title = 1 WHERE model_title = 0
+        AND id = (SELECT conversation_id FROM messages WHERE id = ?)`).run(result.title, messageId);
       this.finish(messageId, result.status === 'partial' || result.status === 'limit' ? 'failed' : result.status, result.text);
-      this.db.prepare('UPDATE live_attempts SET history = ?, evidence = ?, result = ? WHERE message_id = ?')
-        .run(result.status === 'complete' ? history : '[]', JSON.stringify(evidence), JSON.stringify(publicResult), messageId);
+      this.db.prepare('UPDATE live_attempts SET history = ?, evidence = ?, result = ?, exploration = ? WHERE message_id = ?')
+        .run(result.status === 'complete' ? history : '[]', JSON.stringify(evidence), JSON.stringify({ ...publicResult, ...(exploration ? { investigation: exploration.result } : {}) }), exploration ? JSON.stringify(exploration) : null, messageId);
     });
   }
 

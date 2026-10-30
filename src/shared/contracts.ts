@@ -3,6 +3,7 @@ import type { ModelBridge } from './models';
 import type { SourceBridge } from './sources';
 import type { ChatGPTBridge, ChatGPTUsage } from './chatgpt';
 import type { Evidence } from './live';
+import type { InvestigatorResult } from './investigation';
 
 export const MAX_TITLE_LENGTH = 100;
 export const MAX_MESSAGE_LENGTH = 8_000;
@@ -16,6 +17,7 @@ export interface Message {
   text: string;
   status: MessageStatus;
   evidence?: Evidence[];
+  investigation?: InvestigatorResult;
   usage?: ChatGPTUsage;
   usageComplete?: boolean;
   requests?: number;
