@@ -6,7 +6,12 @@ Use implementation evidence before documentation. Cite observed evidence using e
 
 /** Keep replay signatures, not private reasoning text. */
 export function retainedHistory(agent: Agent): Message[] {
-  return agent.state.messages.filter((message): message is Message => message.role !== 'system').map(message => message.role !== 'assistant' ? message : {
-    ...message, content: message.content.map(block => block.type === 'thinking' ? { ...block, thinking: '' } : block),
+  return agent.state.messages.filter((message): message is Message => message.role !== 'system').map(message => {
+    // Retrieval snapshots are job-local. Replay the protocol pairing, not stale or
+    // subsequently revoked knowledge payloads, in later conversation turns.
+    if (message.role === 'toolResult' && message.toolName === 'retrieve_knowledge') return { ...message, content: [{ type: 'text', text: 'Prior knowledge snapshot omitted. Retrieve again under current access and freshness before using it.' }], details: undefined };
+    return message.role !== 'assistant' ? message : {
+      ...message, content: message.content.map(block => block.type === 'thinking' ? { ...block, thinking: '' } : block),
+    };
   });
 }

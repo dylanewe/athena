@@ -4,6 +4,7 @@
   import InventoryView from './Inventory.svelte';
   import KnowledgeView from './Knowledge.svelte';
   let knowledgeMessage = $state('');
+  let knowledgeRecord = $state('');
   import SourcesView from './Sources.svelte';
   import ModelSettingsView from './ModelSettings.svelte';
   import { MAX_MESSAGE_LENGTH, type Workspace } from '../shared/contracts';
@@ -118,7 +119,7 @@
     <div class="brand"><span class="brand-mark" aria-hidden="true">a.</span><span>Athena</span></div>
     <button class="new-conversation" aria-pressed={section === 'inventory'} onclick={() => section = section === 'inventory' ? 'conversation' : 'inventory'}>Repositories</button>
     <button class="new-conversation" aria-pressed={section === 'sources'} onclick={() => section = section === 'sources' ? 'conversation' : 'sources'}>Sources</button>
-    <button class="new-conversation" aria-pressed={section === 'knowledge'} onclick={() => { knowledgeMessage = ''; section = 'knowledge'; }}>Knowledge</button>
+    <button class="new-conversation" aria-pressed={section === 'knowledge'} onclick={() => { knowledgeMessage = ''; knowledgeRecord = ''; section = 'knowledge'; }}>Knowledge</button>
     <button class="new-conversation" aria-pressed={section === 'models'} onclick={() => section = section === 'models' ? 'conversation' : 'models'}>Model settings</button>
     <div class="sidebar-heading">Your conversations</div>
     <button class="new-conversation" onclick={newConversation} disabled={busy || !workspace}><span aria-hidden="true">+</span> New conversation</button>
@@ -141,7 +142,7 @@
   {:else if section === 'sources'}
     <SourcesView />
   {:else if section === 'knowledge'}
-    <KnowledgeView messageId={knowledgeMessage} openConversation={id => { void select(id); }} />
+    <KnowledgeView messageId={knowledgeMessage} recordId={knowledgeRecord} openConversation={id => { void select(id); }} />
   {:else if section === 'models'}
     <ModelSettingsView />
   {:else}
@@ -163,8 +164,13 @@
                 {#if message.ephemeral}<p class="draft-note">Ephemeral · Not saved · May contain sensitive values</p>{/if}
                 <p>{message.text}</p>
                 {#if message.status === 'running' && message.activity}<p class="draft-note">{message.activity}</p>{/if}
+                {#if message.knowledgeReferences?.length}
+                  <details><summary>Retrieved knowledge ({message.knowledgeReferences.length})</summary>
+                    {#each message.knowledgeReferences as reference}<button type="button" onclick={() => { knowledgeMessage = ''; knowledgeRecord = reference.id; section = 'knowledge'; }}>Inspect knowledge: {reference.topic}</button>{/each}
+                  </details>
+                {/if}
                 {#if message.knowledgePublication === 'published'}
-                  <button type="button" onclick={() => { knowledgeMessage = message.id; section = 'knowledge'; }}>Inspect retained knowledge</button>
+                  <button type="button" onclick={() => { knowledgeMessage = message.id; knowledgeRecord = ''; section = 'knowledge'; }}>Inspect retained knowledge</button>
                 {:else if message.knowledgePublication === 'withheld'}
                   <p class="draft-note">Knowledge not retained: validation, freshness or local storage checks did not complete. The answer remains available.</p>
                 {/if}

@@ -27,6 +27,7 @@ export interface Message {
   activity?: string;
   ephemeral?: boolean;
   knowledgePublication?: 'published' | 'withheld';
+  knowledgeReferences?: { id: string; topic: string }[];
 }
 export interface ConversationSummary {
   id: string;

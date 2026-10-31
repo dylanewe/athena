@@ -12,6 +12,7 @@ import { CHATGPT_ERRORS, parseChatGPTUsage, type ChatGPTUsage } from '../shared/
 import type { Sources } from './sources';
 import type { Inventory } from './inventory';
 import type { Knowledge } from './knowledge';
+import { KNOWLEDGE_LIMITS, type KnowledgeRequest } from '../shared/knowledge';
 import type { SourceIdentity, SourceScope } from '../shared/sources';
 import { sourceRequest } from './source-bridge';
 import { checkBeforeModelSend } from './secret-check';
@@ -28,6 +29,7 @@ export interface LiveWorker {
 }
 interface Active {
   conversationId: string; messageId: string; prompt: string; controller: AbortController; environment: EnvironmentPermissions;
+  knowledgeReferences: { id: string; topic: string }[];
   apiKey?: boolean; text: string; evidence: Evidence[]; dependencies: SourceIdentity[]; scopes: SourceScope[]; dependencyCoverageComplete: boolean; exploration?: Exploration; title?: string; requests: number; usage?: ChatGPTUsage; stop?: () => void;
   timer?: ReturnType<typeof setTimeout>; progressTimer?: ReturnType<typeof setTimeout>;
 }
@@ -65,7 +67,7 @@ export class LiveSupervisor {
     const job = this.conversations.beginLive(id, prompt, binding, retryId);
     const controller = new AbortController();
     const environment = new EnvironmentPermissions(this.sources, controller.signal, () => this.conversations.markEphemeral(job.messageId), () => this.cancel(), this.changed, content => this.conversations.rememberEnvironment(content));
-    const active: Active = { ...job, apiKey: !!binding.apiKey, controller, environment, text: '', evidence: [], dependencies: [], scopes: [], dependencyCoverageComplete: true, requests: 0 };
+    const active: Active = { ...job, apiKey: !!binding.apiKey, controller, environment, knowledgeReferences: [], text: '', evidence: [], dependencies: [], scopes: [], dependencyCoverageComplete: true, requests: 0 };
     this.active = active;
     active.timer = setTimeout(() => this.end(active, { status: 'limit', text: active.text + '\n\nTime limit reached. Retry explicitly when ready.', history: [], requests: active.requests, usageComplete: false }), LIVE_LIMITS.milliseconds);
     this.changed();
@@ -79,10 +81,9 @@ export class LiveSupervisor {
         const work = async (access: (role?: ModelRole, bytes?: number) => Promise<string | ApiGrant>, signal: AbortSignal) => {
           const snapshot = this.inventory.snapshot();
           const roots = snapshot.roots.map(root => ({ path: root.path, repositories: snapshot.repositories.filter(repo => repo.path === root.path || repo.path.startsWith(root.path + '/')).map(repo => ({ name: repo.name, path: repo.path })) }));
-          const knowledge = this.knowledge ? await this.knowledge.reusable(signal) : [];
           signal.throwIfAborted();
-          this.conversations.assertClean({ history: previous.history, roots, knowledge });
-          outcome = await this.run(active, { ...(binding.apiKey ? { apiKey: binding.apiKey } : {}), model: binding.model, prompt: job.prompt, history: previous.history, roots, knowledge, ...this.conversations.naming(job.conversationId) }, access, signal);
+          this.conversations.assertClean({ history: previous.history, roots });
+          outcome = await this.run(active, { ...(binding.apiKey ? { apiKey: binding.apiKey } : {}), model: binding.model, prompt: job.prompt, history: previous.history, roots, ...this.conversations.naming(job.conversationId) }, access, signal);
           if (outcome.reason && !binding.apiKey) throw new ChatGPTError(outcome.reason);
         };
         if (binding.apiKey) await work((role, bytes) => this.apiSettings!.grant(binding.apiKey!, role!, bytes!, active.controller.signal), active.controller.signal);
@@ -142,6 +143,7 @@ export class LiveSupervisor {
     return new Promise(resolve => {
       let worker: LiveWorker | undefined, settled = false, inFlight = false, lastId = 0, sourceCalls = 0, lastUsage = 0;
       let authority: Promise<string | ApiGrant> | undefined;
+      let knowledgeCalls = 0, knowledgeBytes = 0;
       const failure = (status: LiveResult['status'] = 'failed'): LiveResult => ({ status, text: active.text, history: [], requests: active.requests, usageComplete: false });
       const finish = (result: LiveResult) => {
         if (settled) return;
@@ -208,7 +210,7 @@ export class LiveSupervisor {
               const result = this.result(message.result, job.model, active.requests, active.evidence, job.apiKey, active.environment.tainted);
               finish(result); return;
             }
-            if (!['access', 'source', 'inspect'].includes(String(message.type)) || inFlight || !Number.isSafeInteger(message.id) || Number(message.id) <= lastId) throw new Error();
+            if (!['access', 'source', 'inspect', 'knowledge'].includes(String(message.type)) || inFlight || !Number.isSafeInteger(message.id) || Number(message.id) <= lastId) throw new Error();
             lastId = Number(message.id); inFlight = true;
             void (async () => {
               try {
@@ -218,6 +220,25 @@ export class LiveSupervisor {
                   authority = access(message.role as ModelRole, message.contextBytes as number);
                   const credential = await authority;
                   if (!settled && this.active === active && !signal.aborted) { active.requests++; worker!.postMessage({ type: 'reply', id: lastId, ...(typeof credential === 'string' ? { token: credential } : { grant: credential }) }); }
+                } else if (message.type === 'knowledge') {
+                  if (!active.requests || !this.knowledge || ++knowledgeCalls > KNOWLEDGE_LIMITS.calls) throw new Error('Knowledge request limit.');
+                  this.conversations.assertClean(message.input);
+                  const result = await this.knowledge.retrieve(message.input as KnowledgeRequest, signal);
+                  if (settled || this.active !== active || signal.aborted) return;
+                  this.conversations.assertClean(result);
+                  const { evidence: retained, ...bounded } = result;
+                  for (const item of result.items) if (active.knowledgeReferences.length < 32 && !active.knowledgeReferences.some(reference => reference.id === item.id)) active.knowledgeReferences.push({ id: item.id, topic: item.topic });
+                  if (retained) {
+                    let item = active.evidence.find(item => JSON.stringify(item.citation) === JSON.stringify(retained.citation) && item.text === retained.text);
+                    if (!item) {
+                      if (active.evidence.length >= LIVE_LIMITS.evidence) throw new Error('Evidence limit.');
+                      item = { ...retained, id: `E${active.evidence.length + 1}` }; active.evidence.push(item);
+                    }
+                    bounded.evidenceId = item.id;
+                  }
+                  knowledgeBytes += Buffer.byteLength(JSON.stringify(bounded));
+                  if (knowledgeBytes > KNOWLEDGE_LIMITS.contextBytes) throw new Error('Knowledge context limit.');
+                  worker!.postMessage({ type: 'reply', id: lastId, knowledge: bounded });
                 } else if (message.type === 'inspect') {
                   if (++sourceCalls > 1000) { finish(failure('limit')); return; }
                   if (!Array.isArray(message.ids) || !message.ids.length || message.ids.length > INVESTIGATION_LIMITS.inspections || !message.ids.every(id => typeof id === 'string' && active.evidence.some(item => item.id === id))) throw new Error();
@@ -305,7 +326,7 @@ export class LiveSupervisor {
   private end(active: Active, result: LiveResult): void {
     if (this.active !== active) return;
     this.active = undefined;
-    result = { ...result, ...(active.exploration && !result.exploration ? { exploration: active.exploration } : {}), ...(active.title && !result.title ? { title: active.title } : {}) };
+    result = { ...result, ...(active.knowledgeReferences.length && !active.environment.tainted ? { knowledgeReferences: active.knowledgeReferences } : {}), ...(active.exploration && !result.exploration ? { exploration: active.exploration } : {}), ...(active.title && !result.title ? { title: active.title } : {}) };
     if (result.status !== 'complete' && result.exploration) {
       const previous = result.exploration.result;
       result.exploration = { ...result.exploration, result: { ...previous, status: 'partial',

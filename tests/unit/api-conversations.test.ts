@@ -21,7 +21,7 @@ function knowledgeCandidate(claim = 'The answer boundary owns the application an
   return { id: 'C1', scope: `folder:${root}`, topic: 'Answer boundary', summary: 'A synchronous answer boundary.', kind: 'responsibility', claim, provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [] };
 }
 const response = (text?: string, tool?: string, args?: unknown) => [
-  { choices: [{ index: 0, delta: { role: 'assistant', ...(tool ? { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: tool, arguments: JSON.stringify(args) } }] } : { content: text }) }, finish_reason: null }] },
+  { choices: [{ index: 0, delta: { role: 'assistant', ...(tool ? { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: tool, arguments: JSON.stringify(tool === 'retrieve_knowledge' ? { request: args } : args) } }] } : { content: text }) }, finish_reason: null }] },
   { choices: [{ index: 0, delta: {}, finish_reason: tool ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 } },
 ].map(value => 'data: ' + JSON.stringify({ id: 'test', ...value }) + '\n\n').join('') + 'data: [DONE]\n\n';
 function configuration(name = 'Main one', endpoint = 'https://main.example/v1') {
@@ -41,6 +41,7 @@ class Worker extends EventEmitter {
       access: async () => { throw new Error('OAuth must not be used'); },
       apiAccess: async (role, contextBytes) => { const r = await this.rpc('access', { role, contextBytes }); if (!r.grant) throw new Error(); return r.grant; },
       source: async (operation, input) => { const r = await this.rpc('source', { operation, input }); if (!r.source) throw new Error(); return r.source; },
+      knowledge: async input => { const r = await this.rpc('knowledge', { input }); if (!r.knowledge) throw new Error(); return r.knowledge; },
       inspect: async ids => { const r = await this.rpc('inspect', { ids }); if (!r.evidence) throw new Error(); return r.evidence; },
       checkpoint: checkpoint => this.emit('message', { type: 'checkpoint', checkpoint }),
       progress: (text, activity) => this.emit('message', { type: 'progress', text, activity }),
@@ -86,6 +87,18 @@ test('real Pi agents use separate pinned API-key providers, preserve source boun
   const binding = conversations.binding(conversations.workspace().selected!.id);
   expect(JSON.stringify(binding)).not.toContain('fake-main-key');
   expect(binding.apiKey?.investigator.model.id).toBe('investigator-one');
+});
+
+test('indexed reuse stays on the pinned API-key conversation role and reserves each request without an investigator', async () => {
+  const result = await sources.run('read', { root, path: 'answer.ts', start: 1, end: 1 });
+  const entry = result.entries[0];
+  const [id] = await knowledge.publish({ owner: { conversationId: 'prior', messageId: 'prior-answer' }, candidates: [knowledgeCandidate()], evidence: [{ id: 'E1', citation: entry.citation!, text: entry.text! }], completed: true, environmentExposed: false, signal: new AbortController().signal });
+  scripts = [response(undefined, 'retrieve_knowledge', { operation: 'search', query: 'answer' }), response(undefined, 'retrieve_knowledge', { operation: 'evidence', id, index: 0 }), response('The source declares 42 [E1]; interpretation remains unchecked.')];
+  supervisor.start(null, 'Reuse the indexed answer'); await idle();
+  expect(conversations.workspace().selected?.messages.at(-1)).toMatchObject({ status: 'complete', knowledgeReferences: [{ id, topic: 'Answer boundary' }], evidence: [{ id: 'E1' }] });
+  expect(requests.map(request => request.body.model)).toEqual(['main-one', 'main-one', 'main-one']);
+  expect(reservations).toHaveLength(3);
+  expect(requests.every(request => request.url === 'https://main.example/v1/chat/completions')).toBe(true);
 });
 
 test('local-only primitive flags do not seal later API-key answers or their pinned follow-ups', async () => {

@@ -4,7 +4,7 @@ import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 /** Isolated fake saved registration; OAuth itself is exercised in chatgpt.spec.ts. */
-export async function installLiveFixture(application: ElectronApplication, directory: string, root?: string, environment = false, knowledge = false) {
+export async function installLiveFixture(application: ElectronApplication, directory: string, root?: string, environment = false, knowledge = false, reuse = false) {
   const fixture = join(directory, 'live-worker-fixture.mjs');
   writeFileSync(fixture, `
     const frame = value => 'data: ' + JSON.stringify(value) + '\\n\\n';
@@ -17,7 +17,7 @@ export async function installLiveFixture(application: ElectronApplication, direc
       const hasTool = name => body.tools?.some(tool => tool.name === name);
       const called = name => body.input.some(item => item.type === 'function_call' && item.name === name);
       const call = (name, args) => {
-        const item = {type:'function_call',id:'fc_1',call_id:'call_' + name,name,arguments:JSON.stringify(args)};
+        const item = {type:'function_call',id:'fc_1',call_id:'call_' + name,name,arguments:JSON.stringify(name === 'retrieve_knowledge' ? {request:args} : args)};
         return new Response(new TextEncoder().encode(frame({type:'response.output_item.added',output_index:0,item:{...item,arguments:''}}) + frame({type:'response.function_call_arguments.delta',output_index:0,delta:item.arguments}) + frame({type:'response.output_item.done',output_index:0,item}) + complete));
       };
       if (hasTool('set_conversation_title') && !called('set_conversation_title')) {
@@ -25,11 +25,20 @@ export async function installLiveFixture(application: ElectronApplication, direc
         const title = 'Topic: ' + question.content.map(part => part.text ?? '').join('');
         return call('set_conversation_title', {title: title.slice(0, 100)});
       }
-      if (${JSON.stringify(root ?? '')}) {
+      if (${JSON.stringify(reuse)} && hasTool('retrieve_knowledge')) {
+        const knowledgeCalls = body.input.filter(item => item.type === 'function_call' && item.name === 'retrieve_knowledge');
+        if (!knowledgeCalls.length) return call('retrieve_knowledge', {operation:'search',query:'answer'});
+        if (knowledgeCalls.length === 1) {
+          const result = body.input.findLast(item => item.type === 'function_call_output');
+          const hit = JSON.parse(result.output).items[0];
+          return call('retrieve_knowledge', {operation:'evidence',id:hit.id,index:0});
+        }
+      }
+      if (${JSON.stringify(root ?? '')} && !${JSON.stringify(reuse)}) {
         if (hasTool('investigate') && !called('investigate')) return call('investigate', {question:'Find the exported answer'});
         if (hasTool('sources_read')) {
           if (!called('sources_read')) return call('sources_read', {root:${JSON.stringify(root ?? '')},path:${JSON.stringify(environment ? '.env' : 'answer.ts')},start:1,end:1});
-          return call('finish_investigation', {findings:[{claim:${JSON.stringify(environment ? 'PASSWORD=synthetic-desktop-env-7' : 'The value is 42')},support:'source',evidenceIds:['E1']}],unresolvedQuestions:['Runtime behavior was not observed'],candidateKnowledgeChanges:['Constant location could be remembered']${knowledge ? ',knowledgeCandidates:' + JSON.stringify([{ id: 'C1', scope: `folder:${root}`, topic: 'Answer ownership', summary: 'A synchronous answer boundary.', kind: 'responsibility', claim: 'The answer module owns the application answer value.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [] }]) : ''}});
+          return call('finish_investigation', {findings:[{claim:${JSON.stringify(environment ? 'PASSWORD=synthetic-desktop-env-7' : 'The value is 42')},support:'source',evidenceIds:['E1']}],unresolvedQuestions:['Runtime behavior was not observed'],candidateKnowledgeChanges:['Constant location could be remembered']${knowledge ? ',knowledgeCandidates:' + JSON.stringify([{ id: 'C1', scope: `folder:${root}`, topic: 'Answer ownership', aliases: ['Answer value'], summary: 'A synchronous answer boundary.', kind: 'responsibility', claim: 'The answer module owns the application answer value.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [] }]) : ''}});
         }
       }
       const text = ${JSON.stringify(environment ? 'PASSWORD=synthetic-desktop-env-7' : root ? 'The answer is 42 [E1], answer.ts:1.' : 'Fixture response.')};

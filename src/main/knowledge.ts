@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
+import { KnowledgeRetrieval, knowledgeName as nameKey } from './knowledge-retrieval';
 import { relative, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Check } from 'typebox/value';
-import { knowledgeCandidatesSchema, type KnowledgeCandidate, type KnowledgeContext, type KnowledgeOwner, type KnowledgeRecord } from '../shared/knowledge';
+import { knowledgeCandidatesSchema, type KnowledgeCandidate, type KnowledgeOwner, type KnowledgeRecord, type KnowledgeRequest, type KnowledgeResult } from '../shared/knowledge';
 import type { Evidence } from '../shared/live';
 import type { SourceIdentity, SourceScope } from '../shared/sources';
 import type { Inventory } from './inventory';
@@ -21,12 +22,12 @@ interface Publication {
   assertPublishable?: () => void;
 }
 type Stored = Omit<KnowledgeRecord, 'owners' | 'relations'>;
-const nameKey = (value: string) => value.normalize('NFC').toLowerCase();
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 /** Sole writer of rebuildable knowledge. Model output is data, never SQL or authority. */
 export class Knowledge {
   private readonly db: DatabaseSync;
+  private readonly retrieval: KnowledgeRetrieval;
   private pending: Promise<unknown> = Promise.resolve();
   constructor(path: string, private readonly sources: Sources, private readonly inventory: Pick<Inventory, 'snapshot'>,
     private readonly assertClean: (material: unknown) => void) {
@@ -47,12 +48,14 @@ export class Knowledge {
         conversation_id TEXT NOT NULL, message_id TEXT NOT NULL,
         FOREIGN KEY(claim_id, kind, target) REFERENCES relations(claim_id, kind, target) ON DELETE CASCADE,
         PRIMARY KEY(claim_id, kind, target, message_id));`);
+    this.retrieval = new KnowledgeRetrieval(this.db, id => this.records(id)[0],
+      (identity, signal) => this.permitted(identity, signal), (identities, signal) => this.fresh(identities, signal),
+      (evidence, signal) => this.currentEvidence(evidence, signal));
+  }
+  retrieve(request: KnowledgeRequest, signal?: AbortSignal): Promise<KnowledgeResult> {
+    return this.serial(() => this.retrieval.retrieve(request, signal));
   }
   publish(input: Publication): Promise<string[]> { return this.serial(() => this.publishValidated(input)); }
-  async reusable(signal: AbortSignal): Promise<KnowledgeContext[]> {
-    const records = await this.inspect(signal);
-    return records.filter(record => record.validation !== 'stale').slice(-12).map(({ id, scope, topic, summary, claim, kind, provenance, perspective, validation, validationNote }) => ({ id, scope, topic, summary, claim, kind, provenance, perspective, validation, validationNote }));
-  }
   inspect(signal?: AbortSignal): Promise<KnowledgeRecord[]> {
     return this.serial(async () => {
       const records = this.records();
@@ -107,7 +110,8 @@ export class Knowledge {
       const scope = this.canonicalScope(candidate.scope, evidence);
       // Exact identity only: no fuzzy equivalence, no overwrite of differently worded claims.
       const material = { scope, topic: candidate.topic.normalize('NFC').trim(), summary: candidate.summary.trim(),
-        kind: candidate.kind, claim: candidate.claim.trim(), provenance: candidate.provenance, perspective: candidate.perspective };
+        kind: candidate.kind, claim: candidate.claim.trim(), provenance: candidate.provenance, perspective: candidate.perspective,
+        ...(candidate.aliases?.length ? { aliases: [...new Set(candidate.aliases.map(alias => alias.normalize('NFC').trim()))].sort() } : {}) };
       const sourceIdentity = (c: SourceIdentity) => ({ scope: this.scope(c), path: this.sourcePath(c), identity: c.contentIdentity });
       const ordered = <T>(items: T[]) => items.sort((a, b) => digest(a).localeCompare(digest(b)));
       const id = 'K' + digest({ ...material,
@@ -152,6 +156,7 @@ export class Knowledge {
         const previous = JSON.parse(String(saved.value)) as Stored;
         previous.dependencies = [...new Map([...previous.dependencies, ...dependencies].map(item => [digest(item), item])).values()];
         this.db.prepare('UPDATE claims SET value = ? WHERE id = ?').run(JSON.stringify(previous), record.id);
+        this.retrieval.index(previous);
       }
       for (const edge of edges) {
         this.db.prepare('INSERT OR IGNORE INTO relations VALUES (?, ?, ?)').run(edge.claim, edge.kind, edge.target);
@@ -164,8 +169,8 @@ export class Knowledge {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return records.map(item => item.record.id);
   }
-  private records(): KnowledgeRecord[] {
-    return this.db.prepare('SELECT id, value FROM claims ORDER BY rowid').all().map(row => {
+  private records(id?: string): KnowledgeRecord[] {
+    return this.db.prepare(`SELECT id, value FROM claims ${id ? 'WHERE id = ?' : ''} ORDER BY rowid`).all(...(id ? [id] : [])).map(row => {
       const record = JSON.parse(String(row.value)) as Stored;
       const relations = this.db.prepare('SELECT claim_id, kind, target FROM relations WHERE claim_id = ? OR (target = ? AND kind = ?)').all(record.id, record.id, 'conflicts-with')
         .map(edge => ({ kind: String(edge.kind) as KnowledgeRecord['relations'][number]['kind'], target: String(edge.target) === record.id ? String(edge.claim_id) : String(edge.target),
@@ -186,20 +191,40 @@ export class Knowledge {
     }
     return `folder:${citation.folder}`;
   }
+  private resolve(c: SourceIdentity): { root: string; path: string; repository: SourceIdentity['repository'] } | undefined {
+    if (!c.repository) return { root: c.folder, path: c.path, repository: null };
+    const snapshot = this.inventory.snapshot();
+    const repo = snapshot.repositories.find(repo => nameKey(repo.name) === nameKey(c.repository!.name) && repo.presence === 'present');
+    const folder = repo && snapshot.roots.find(folder => repo.path === folder.path || repo.path.startsWith(folder.path + '/'));
+    if (!repo || !folder) return;
+    return { root: folder.path, path: relative(folder.path, join(repo.path, this.sourcePath(c))), repository: { name: repo.name, path: relative(folder.path, repo.path) || '.' } };
+  }
+  private async currentEvidence(item: Evidence, signal: AbortSignal): Promise<Evidence | undefined> {
+    const location = this.resolve(item.citation);
+    if (!location) return;
+    try {
+      const result = await this.sources.run('read', { root: location.root, path: location.path, start: item.citation.start, end: item.citation.end }, signal);
+      const entry = result.entries.find(entry => !entry.ephemeral && entry.text === item.text && entry.citation?.contentIdentity === item.citation.contentIdentity);
+      if (result.status === 'complete' && entry?.citation) return { id: item.id, citation: entry.citation, text: item.text };
+    } catch { /* Unavailable evidence is not runtime support. */ }
+  }
+  private async permitted(c: SourceIdentity, signal: AbortSignal): Promise<boolean> {
+    const resolved = this.resolve(c);
+    if (!resolved) return false;
+    try {
+      const result = await this.sources.run('read', { root: resolved.root, path: resolved.path, start: 1, end: 1 }, signal);
+      return result.status === 'complete' && result.entries.some(entry => !entry.ephemeral && (entry.kind === 'directory' || entry.citation &&
+        (resolved.repository ? entry.citation.repository?.name === resolved.repository.name && entry.citation.repository.path === resolved.repository.path : entry.citation.repository === null)));
+    } catch { return false; }
+  }
   private async fresh(evidence: (Evidence | SourceIdentity | SourceScope)[], signal?: AbortSignal): Promise<boolean> {
     const checked = new Set<string>();
     for (const item of evidence) {
       signal?.throwIfAborted();
       const c = 'citation' in item ? item.citation : item;
-      let root = c.folder, path = c.path, repository = c.repository;
-      if (c.repository) {
-        const snapshot = this.inventory.snapshot();
-        const repo = snapshot.repositories.find(repo => nameKey(repo.name) === nameKey(c.repository!.name) && repo.presence === 'present');
-        const folder = repo && snapshot.roots.find(folder => repo.path === folder.path || repo.path.startsWith(folder.path + '/'));
-        if (!repo || !folder) return false;
-        root = folder.path; path = relative(root, join(repo.path, this.sourcePath(c)));
-        repository = { name: repo.name, path: relative(root, repo.path) || '.' };
-      }
+      const resolved = this.resolve(c);
+      if (!resolved) return false;
+      const { root, path, repository } = resolved;
       const start = 'citation' in item ? item.citation.start : 1;
       const end = 'citation' in item ? item.citation.end : 1;
       const operation = 'operation' in item ? item.operation : 'read';

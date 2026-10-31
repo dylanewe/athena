@@ -5,7 +5,7 @@ const parent = process.parentPort;
 if (!parent) throw new Error('Athena live conversations require an Electron utility process.');
 let started = false, next = 0;
 const pending = new Map<number, (value: Extract<LiveParentMessage, { type: 'reply' }>) => void>();
-function rpc(request: Omit<Extract<LiveRequest, { type: 'source' }>, 'id'> | Omit<Extract<LiveRequest, { type: 'access' }>, 'id'> | Omit<Extract<LiveRequest, { type: 'inspect' }>, 'id'>) {
+function rpc(request: Omit<Extract<LiveRequest, { type: 'source' }>, 'id'> | Omit<Extract<LiveRequest, { type: 'access' }>, 'id'> | Omit<Extract<LiveRequest, { type: 'inspect' }>, 'id'> | Omit<Extract<LiveRequest, { type: 'knowledge' }>, 'id'>) {
   return new Promise<Extract<LiveParentMessage, { type: 'reply' }>>((resolve, reject) => {
     const id = ++next;
     pending.set(id, value => value.error ? reject(new Error('Athena rejected the operation.')) : resolve(value));
@@ -20,6 +20,7 @@ parent.on('message', ({ data }: { data: LiveParentMessage }) => {
     access: async () => { const reply = await rpc({ type: 'access' }); if (!reply.token) throw new Error(); return reply.token; },
     apiAccess: async (role, contextBytes) => { const reply = await rpc({ type: 'access', role, contextBytes }); if (!reply.grant) throw new Error(); return reply.grant; },
     source: async (operation, input) => { const reply = await rpc({ type: 'source', operation, input }); if (!reply.source) throw new Error(); return reply.source; },
+    knowledge: async input => { const reply = await rpc({ type: 'knowledge', input }); if (!reply.knowledge) throw new Error(); return reply.knowledge; },
     inspect: async ids => { const reply = await rpc({ type: 'inspect', ids }); if (!reply.evidence) throw new Error(); return reply.evidence; },
     progress: (text, activity) => parent.postMessage({ type: 'progress', text, activity }),
     checkpoint: checkpoint => parent.postMessage({ type: 'checkpoint', checkpoint }),

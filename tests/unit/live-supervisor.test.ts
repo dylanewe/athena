@@ -23,7 +23,7 @@ function textResponse(text: string) {
   return frame({ type: 'response.output_item.added', output_index: 0, item: { ...item, content: [] } }) + frame({ type: 'response.content_part.added', output_index: 0, content_index: 0, part: { type: 'output_text', text: '', annotations: [] } }) + frame({ type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: text }) + frame({ type: 'response.output_item.done', output_index: 0, item }) + complete;
 }
 function functionResponse(name: string, args: unknown, terminal = true) {
-  const item = { type: 'function_call', id: 'fc_1', call_id: 'call_1', name, arguments: JSON.stringify(args) };
+  const item = { type: 'function_call', id: 'fc_1', call_id: 'call_1', name, arguments: JSON.stringify(name === 'retrieve_knowledge' ? { request: args } : args) };
   return frame({ type: 'response.output_item.added', output_index: 0, item: { ...item, arguments: '' } }) + frame({ type: 'response.function_call_arguments.delta', output_index: 0, delta: item.arguments }) + frame({ type: 'response.output_item.done', output_index: 0, item }) + (terminal ? complete : '');
 }
 function toolResponse(root: string, terminal = true, path = 'answer.ts') {
@@ -62,6 +62,7 @@ class Worker extends EventEmitter {
     void runLiveAgent(message.job, {
       access: async () => { const reply = await this.rpc('access'); if (!reply.token) throw new Error(); return reply.token; },
       source: async (operation, input) => { const reply = await this.rpc('source', { operation, input }); if (!reply.source) throw new Error(); return reply.source; },
+      knowledge: async input => { const reply = await this.rpc('knowledge', { input }); if (!reply.knowledge) throw new Error(); return reply.knowledge; },
       inspect: async ids => { const reply = await this.rpc('inspect', { ids }); if (!reply.evidence) throw new Error(); return reply.evidence; },
       checkpoint: checkpoint => this.emit('message', { type: 'checkpoint', checkpoint }),
       progress: (text, activity) => this.emit('message', { type: 'progress', text, activity }),
@@ -539,19 +540,90 @@ test('a new registration cannot take over an existing conversation', async () =>
   expect(store.read()!.registration!.tokens).toBeDefined();
 });
 
-test('completed scripted extraction publishes once and reuses only freshness-checked knowledge in a new investigator', async () => {
+test('main reuses query-selected knowledge and current cited evidence without an investigator or historical preload', async () => {
+  scripted(knowledgeScripts()); jobs.start(null, 'Explain the answer boundary'); await idle();
+  const [record] = await knowledge.inspect();
+  requests = [];
+  scripted([
+    functionResponse('retrieve_knowledge', { operation: 'search', query: 'answer' }),
+    functionResponse('retrieve_knowledge', { operation: 'evidence', id: record.id, index: 0 }),
+    textResponse('The source declares the answer value [E1]; the retained interpretation is unchecked.'),
+  ]);
+  jobs.start(null, 'Reuse the answer boundary'); await idle();
+  expect(db.workspace().selected?.messages.at(-1)?.status).toBe('complete');
+  expect(db.workspace().selected?.messages.at(-1)?.evidence).toMatchObject([{ id: 'E1', text: 'export const answer = 42;' }]);
+  expect(requests).toHaveLength(3);
+  expect(JSON.stringify(requests[0])).not.toContain(record.claim);
+  expect(JSON.stringify(requests[1])).toContain(record.id);
+  expect(JSON.stringify(requests[2])).toContain('evidenceId');
+  expect(db.exploration(db.workspace().selected!.messages.at(-1)!.id)).toBeUndefined();
+});
+
+test('completed scripted extraction publishes once and passes only query-selected leads to a new investigator', async () => {
   scripted(knowledgeScripts()); jobs.start(null, 'Explain the answer boundary'); await idle();
   expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', knowledgePublication: 'published' });
   const records = await knowledge.inspect();
   expect(records).toHaveLength(1);
   expect(records[0]).toMatchObject({ validation: 'unchecked', claim: 'The answer module owns the application answer value.' });
-  scripted(knowledgeScripts()); jobs.start(null, 'Explain the boundary again'); await idle();
-  expect(JSON.stringify(requests[5])).toContain(records[0].id);
+  scripted([functionResponse('retrieve_knowledge', { operation: 'search', query: 'answer' }), ...knowledgeScripts()]); jobs.start(null, 'Explain the boundary again'); await idle();
+  expect(JSON.stringify(requests[4])).not.toContain(records[0].claim);
+  expect(JSON.stringify(requests[6])).toContain(records[0].id);
   expect((await knowledge.inspect())[0].owners).toHaveLength(2);
   writeFileSync(join(root, 'answer.ts'), 'changed\n');
   expect((await knowledge.inspect())[0].validation).toBe('stale');
   scripted(investigationScripts(root)); jobs.start(null, 'Inspect current sources'); await idle();
-  expect(JSON.stringify(requests[9])).not.toContain(records[0].id);
+  expect(JSON.stringify(requests[10])).not.toContain(records[0].id);
+});
+
+test('missing/stale indexed knowledge falls back to bounded fresh investigation without a false negative claim', async () => {
+  scripted(knowledgeScripts()); jobs.start(null, 'Explain ownership'); await idle();
+  const [record] = await knowledge.inspect();
+  writeFileSync(join(root, 'answer.ts'), 'export const answer = 43;\n');
+  requests = [];
+  scripted([
+    functionResponse('retrieve_knowledge', { operation: 'search', query: 'HTTP ingress' }),
+    functionResponse('retrieve_knowledge', { operation: 'evidence', id: record.id, index: 0 }),
+    ...investigationScripts(root, 'Indexed evidence was stale; fresh source declares 43 [E1].'),
+  ]);
+  jobs.start(null, 'Check current ownership'); await idle();
+  expect(db.workspace().selected?.messages.at(-1)?.status).toBe('complete');
+  expect(JSON.stringify(requests[1])).toContain('No match is not proof of absence');
+  expect(JSON.stringify(requests[2])).toContain('stale');
+  expect(JSON.stringify(requests[2])).not.toContain('evidenceId');
+  expect(db.workspace().selected?.messages.at(-1)?.evidence).toMatchObject([{ text: 'export const answer = 43;' }]);
+});
+
+test('knowledge calls cannot crawl a ledger indefinitely and later jobs never replay retrieval snapshots', async () => {
+  scripted(knowledgeScripts()); jobs.start(null, 'Explain ownership'); await idle();
+  const [record] = await knowledge.inspect();
+  requests = [];
+  scripted([...Array.from({ length: 13 }, () => functionResponse('retrieve_knowledge', { operation: 'search', query: 'answer' })), textResponse('These remain unchecked leads.')]);
+  jobs.start(null, 'Look up answer ownership'); await idle();
+  const conversation = db.workspace().selected!;
+  expect(conversation.messages.at(-1)?.status).toBe('complete');
+  const outputs = (requests.at(-1)!.input as { type: string; output?: string }[]).filter(item => item.type === 'function_call_output');
+  expect(outputs.filter(item => item.output?.includes(record.id))).toHaveLength(12);
+  expect(outputs.at(-1)?.output).not.toContain(record.id);
+  expect(Buffer.byteLength(outputs.map(item => item.output).join(''))).toBeLessThan(64 * 1024);
+  expect(JSON.stringify(db.liveContext(conversation.id).history)).not.toContain(record.claim);
+  requests = []; scripted([textResponse('Please retrieve current sources for new claims.')]);
+  jobs.start(conversation.id, 'Continue'); await idle();
+  expect(JSON.stringify(requests[0])).not.toContain(record.claim);
+});
+
+test('main enforces the aggregate knowledge byte budget even when each ranked page fits its individual cap', async () => {
+  const read = await sources.run('read', { root, path: 'answer.ts', start: 1, end: 1 });
+  const entry = read.entries[0];
+  const ids = await knowledge.publish({ owner: { conversationId: 'prior', messageId: 'prior-message' }, candidates: Array.from({ length: 12 }, (_, index) => ({ ...knowledgeCandidate(), id: `C${index + 1}`, topic: `Gateway ${index}`, summary: 'a'.repeat(500), claim: 'b'.repeat(600), aliases: Array.from({ length: 8 }, (_, alias) => `Alias ${alias} ` + 'c'.repeat(100)) })), evidence: [{ id: 'E1', citation: entry.citation!, text: entry.text! }], completed: true, environmentExposed: false, signal: new AbortController().signal });
+  scripted([...Array.from({ length: 12 }, () => functionResponse('retrieve_knowledge', { operation: 'search', query: 'gateway', limit: 20 })), textResponse('Bounded indexed leads only.')]);
+  jobs.start(null, 'Look up gateway leads'); await idle();
+  expect(db.workspace().selected?.messages.at(-1)?.status).toBe('complete');
+  const outputs = (requests.at(-1)!.input as { type: string; output?: string }[]).filter(item => item.type === 'function_call_output');
+  const successes = outputs.filter(item => ids.some(id => item.output?.includes(id)));
+  expect(successes.length).toBeGreaterThan(0);
+  expect(successes.length).toBeLessThan(12);
+  expect(Buffer.byteLength(successes.map(item => item.output).join(''))).toBeLessThanOrEqual(64 * 1024);
+  expect(successes.every(item => Buffer.byteLength(item.output!) <= 24 * 1024)).toBe(true);
 });
 
 test('negative search files are dependencies: mutation after extraction withholds knowledge even without an answer citation', async () => {
