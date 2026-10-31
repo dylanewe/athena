@@ -127,14 +127,16 @@ export class Knowledge {
       if (target === record.id || !records.some(item => item.record.id === target) && !existing.some(item => item.id === target)) throw new Error('Unknown or self-referential claim relationship.');
       return { claim: record.id, kind: edge.kind, target };
     }));
-    const referenced = new Set(edges.map(edge => edge.target));
+    // Repetition preserves existing edges: validate that resulting graph too,
+    // even when a new model submission omits previously retained dependencies.
+    const referenced = new Set([...records.map(({ record }) => record.id), ...edges.map(edge => edge.target)]);
     const collect = (id: string): (SourceIdentity | SourceScope)[] => {
       const record = existing.find(item => item.id === id);
       if (!record) return [];
       return [...record.dependencies, ...record.scopes, ...record.relations.filter(edge => edge.kind === 'depends-on' && !referenced.has(edge.target)).flatMap(edge => { referenced.add(edge.target); return collect(edge.target); })];
     };
-    const targetDependencies = [...referenced].flatMap(collect);
-    if (!await this.fresh([...observed, ...dependencies, ...scopes, ...targetDependencies], input.signal)) throw new Error('Knowledge sources changed before publication.');
+    const graphDependencies = [...referenced].flatMap(collect);
+    if (!await this.fresh([...observed, ...dependencies, ...scopes, ...graphDependencies], input.signal)) throw new Error('Knowledge sources changed before publication.');
     guard();
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -156,7 +158,7 @@ export class Knowledge {
         this.db.prepare('INSERT OR IGNORE INTO relation_owners VALUES (?, ?, ?, ?, ?)').run(edge.claim, edge.kind, edge.target, input.owner.conversationId, input.owner.messageId);
       }
       // Recheck after writes while holding the transaction. No unfinished batch escapes on failure/cancellation.
-      if (!await this.fresh([...observed, ...dependencies, ...scopes, ...targetDependencies], input.signal)) throw new Error('Knowledge sources changed during publication.');
+      if (!await this.fresh([...observed, ...dependencies, ...scopes, ...graphDependencies], input.signal)) throw new Error('Knowledge sources changed during publication.');
       guard();
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }

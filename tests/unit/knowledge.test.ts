@@ -158,6 +158,18 @@ test('knowledge IPC is read-only and rejects foreign callers, payloads and publi
   expect(await gateway.dispatch(caller, 'inspect', undefined)).toEqual([]);
 });
 
+test('repeated normalization validates retained dependency edges even when the model omits them', async () => {
+  const observed = await evidence();
+  const [dependency] = await publish([{ ...candidate(), topic: 'Serving interface', claim: 'The service interface is synchronous.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'] }], { evidence: observed.slice(0, 1) });
+  const [dependent] = await publish([{ ...candidate(), relations: [{ kind: 'depends-on', target: dependency }] }], { evidence: observed.slice(1) });
+  writeFileSync(join(root, 'api', 'service.ts'), 'changed implementation\n');
+  expect((await knowledge.inspect()).map(record => record.validation)).toEqual(['stale', 'stale']);
+  await expect(publish([candidate()], { evidence: observed.slice(1), owner: { conversationId: 'conversation-2', messageId: 'message-2' } })).rejects.toThrow('changed');
+  const retained = (await knowledge.inspect()).find(record => record.id === dependent)!;
+  expect(retained.owners).toHaveLength(1);
+  expect(retained.relations[0].target).toBe(dependency);
+});
+
 test('repository-boundary changes invalidate unchanged source content under the old name', async () => {
   // Adding a nearer repository boundary changes ownership even if file bytes do not change.
   const nested = join(root, 'api', 'sub'); mkdirSync(nested);
