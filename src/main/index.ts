@@ -252,7 +252,8 @@ if (!app.requestSingleInstanceLock()) {
       { role: 'appMenu' }, { role: 'editMenu' }, { role: 'windowMenu' },
     ]));
     createWindow();
-    void inventory.scan();
+    // Discovery and freshness are local-only; never acquire provider access on launch.
+    void inventory.scan().then(() => knowledge?.scan()).then(notify).catch(notify);
   }).catch(() => {
     dialog.showErrorBox('Athena could not start', 'Local state could not be opened. Check that your application data folder is writable, then restart Athena.');
     app.quit();

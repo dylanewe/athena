@@ -18,6 +18,7 @@ export interface SourceCitation {
   contentIdentity: string;
 }
 export type SourceIdentity = Omit<SourceCitation, 'start' | 'end'>;
+export interface SourceCheckout extends SourceIdentity { checkout: true; complete: boolean }
 export interface SourceScope extends SourceIdentity { operation: 'list' | 'search'; query?: string }
 export interface SourceEntry {
   path: string;

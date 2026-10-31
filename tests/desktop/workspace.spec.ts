@@ -82,9 +82,13 @@ test('normalized knowledge opens from the answer, exposes evidence independently
   await page.getByText('Retrieved knowledge (1)', { exact: true }).click();
   await page.getByRole('button', { name: 'Inspect knowledge: Answer ownership', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Answer ownership', exact: true })).toBeVisible();
-  await application.close(); await launch();
+  await application.close();
+  writeFileSync(join(root, 'config.json'), '{"mode":"new"}'); // Uncited configuration changes behavior even if evidence is byte-identical.
+  await launch();
   await page.getByRole('button', { name: 'Knowledge', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Answer ownership', exact: true })).toBeVisible();
+  await expect(page.getByText('stale', { exact: true })).toBeVisible();
+  expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: unknown }).liveFixture)).toEqual({ catalog: 0, workers: 0 });
   writeFileSync(join(root, 'answer.ts'), 'export const answer = 43;\n');
   await page.getByRole('button', { name: 'Check freshness', exact: true }).click();
   await expect(page.getByText('stale', { exact: true })).toBeVisible();
@@ -92,6 +96,19 @@ test('normalized knowledge opens from the answer, exposes evidence independently
   await page.getByRole('button', { name: 'Open conversation', exact: true }).click();
   await expect(page.getByRole('log')).toContainText('The answer is 42 [E1]');
   expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: { workers: number } }).liveFixture.workers)).toBe(0);
+  await page.getByRole('button', { name: 'Knowledge', exact: true }).click();
+  await page.getByRole('button', { name: 'Prepare refresh', exact: true }).click();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue(/Investigate fresh sources.*stale knowledge/s);
+  expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: { workers: number } }).liveFixture.workers)).toBe(0);
+  await installLiveFixture(application, directory, root, false, true);
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect(page.getByRole('log')).toContainText('Investigation');
+  await expect(page.getByRole('button', { name: 'Inspect retained knowledge', exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(async () => (await window.athena.workspace()).activeConversationId)).toBeNull();
+  await page.getByRole('button', { name: 'Knowledge', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Answer ownership', exact: true })).toHaveCount(2);
+  await expect(page.getByText('stale', { exact: true })).toHaveCount(1);
+  await expect(page.getByText('unchecked', { exact: true })).toHaveCount(1);
 });
 
 test('unsent drafts stay local and unpersisted; no model or catalog request on launch', async () => {

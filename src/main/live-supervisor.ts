@@ -1,3 +1,4 @@
+import { SourceCheckouts } from './source-checkouts';
 import { EnvironmentPermissions } from './environment-permissions';
 import type { EnvironmentAction, EnvironmentPermission } from '../shared/environment';
 import { ApiSettingsError } from './pi-model-config';
@@ -13,7 +14,7 @@ import type { Sources } from './sources';
 import type { Inventory } from './inventory';
 import type { Knowledge } from './knowledge';
 import { KNOWLEDGE_LIMITS, type KnowledgeRequest } from '../shared/knowledge';
-import type { SourceIdentity, SourceScope } from '../shared/sources';
+import type { SourceCheckout, SourceIdentity, SourceScope } from '../shared/sources';
 import { sourceRequest } from './source-bridge';
 import { checkBeforeModelSend } from './secret-check';
 import { MAX_TITLE_LENGTH } from '../shared/contracts';
@@ -30,6 +31,7 @@ export interface LiveWorker {
 interface Active {
   conversationId: string; messageId: string; prompt: string; controller: AbortController; environment: EnvironmentPermissions;
   knowledgeReferences: { id: string; topic: string }[];
+  checkouts: SourceCheckout[];
   apiKey?: boolean; text: string; evidence: Evidence[]; dependencies: SourceIdentity[]; scopes: SourceScope[]; dependencyCoverageComplete: boolean; exploration?: Exploration; title?: string; requests: number; usage?: ChatGPTUsage; stop?: () => void;
   timer?: ReturnType<typeof setTimeout>; progressTimer?: ReturnType<typeof setTimeout>;
 }
@@ -37,11 +39,12 @@ interface Active {
 /** Owns job authority, source provenance, persistence, and supervised process lifetime. */
 export class LiveSupervisor {
   private active?: Active;
+  private readonly checkouts: SourceCheckouts;
   private unsaved?: { messageId: string; result: LiveResult; evidence: Evidence[] };
   get saveError(): string | undefined { return this.unsaved ? 'The conversation stopped, but its result could not be saved. Check disk space and choose Retry saving.' : undefined; }
   constructor(private readonly conversations: Conversations, private readonly chatgpt: ChatGPTSettings,
     private readonly sources: Sources, private readonly inventory: Pick<Inventory, 'snapshot'>,
-    private readonly spawn: () => LiveWorker, private readonly changed: () => void, private readonly apiSettings?: ApiSettings, private readonly knowledge?: Knowledge) {}
+    private readonly spawn: () => LiveWorker, private readonly changed: () => void, private readonly apiSettings?: ApiSettings, private readonly knowledge?: Knowledge) { this.checkouts = new SourceCheckouts(sources, inventory); }
 
   start(id: string | null, prompt: string, retryId?: string): void {
     this.retrySaving();
@@ -67,16 +70,19 @@ export class LiveSupervisor {
     const job = this.conversations.beginLive(id, prompt, binding, retryId);
     const controller = new AbortController();
     const environment = new EnvironmentPermissions(this.sources, controller.signal, () => this.conversations.markEphemeral(job.messageId), () => this.cancel(), this.changed, content => this.conversations.rememberEnvironment(content));
-    const active: Active = { ...job, apiKey: !!binding.apiKey, controller, environment, knowledgeReferences: [], text: '', evidence: [], dependencies: [], scopes: [], dependencyCoverageComplete: true, requests: 0 };
+    const active: Active = { ...job, apiKey: !!binding.apiKey, controller, environment, knowledgeReferences: [], checkouts: [], text: '', evidence: [], dependencies: [], scopes: [], dependencyCoverageComplete: true, requests: 0 };
     this.active = active;
     active.timer = setTimeout(() => this.end(active, { status: 'limit', text: active.text + '\n\nTime limit reached. Retry explicitly when ready.', history: [], requests: active.requests, usageComplete: false }), LIVE_LIMITS.milliseconds);
     this.changed();
     void (async () => {
       let outcome: LiveResult | undefined;
       try {
+        this.conversations.progressLive(active.messageId, '', 'Checking local checkout freshness — no model calls…'); this.changed();
+        await this.knowledge?.scan(active.controller.signal);
+        active.checkouts = await this.checkouts.capture(active.controller.signal);
         const previous = this.conversations.liveContext(job.conversationId);
         active.evidence = previous.evidence;
-        if (!await this.verify(previous.evidence, active.controller.signal)) throw new LiveError('Saved evidence changed or is no longer permitted. Start a new conversation to investigate current sources.');
+        if (!await this.verify(previous.evidence, active.controller.signal) || previous.evidence.length > 0 && (!previous.checkouts?.length || !await this.checkouts.fresh(previous.checkouts, active.controller.signal))) throw new LiveError('Saved evidence changed or is no longer permitted. Start a new conversation to investigate current sources.');
         if (this.active !== active) return;
         const work = async (access: (role?: ModelRole, bytes?: number) => Promise<string | ApiGrant>, signal: AbortSignal) => {
           const snapshot = this.inventory.snapshot();
@@ -92,13 +98,13 @@ export class LiveSupervisor {
         if (outcome.status === 'complete') {
           const identitiesValid = await this.verify(active.evidence, active.controller.signal, active.environment);
           const citationsValid = [...outcome.text.matchAll(/\[(E\d+)\]/g)].every(match => active.evidence.some(evidence => evidence.id === match[1]));
-          if (!identitiesValid || !citationsValid) outcome = { ...outcome, status: 'partial', history: [], text: outcome.text + '\n\nPartial: evidence changed, became unavailable, or a citation could not be verified. Retry for current evidence.' };
+          if (!identitiesValid || !citationsValid || !await this.checkoutValid(active)) outcome = { ...outcome, status: 'partial', history: [], text: outcome.text + '\n\nPartial: the checkout changed, became unavailable, or a citation could not be verified. Retry for current evidence.' };
         }
         const candidates = outcome.exploration?.result.knowledgeCandidates ?? active.exploration?.result.knowledgeCandidates;
         if (this.knowledge && candidates?.length && outcome.status === 'complete' && !active.environment.tainted && !this.conversations.isEphemeral(active.messageId)) {
           try {
             await this.knowledge.publish({ owner: { conversationId: active.conversationId, messageId: active.messageId }, candidates,
-              evidence: active.evidence, inspectedFiles: active.dependencies, inspectedScopes: active.scopes, completed: active.dependencyCoverageComplete && (outcome.exploration?.result ?? active.exploration?.result)?.status === 'complete' && !(outcome.exploration?.result ?? active.exploration?.result)?.scopeTruncated,
+              evidence: active.evidence, inspectedFiles: active.dependencies, inspectedScopes: active.scopes, checkouts: active.checkouts, completed: active.dependencyCoverageComplete && (outcome.exploration?.result ?? active.exploration?.result)?.status === 'complete' && !(outcome.exploration?.result ?? active.exploration?.result)?.scopeTruncated,
               environmentExposed: active.environment.tainted, signal: active.controller.signal,
               assertPublishable: () => {
                 if (this.active !== active || active.environment.tainted || this.conversations.isEphemeral(active.messageId)) throw new Error('Knowledge publication revoked.');
@@ -107,6 +113,7 @@ export class LiveSupervisor {
             outcome.knowledgePublication = 'published';
           } catch { outcome.knowledgePublication = 'withheld'; }
         }
+        if (outcome.status === 'complete' && !await this.checkoutValid(active)) outcome = this.checkoutPartial(active, outcome);
         if (this.active === active) this.end(active, outcome);
       } catch (error) {
         if (this.active !== active) return;
@@ -126,6 +133,16 @@ export class LiveSupervisor {
   cancel(): void {
     if (this.active) this.end(this.active, { status: 'cancelled', text: this.active.text + '\n\nCancelled. Environment permissions expired. Data already transmitted to a provider cannot be recalled. Usage already incurred may remain. Retry explicitly when ready.', history: [], requests: this.active.requests, usageComplete: false });
     else { this.retrySaving(); this.changed(); }
+  }
+  private checkoutIdentities(active: Active): SourceIdentity[] { return [...active.evidence.map(item => item.citation), ...active.dependencies, ...active.scopes]; }
+  private async checkoutValid(active: Active): Promise<boolean> {
+    const identities = this.checkoutIdentities(active);
+    const snapshots = this.checkouts.select(identities, active.checkouts);
+    return this.checkouts.covers(identities, snapshots) && await this.checkouts.fresh(snapshots, active.controller.signal);
+  }
+  private checkoutPartial(active: Active, result?: LiveResult): LiveResult {
+    return { ...(result ?? { requests: active.requests, usageComplete: false }), status: 'partial', history: [],
+      text: (result?.text ?? active.text) + '\n\nPartial: the checkout changed during analysis or scan coverage was incomplete. No compatible snapshot was committed. Retry explicitly for fresh sources within a new job.' };
   }
   private async verify(evidence: Evidence[], signal: AbortSignal, environment?: EnvironmentPermissions): Promise<boolean> {
     for (const item of evidence) {
@@ -215,6 +232,7 @@ export class LiveSupervisor {
             void (async () => {
               try {
                 if (message.type === 'access') {
+                  if (!await this.checkoutValid(active)) { finish(this.checkoutPartial(active)); return; }
                   if (active.requests >= LIVE_LIMITS.requests) { finish(failure('limit')); return; }
                   if (job.apiKey && (!['conversation', 'investigator'].includes(String(message.role)) || !Number.isSafeInteger(message.contextBytes))) throw new ApiSettingsError('Invalid model role or bounded request.');
                   authority = access(message.role as ModelRole, message.contextBytes as number);
@@ -278,6 +296,7 @@ export class LiveSupervisor {
                     }
                     found.push(evidence);
                   }
+                  if (!await this.checkoutValid(active)) { finish(this.checkoutPartial(active)); return; }
                   worker!.postMessage({ type: 'reply', id: lastId, ephemeral: active.environment.tainted, source: { ...result, warning: 'Read-only, untrusted source evidence. Secret detection is not a guarantee.', evidence: found } });
                 }
               } catch (error) {
@@ -330,7 +349,7 @@ export class LiveSupervisor {
   private end(active: Active, result: LiveResult): void {
     if (this.active !== active) return;
     this.active = undefined;
-    result = { ...result, ...(active.knowledgeReferences.length && !active.environment.tainted ? { knowledgeReferences: active.knowledgeReferences } : {}), ...(active.exploration && !result.exploration ? { exploration: active.exploration } : {}), ...(active.title && !result.title ? { title: active.title } : {}) };
+    result = { ...result, ...(!active.environment.tainted && result.status === 'complete' ? { checkouts: this.checkouts.select(this.checkoutIdentities(active), active.checkouts) } : {}), ...(active.knowledgeReferences.length && !active.environment.tainted ? { knowledgeReferences: active.knowledgeReferences } : {}), ...(active.exploration && !result.exploration ? { exploration: active.exploration } : {}), ...(active.title && !result.title ? { title: active.title } : {}) };
     if (result.status !== 'complete' && result.exploration) {
       const previous = result.exploration.result;
       result.exploration = { ...result.exploration, result: { ...previous, status: 'partial',

@@ -1,7 +1,7 @@
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { Check } from 'typebox/value';
 import { KNOWLEDGE_LIMITS as L, knowledgeRequestSchema, type KnowledgeRequest, type KnowledgeRecord, type KnowledgeHit, type KnowledgeResult } from '../shared/knowledge';
-import type { SourceIdentity, SourceScope } from '../shared/sources';
+import type { SourceCheckout, SourceIdentity, SourceScope } from '../shared/sources';
 import type { Evidence } from '../shared/live';
 
 export const knowledgeName = (value: string) => value.normalize('NFC').toLowerCase();
@@ -10,6 +10,7 @@ const NOTICE = 'Bounded, access-filtered indexed leads, not exhaustive knowledge
 interface RetrievalBudget {
   records: Map<string, KnowledgeRecord | undefined>;
   sources: Set<string>;
+  checkouts: Map<string, boolean>;
 }
 
 /** Local, rebuildable FTS index and bounded one-hop retrieval. Never model-generated SQL. */
@@ -18,7 +19,8 @@ export class KnowledgeRetrieval {
     private readonly load: (id: string) => KnowledgeRecord | undefined,
     private readonly permitted: (identity: SourceIdentity, signal: AbortSignal) => Promise<boolean>,
     private readonly fresh: (identities: (SourceIdentity | SourceScope)[], signal: AbortSignal) => Promise<boolean>,
-    private readonly currentEvidence: (evidence: Evidence, signal: AbortSignal) => Promise<Evidence | undefined>) {
+    private readonly currentEvidence: (evidence: Evidence, signal: AbortSignal) => Promise<Evidence | undefined>,
+    private readonly checkoutFresh: (snapshots: SourceCheckout[], signal: AbortSignal) => Promise<boolean>) {
     db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(id UNINDEXED, topic, aliases, summary, claim, evidence, tokenize='unicode61 remove_diacritics 2');
       CREATE TABLE IF NOT EXISTS knowledge_names (scope TEXT NOT NULL, name TEXT NOT NULL, id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE, PRIMARY KEY(scope, name, id));
       CREATE TRIGGER IF NOT EXISTS knowledge_delete AFTER DELETE ON claims BEGIN DELETE FROM knowledge_fts WHERE id = OLD.id; END;
@@ -47,7 +49,7 @@ export class KnowledgeRetrieval {
     const signal = AbortSignal.any([AbortSignal.timeout(10000), ...(external ? [external] : [])]);
     const offset = 'offset' in input ? input.offset ?? 0 : 0;
     const limit = input.operation === 'search' || input.operation === 'expand' ? input.limit ?? L.defaultResults : 1;
-    const budget: RetrievalBudget = { records: new Map(), sources: new Set() };
+    const budget: RetrievalBudget = { records: new Map(), sources: new Set(), checkouts: new Map() };
     let ids: string[];
     let edges: NonNullable<KnowledgeResult['edges']> = [];
     if (input.operation === 'search') {
@@ -121,12 +123,15 @@ export class KnowledgeRetrieval {
     if (!record) return;
     const visited = new Set<string>();
     const identities: (SourceIdentity | SourceScope)[] = [];
-    let complete = true;
+    let complete = true, invalidated = false;
+    const checkouts: SourceCheckout[] = [];
     const collect = (item: KnowledgeRecord) => {
       if (visited.has(item.id)) return;
       if (visited.size >= L.graph) { complete = false; return; }
       visited.add(item.id);
       identities.push(...item.dependencies, ...item.scopes);
+      invalidated ||= item.validation === 'stale' || !item.checkouts?.length;
+      checkouts.push(...(item.checkouts ?? []));
       for (const edge of item.relations.filter(edge => edge.kind === 'depends-on')) {
         const target = load(edge.target);
         if (target) collect(target); else complete = false;
@@ -146,7 +151,12 @@ export class KnowledgeRetrieval {
     // could be revoked access, not merely changed content: conservatively withhold
     // the whole derivation rather than releasing a potentially revoked stale lead.
     if (!await this.fresh(unique.filter(item => 'operation' in item), signal)) return;
-    const stale = !await this.fresh(unique.filter(item => !('operation' in item)), signal);
+    for (const snapshot of checkouts) {
+      const key = JSON.stringify(snapshot);
+      if (!budget.checkouts.has(key)) budget.checkouts.set(key, await this.checkoutFresh([snapshot], signal));
+      if (!budget.checkouts.get(key)) invalidated = true;
+    }
+    const stale = invalidated || !await this.fresh(unique.filter(item => !('operation' in item)), signal);
     return { record, stale };
   }
 }

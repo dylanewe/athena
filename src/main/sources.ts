@@ -7,7 +7,7 @@ import ignore, { type Ignore } from 'ignore';
 import type { Inventory } from './inventory';
 import { FOLDER_CONSENT } from '../shared/inventory';
 import { suspectedSecret } from './secret-check';
-import { SOURCE_LIMITS as L, SOURCE_WARNING, type SourceCitation, type SourceEntry, type SourceScope, type SourceException, type SourceOperation, type SourceRequest, type SourceResult } from '../shared/sources';
+import { SOURCE_LIMITS as L, SOURCE_WARNING, type SourceCheckout, type SourceCitation, type SourceEntry, type SourceScope, type SourceException, type SourceOperation, type SourceRequest, type SourceResult } from '../shared/sources';
 
 const skipped = new Set(['node_modules', 'vendor', 'vendors', 'bower_components', 'dist', 'build', 'out', 'target', 'coverage', '__pycache__', 'venv', 'env', 'pods', 'carthage']);
 const generated = /(?:\.min\.(?:js|css)|\.map|\.lock|\.generated\.[^.]+|\.g\.[^.]+|^package-lock\.json|^npm-shrinkwrap\.json|^pnpm-lock\.yaml)$/i;
@@ -65,7 +65,18 @@ export class Sources {
     return this.exceptions();
   }
 
-  async run(operation: SourceOperation, input: SourceRequest, signal?: AbortSignal, permission?: EnvironmentAccess, trackInspected = false): Promise<SourceResult> {
+  /** Local content census through the exact analysis reader/policy, without excerpts or model calls.
+   * Incomplete coverage never establishes a current checkout. No Git processes or writes. */
+  async checkout(root: string, path: string, signal?: AbortSignal): Promise<SourceCheckout | undefined> {
+    const result = await this.execute('search', { root, path, query: 'checkout' }, signal, undefined, true, true);
+    if (!result.inspectedScope) return;
+    const { operation: _operation, query: _query, ...identity } = result.inspectedScope;
+    return { ...identity, checkout: true, complete: result.status === 'complete' };
+  }
+  run(operation: SourceOperation, input: SourceRequest, signal?: AbortSignal, permission?: EnvironmentAccess, trackInspected = false): Promise<SourceResult> {
+    return this.execute(operation, input, signal, permission, trackInspected);
+  }
+  private async execute(operation: SourceOperation, input: SourceRequest, signal?: AbortSignal, permission?: EnvironmentAccess, trackInspected = false, checkout = false): Promise<SourceResult> {
     if (!['list', 'search', 'read'].includes(operation)) throw new Denied('Unsupported source operation.');
     const root = this.root(input.root);
     const path = location(input.path);
@@ -82,12 +93,14 @@ export class Sources {
     };
     const result: SourceResult = { entries: [], status: 'complete', scanned: 0, bytesRead: 0, warning: SOURCE_WARNING };
     let scope: SourceScope | undefined;
+    const checkoutParts: string[] = [];
     const repositoryIdentity = (owner: string | null): SourceCitation['repository'] => owner ? {
       name: this.inventory.snapshot().repositories.find(repo => repo.path === owner)?.name ?? basename(owner),
       path: relative(root, owner) || '.',
     } : null;
     const push = (entry: SourceEntry) => {
       budget.check();
+      if (checkout) { checkoutParts.push(JSON.stringify({ ...entry, path: relative(path, entry.path) })); return; }
       const bytes = Buffer.byteLength(JSON.stringify(entry));
       if (result.entries.length >= L.results || budget.output + bytes > L.outputBytes) throw new Stopped('Result or output-byte limit reached.');
       result.entries.push(entry); budget.output += bytes;
@@ -105,6 +118,10 @@ export class Sources {
       }
       if (trackInspected && name === path && operation !== 'read') {
         scope = { folder: root, repository: repositoryIdentity(access.owner), path, revision: null, contentIdentity: 'sha256:' + '0'.repeat(64), operation, ...(operation === 'search' ? { query: input.query } : {}) };
+        if (checkout && access.owner) {
+          scope.revision = await this.revision(root, access.owner, budget);
+          checkoutParts.push(JSON.stringify({ revision: scope.revision, head: await this.optionalText(root, join(access.owner, '.git/HEAD'), budget) }));
+        }
         // Reserve the final fixed-length identity envelope BEFORE admitting entries.
         budget.output += Buffer.byteLength(JSON.stringify(scope)) + 32;
         if (budget.output > L.outputBytes) throw new Stopped('Scope identity output-byte limit reached.');
@@ -134,6 +151,10 @@ export class Sources {
         const identity = createHash('sha256').update(content).digest('hex');
         const revision = access.owner ? await this.revision(root, access.owner, budget) : null;
         const repository = repositoryIdentity(access.owner);
+        if (checkout) {
+          checkoutParts.push(JSON.stringify({ path: relative(path, name), repository: repository?.name ?? null, identity, revision }));
+          return;
+        }
         const beforeEntries = result.entries.length;
         const excerpt = (first: number, last: number) => {
           const value = lines.slice(first - 1, last).join('\n');
@@ -180,7 +201,7 @@ export class Sources {
       // are relative to the inspected scope so explicit repository reconnection works.
       const identity = (c: Omit<SourceCitation, 'start' | 'end'>) => ({ repository: c.repository?.name.normalize('NFC').toLowerCase() ?? null, path: relative(path, c.path), revision: c.revision, contentIdentity: c.contentIdentity });
       const sorted = (values: unknown[]) => values.map(value => JSON.stringify(value)).sort();
-      const material = { entries: sorted(result.entries.map(entry => ({ ...entry, path: relative(path, entry.path), ...(entry.citation ? { citation: { ...identity(entry.citation), start: entry.citation.start, end: entry.citation.end } } : {}) }))), inspectedFiles: sorted((result.inspectedFiles ?? []).map(identity)) };
+      const material = checkout ? checkoutParts.sort() : { entries: sorted(result.entries.map(entry => ({ ...entry, path: relative(path, entry.path), ...(entry.citation ? { citation: { ...identity(entry.citation), start: entry.citation.start, end: entry.citation.end } } : {}) }))), inspectedFiles: sorted((result.inspectedFiles ?? []).map(identity)) };
       result.inspectedScope = { ...scope, contentIdentity: 'sha256:' + createHash('sha256').update(JSON.stringify(material)).digest('hex') };
     }
     return result;

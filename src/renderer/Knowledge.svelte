@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import type { KnowledgeHit } from '../shared/knowledge';
-  let { messageId = '', recordId = '', openConversation }: { messageId?: string; recordId?: string; openConversation: (id: string) => void } = $props();
+  let { messageId = '', recordId = '', openConversation, prepareRefresh }: { messageId?: string; recordId?: string; openConversation: (id: string) => void; prepareRefresh: (record: KnowledgeHit) => void } = $props();
   let records = $state<KnowledgeHit[]>([]);
   let error = $state('');
   let busy = $state(true);
@@ -53,7 +53,7 @@
       if (!c) { inspected[key] = 'Current file is unavailable or withheld.'; return; }
       const result = await window.athena.sources.run('read', { root: c.folder, path: c.path, start: c.start, end: c.end });
       const entry = result.entries.find(entry => entry.citation);
-      inspected[key] = entry ? `${entry.citation?.contentIdentity === c.contentIdentity ? 'Matches retained content.' : 'Changed — this is not the retained version.'}\n\n${entry.text}` : 'Current file is unavailable or withheld. A reconnected repository may have moved; inspect its new location in Sources.';
+      inspected[key] = entry ? `${entry.citation?.contentIdentity === c.contentIdentity ? 'Matches retained content. File equality is not proof of unchanged behavior.' : 'Changed — this is not the retained version.'}\n\n${entry.text}` : 'Current file is unavailable or withheld. A reconnected repository may have moved; inspect its new location in Sources.';
     } catch { inspected[key] = 'Current file unavailable. Finish other source browsing and retry.'; }
   }
   onMount(() => { if (recordId) void showClaim(recordId); else void load(); });
@@ -62,7 +62,7 @@
 <main>
   <header><div><div class="eyebrow">Source-backed · On this Mac</div><h1>Knowledge</h1></div><button disabled={busy} onclick={() => detailId ? showClaim(detailId) : load(offset)}>Check freshness</button></header>
   <div class="knowledge-content">
-    <p class="intro">Find concise architectural and domain findings. Static inspection is not runtime observation.</p>
+    <p class="intro">Find concise architectural and domain findings. Static inspection is not runtime observation. Prepare refresh opens an unsent investigation draft; only Send starts model work under your existing permissions and job limits.</p>
     <form class="search" onsubmit={event => { event.preventDefault(); search(); }}>
       <label>Search knowledge<input aria-label="Search knowledge" bind:value={query} maxlength="200" placeholder="Topic, claim or evidence text" /></label>
       <label>Repository scope<input aria-label="Repository scope" bind:value={scope} placeholder="Registered name or alias" /></label>
@@ -82,6 +82,7 @@
         <p class="meta">{record.provenance === 'declared' ? 'Declared in source' : 'Statically inferred'} · {record.perspective === 'current' ? 'Current-source interpretation' : record.perspective === 'intended' ? 'Intended behavior, not implementation' : 'Historical decision, not current behavior'} · Sources {record.freshness}</p>
         <p class="meta">{record.validationNote}</p>
         <button disabled={busy} onclick={() => showClaim(record.id)}>Knowledge details</button>
+        {#if record.freshness === 'stale'}<button disabled={busy} onclick={() => prepareRefresh(record)}>Prepare refresh</button>{/if}
         {#if record.relations.length}<strong>Claim relationships</strong><ul>{#each record.relations as relation}<li>{relation.kind} · <a href={`#${relation.target}`} onclick={event => { event.preventDefault(); void showClaim(relation.target); }}>{relation.target}</a>{#each relation.owners ?? [] as owner}<button onclick={() => openConversation(owner.conversationId)}>Relationship source</button>{/each}</li>{/each}</ul>{/if}
         <details><summary>Evidence ({record.evidence.length})</summary>
           {#each record.evidence as evidence}

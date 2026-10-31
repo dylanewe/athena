@@ -1,6 +1,6 @@
 import { Type, type Static } from 'typebox';
 import type { Evidence } from './live';
-import type { SourceIdentity, SourceScope } from './sources';
+import type { SourceCheckout, SourceIdentity, SourceScope } from './sources';
 
 const bounded = (maxLength: number) => Type.String({ minLength: 1, maxLength, pattern: '^(?=.*\\S)[^\\x00-\\x1f\\x7f]+$' });
 export const knowledgeCandidatesSchema = Type.Array(Type.Object({
@@ -27,6 +27,8 @@ export interface KnowledgeRecord extends Omit<KnowledgeCandidate, 'id' | 'eviden
   evidence: Evidence[];
   dependencies: SourceIdentity[];
   scopes: SourceScope[];
+  /** Absent on legacy records: revalidation is required, never inferred from evidence equality. */
+  checkouts?: SourceCheckout[];
   relations: { kind: 'conflicts-with' | 'supports' | 'depends-on'; target: string; owners: KnowledgeOwner[] }[];
   owners: KnowledgeOwner[];
 }

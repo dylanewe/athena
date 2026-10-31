@@ -35,6 +35,80 @@ const candidate = () => ({ id: 'C1', scope: 'public-api', topic: 'Request servin
 async function publish(candidates: unknown = [candidate()], overrides = {}) {
   return knowledge.publish({ owner: { conversationId: 'conversation-1', messageId: 'message-1' }, candidates, evidence: await evidence(), completed: true, environmentExposed: false, signal: new AbortController().signal, ...overrides });
 }
+test('local checkout scans invalidate an unchanged citation when an uninspected caller changes, and persist invalidation across reverts', async () => {
+  const [id] = await publish();
+  await knowledge.scan();
+  expect((await knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('current');
+  writeFileSync(join(root, 'api', 'caller.ts'), 'serve();\n');
+  await knowledge.scan();
+  expect((await knowledge.retrieve({ operation: 'evidence', id, index: 0 })).evidence).toBeUndefined();
+  expect((await knowledge.inspect())[0].validation).toBe('stale');
+  rmSync(join(root, 'api', 'caller.ts'));
+  await knowledge.scan();
+  expect((await knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('stale');
+  const [replacement] = await publish();
+  expect(replacement).not.toBe(id);
+  expect((await knowledge.retrieve({ operation: 'detail', id: replacement })).items[0].freshness).toBe('current');
+  expect((await knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('stale');
+});
+
+test('configuration, deletion, rename and checkout revision changes invalidate unchanged cited implementations', async () => {
+  const caller = join(root, 'api', 'caller.ts'), renamed = join(root, 'api', 'renamed.ts'), config = join(root, 'api', 'config.json');
+  const head = join(root, 'api', '.git', 'HEAD');
+  writeFileSync(caller, 'serve();\n');
+  try {
+    let [id] = await publish();
+    await knowledge.scan();
+    expect((await knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('current');
+    for (const change of [
+      () => writeFileSync(config, '{"mode":"new"}'),
+      () => renameSync(caller, renamed),
+      () => rmSync(renamed),
+      () => writeFileSync(head, 'a'.repeat(40)),
+      () => writeFileSync(head, 'b'.repeat(40)),
+    ]) {
+      change(); await knowledge.scan();
+      expect((await knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('stale');
+      [id] = await publish();
+      expect((await knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('current');
+    }
+  } finally { for (const path of [caller, renamed, config, head]) rmSync(path, { force: true }); }
+});
+
+test('launch-style local scans persist transitive cross-repository invalidation without reviving shared claims or unrelated contributions', async () => {
+  const other = join(root, 'other'); mkdirSync(join(other, '.git'), { recursive: true });
+  writeFileSync(join(other, 'notes.md'), 'Independent implementation.\n');
+  snapshot.repositories.push({ ...snapshot.repositories[0], name: 'other', path: other });
+  try {
+    const [first] = await publish();
+    await publish(undefined, { owner: { conversationId: 'shared', messageId: 'shared' } });
+    const read = await sources.run('read', { root, path: 'other/notes.md', start: 1, end: 1 });
+    const observed = [{ id: 'E1', citation: read.entries[0].citation!, text: read.entries[0].text! }];
+    const [second, third, unrelated] = await publish([
+      { ...candidate(), scope: 'other', evidenceIds: ['E1'], topic: 'Dependent', relations: [{ kind: 'depends-on', target: first }] },
+      { ...candidate(), id: 'C2', scope: 'other', evidenceIds: ['E1'], topic: 'Transitive', relations: [{ kind: 'depends-on', target: 'C1' }] },
+      { ...candidate(), id: 'C3', scope: 'other', evidenceIds: ['E1'], topic: 'Independent' },
+    ], { evidence: observed });
+    writeFileSync(join(root, 'api', 'service.ts'), 'changed');
+    await knowledge.scan();
+    const reopened = new Knowledge(join(directory, 'knowledge.sqlite'), sources, inventory, () => {});
+    try {
+      for (const id of [first, second, third]) expect((await reopened.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('stale');
+      expect((await reopened.retrieve({ operation: 'detail', id: unrelated })).items[0].freshness).toBe('current');
+      const [fresh] = await publish();
+      expect(fresh).not.toBe(first);
+      expect((await knowledge.inspect()).find(item => item.id === first)?.owners).toHaveLength(2);
+      expect((await reopened.retrieve({ operation: 'detail', id: second })).items[0].freshness).toBe('stale');
+      const [refreshedSecond, refreshedThird] = await publish([
+        { ...candidate(), scope: 'other', evidenceIds: ['E1'], topic: 'Dependent', relations: [{ kind: 'depends-on', target: fresh }] },
+        { ...candidate(), id: 'C2', scope: 'other', evidenceIds: ['E1'], topic: 'Transitive', relations: [{ kind: 'depends-on', target: 'C1' }] },
+      ], { evidence: observed });
+      for (const id of [refreshedSecond, refreshedThird, unrelated]) expect((await reopened.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('current');
+      for (const id of [first, second, third]) expect((await reopened.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('stale');
+    } finally { reopened.close(); }
+  } finally { snapshot.repositories.pop(); rmSync(other, { recursive: true }); }
+});
+
 test('search ranks names and aliases within repository scope and retrieves retained evidence text', async () => {
   const [id] = await publish([{ ...candidate(), aliases: ['Gateway'] }]);
   const result = await knowledge.retrieve({ operation: 'search', query: 'gateway', scope: 'PUBLIC-API', exact: true });
@@ -237,6 +311,15 @@ test('mutation of an uncited inspected dependency before commit rolls back the w
   let checks = 0;
   await expect(publish(undefined, { assertPublishable: () => { if (++checks === 2) writeFileSync(join(root, 'api', 'service.ts'), 'changed'); } })).rejects.toThrow('changed');
   expect(await knowledge.inspect()).toEqual([]);
+});
+
+test('uncited checkout mutation inside publication rolls back the entire contribution', async () => {
+  let checks = 0;
+  const config = join(root, 'api', 'config.json');
+  try {
+    await expect(publish(undefined, { assertPublishable: () => { if (++checks === 2) writeFileSync(config, '{"mode":"changed"}'); } })).rejects.toThrow('Checkout changed');
+    expect(await knowledge.inspect()).toEqual([]);
+  } finally { rmSync(config, { force: true }); }
 });
 
 test('a storage failure after the first claim insert rolls back claims, ownership and relationships', async () => {

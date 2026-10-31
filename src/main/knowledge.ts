@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
+import { SourceCheckouts } from './source-checkouts';
 import { KnowledgeRetrieval, knowledgeName as nameKey } from './knowledge-retrieval';
 import { relative, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Check } from 'typebox/value';
 import { knowledgeCandidatesSchema, type KnowledgeCandidate, type KnowledgeOwner, type KnowledgeRecord, type KnowledgeRequest, type KnowledgeResult } from '../shared/knowledge';
 import type { Evidence } from '../shared/live';
-import type { SourceIdentity, SourceScope } from '../shared/sources';
+import type { SourceCheckout, SourceIdentity, SourceScope } from '../shared/sources';
 import type { Inventory } from './inventory';
 import type { Sources } from './sources';
 
@@ -15,25 +16,29 @@ interface Publication {
   evidence: Evidence[];
   inspectedFiles?: SourceIdentity[];
   inspectedScopes?: SourceScope[];
+  checkouts?: SourceCheckout[];
   completed: boolean;
   environmentExposed: boolean;
   signal: AbortSignal;
   /** Rechecked immediately before COMMIT: sealing/secret guards are main-owned. */
   assertPublishable?: () => void;
 }
-type Stored = Omit<KnowledgeRecord, 'owners' | 'relations'>;
+type Stored = Omit<KnowledgeRecord, 'owners' | 'relations'> & { derivation?: string };
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 /** Sole writer of rebuildable knowledge. Model output is data, never SQL or authority. */
 export class Knowledge {
   private readonly db: DatabaseSync;
   private readonly retrieval: KnowledgeRetrieval;
+  private readonly checkouts: SourceCheckouts;
   private pending: Promise<unknown> = Promise.resolve();
   constructor(path: string, private readonly sources: Sources, private readonly inventory: Pick<Inventory, 'snapshot'>,
     private readonly assertClean: (material: unknown) => void) {
+    this.checkouts = new SourceCheckouts(sources, inventory);
     this.db = new DatabaseSync(path);
     this.db.exec(`PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS claims (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS invalidations (claim_id TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE CASCADE, reason TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS owners (claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
         conversation_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY(claim_id, message_id));
       CREATE TABLE IF NOT EXISTS dependencies (claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
@@ -50,17 +55,42 @@ export class Knowledge {
         PRIMARY KEY(claim_id, kind, target, message_id));`);
     this.retrieval = new KnowledgeRetrieval(this.db, id => this.records(id)[0],
       (identity, signal) => this.permitted(identity, signal), (identities, signal) => this.fresh(identities, signal),
-      (evidence, signal) => this.currentEvidence(evidence, signal));
+      (evidence, signal) => this.currentEvidence(evidence, signal),
+      (snapshots, signal) => this.checkouts.fresh(snapshots, signal));
   }
   retrieve(request: KnowledgeRequest, signal?: AbortSignal): Promise<KnowledgeResult> {
     return this.serial(() => this.retrieval.retrieve(request, signal));
   }
   publish(input: Publication): Promise<string[]> { return this.serial(() => this.publishValidated(input)); }
+  /** Launch/pre-investigation local census. Invalidations are sticky, including across reverts/restarts. */
+  scan(signal?: AbortSignal): Promise<void> {
+    return this.serial(async () => {
+      const records = this.records();
+      for (const record of records) {
+        signal?.throwIfAborted();
+        if (record.validation === 'stale' || !record.checkouts?.length || !await this.checkouts.fresh(record.checkouts, signal) || !await this.fresh([...record.dependencies, ...record.scopes], signal)) {
+          this.db.prepare('INSERT OR IGNORE INTO invalidations VALUES (?, ?)').run(record.id, 'Checkout or source access changed. Needs explicit revalidation; retained evidence is historical.');
+        }
+      }
+      this.propagateInvalidations(records);
+    });
+  }
+  private propagateInvalidations(records: KnowledgeRecord[]): void {
+    const stale = new Set(this.db.prepare('SELECT claim_id FROM invalidations').all().map(row => String(row.claim_id)));
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const record of records) if (!stale.has(record.id) && record.relations.some(edge => edge.kind === 'depends-on' && stale.has(edge.target))) {
+        this.db.prepare('INSERT OR IGNORE INTO invalidations VALUES (?, ?)').run(record.id, 'An explicit claim dependency needs revalidation.');
+        stale.add(record.id); changed = true;
+      }
+    }
+  }
   inspect(signal?: AbortSignal): Promise<KnowledgeRecord[]> {
     return this.serial(async () => {
       const records = this.records();
       const stale = new Set<string>();
-      for (const record of records) if (!await this.fresh([...record.dependencies, ...record.scopes], signal)) stale.add(record.id);
+      for (const record of records) if (record.validation === 'stale' || !record.checkouts?.length || !await this.checkouts.fresh(record.checkouts, signal) || !await this.fresh([...record.dependencies, ...record.scopes], signal)) stale.add(record.id);
       // Only explicit dependency edges propagate staleness; never similarity.
       let changed = true;
       while (changed) {
@@ -101,6 +131,8 @@ export class Knowledge {
     }), ...structuredClone(input.inspectedFiles ?? [])].map(item => [digest(item), item])).values()];
     const scopes = [...new Map(structuredClone(input.inspectedScopes ?? []).map(item => [digest(item), item])).values()];
     if (dependencies.length + scopes.length > 1000) throw new Error('Inspected dependency limit reached.');
+    const checkouts = this.checkouts.select([...dependencies, ...scopes], input.checkouts ?? await this.checkouts.capture(input.signal, [...dependencies, ...scopes]));
+    if (!this.checkouts.covers([...dependencies, ...scopes], checkouts) || input.checkouts && !await this.checkouts.fresh(checkouts, input.signal)) throw new Error('Checkout changed or scan coverage incomplete before publication.');
     const records = candidates.map(candidate => {
       const evidence = candidate.evidenceIds.map(id => {
         const item = observed.find(item => item.id === id);
@@ -114,23 +146,38 @@ export class Knowledge {
         ...(candidate.aliases?.length ? { aliases: [...new Set(candidate.aliases.map(alias => alias.normalize('NFC').trim()))].sort() } : {}) };
       const sourceIdentity = (c: SourceIdentity) => ({ scope: this.scope(c), path: this.sourcePath(c), identity: c.contentIdentity });
       const ordered = <T>(items: T[]) => items.sort((a, b) => digest(a).localeCompare(digest(b)));
-      const id = 'K' + digest({ ...material,
+      const derivation = digest({ ...material,
         evidence: ordered(evidence.map(({ citation, text }) => ({ ...sourceIdentity(citation), start: citation.start, end: citation.end, text }))),
         dependencies: ordered(dependencies.map(sourceIdentity)),
         scopes: ordered(scopes.map(scope => ({ ...sourceIdentity(scope), operation: scope.operation, query: scope.query }))) });
+      let id = 'K' + digest({ derivation, checkouts: checkouts.map(item => ({ scope: this.scope(item), identity: item.contentIdentity })).sort((a, b) => a.scope.localeCompare(b.scope)) });
+      // Revalidation creates a new contribution; it cannot revive old shared ownership/edges.
+      while (this.db.prepare('SELECT 1 FROM invalidations WHERE claim_id = ?').get(id)) id = 'K' + digest({ id, owner: input.owner });
       const supported = candidate.provenance === 'declared' && candidate.perspective !== 'current' && evidence.some(item => item.text.split(/\r?\n/).some(line => line.trim() === material.claim));
-      const record: Stored = { ...material, id, evidence, dependencies, scopes,
+      const record: Stored = { ...material, id, derivation, evidence, dependencies, scopes, checkouts,
         validation: supported ? 'supported' : 'unchecked',
         validationNote: supported ? 'The declaration is present verbatim. This does not certify that the declared behavior is implemented.' : 'Model interpretation; schema and citations verified, semantic truth not independently validated.' };
       return { candidate, record };
     });
     const localIds = new Map(records.map(({ candidate, record }) => [candidate.id, record.id]));
     const existing = this.records();
-    const edges = records.flatMap(({ candidate, record }) => candidate.relations.map(edge => {
-      const target = localIds.get(edge.target) ?? edge.target;
-      if (target === record.id || !records.some(item => item.record.id === target) && !existing.some(item => item.id === target)) throw new Error('Unknown or self-referential claim relationship.');
-      return { claim: record.id, kind: edge.kind, target };
-    }));
+    const edges = records.flatMap(({ candidate, record }) => {
+      const proposed = candidate.relations.map(edge => {
+        const target = localIds.get(edge.target) ?? edge.target;
+        if (target === record.id || !records.some(item => item.record.id === target) && !existing.some(item => item.id === target)) throw new Error('Unknown or self-referential claim relationship.');
+        return { claim: record.id, kind: edge.kind, target };
+      });
+      // An exact derivation cannot drop a retained dependency by omitting its edge.
+      // Only an explicit edge to an exactly matching assertion can select a new source-backed contribution.
+      const assertion = (item: Stored) => digest({ scope: item.scope, topic: item.topic, summary: item.summary, claim: item.claim,
+        kind: item.kind, provenance: item.provenance, perspective: item.perspective, aliases: item.aliases });
+      const find = (id: string) => records.find(item => item.record.id === id)?.record ?? existing.find(item => item.id === id)!;
+      const inherited = existing.filter(item => item.derivation === record.derivation).flatMap(item => item.relations.filter(edge => edge.kind === 'depends-on')).map(edge => {
+        const replacement = proposed.find(proposed => proposed.kind === 'depends-on' && assertion(find(proposed.target)) === assertion(find(edge.target)));
+        return { claim: record.id, kind: edge.kind, target: replacement?.target ?? edge.target };
+      });
+      return [...new Map([...proposed, ...inherited].map(edge => [digest(edge), edge])).values()];
+    });
     // Repetition preserves existing edges: validate that resulting graph too,
     // even when a new model submission omits previously retained dependencies.
     const referenced = new Set([...records.map(({ record }) => record.id), ...edges.map(edge => edge.target)]);
@@ -140,6 +187,8 @@ export class Knowledge {
       return [...record.dependencies, ...record.scopes, ...record.relations.filter(edge => edge.kind === 'depends-on' && !referenced.has(edge.target)).flatMap(edge => { referenced.add(edge.target); return collect(edge.target); })];
     };
     const graphDependencies = [...referenced].flatMap(collect);
+    const graphRecords = existing.filter(record => referenced.has(record.id));
+    if (graphRecords.some(record => record.validation === 'stale' || !record.checkouts?.length) || !await this.checkouts.fresh(graphRecords.flatMap(record => record.checkouts ?? []), input.signal)) throw new Error('Claim dependency changed and requires revalidation.');
     if (!await this.fresh([...observed, ...dependencies, ...scopes, ...graphDependencies], input.signal)) throw new Error('Knowledge sources changed before publication.');
     guard();
     this.db.exec('BEGIN IMMEDIATE');
@@ -164,19 +213,21 @@ export class Knowledge {
       }
       // Recheck after writes while holding the transaction. No unfinished batch escapes on failure/cancellation.
       if (!await this.fresh([...observed, ...dependencies, ...scopes, ...graphDependencies], input.signal)) throw new Error('Knowledge sources changed during publication.');
+      if (!await this.checkouts.fresh([...checkouts, ...graphRecords.flatMap(record => record.checkouts ?? [])], input.signal)) throw new Error('Checkout changed during publication.');
       guard();
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return records.map(item => item.record.id);
   }
-  private records(id?: string): KnowledgeRecord[] {
+  private records(id?: string): (KnowledgeRecord & { derivation?: string })[] {
     return this.db.prepare(`SELECT id, value FROM claims ${id ? 'WHERE id = ?' : ''} ORDER BY rowid`).all(...(id ? [id] : [])).map(row => {
       const record = JSON.parse(String(row.value)) as Stored;
       const relations = this.db.prepare('SELECT claim_id, kind, target FROM relations WHERE claim_id = ? OR (target = ? AND kind = ?)').all(record.id, record.id, 'conflicts-with')
         .map(edge => ({ kind: String(edge.kind) as KnowledgeRecord['relations'][number]['kind'], target: String(edge.target) === record.id ? String(edge.claim_id) : String(edge.target),
           owners: this.db.prepare('SELECT conversation_id, message_id FROM relation_owners WHERE claim_id = ? AND kind = ? AND target = ? ORDER BY rowid').all(edge.claim_id, edge.kind, edge.target).map(owner => ({ conversationId: String(owner.conversation_id), messageId: String(owner.message_id) })) }));
       const owners = this.db.prepare('SELECT conversation_id, message_id FROM owners WHERE claim_id = ? ORDER BY rowid').all(record.id).map(owner => ({ conversationId: String(owner.conversation_id), messageId: String(owner.message_id) }));
-      return { ...record, relations, owners, ...(relations.some(edge => edge.kind === 'conflicts-with') ? { validation: 'conflicting' as const, validationNote: 'Explicit conflicting claims retained side by side. Implementation evidence takes precedence over declarations; intended/historical claims are not current implementation.' } : {}) };
+      const invalidation = this.db.prepare('SELECT reason FROM invalidations WHERE claim_id = ?').get(record.id);
+      return { ...record, relations, owners, ...(invalidation ? { validation: 'stale' as const, validationNote: String(invalidation.reason) } : relations.some(edge => edge.kind === 'conflicts-with') ? { validation: 'conflicting' as const, validationNote: 'Explicit conflicting claims retained side by side. Implementation evidence takes precedence over declarations; intended/historical claims are not current implementation.' } : {}) };
     });
   }
   private sourcePath(c: SourceIdentity): string { return c.repository ? relative(c.repository.path, c.path) : c.path; }

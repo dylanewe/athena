@@ -523,8 +523,8 @@ test('wall-clock limit cancels a stalled provider without any automatic continua
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
   http = async (_url, init) => { requests.push(JSON.parse(String(init?.body))); return new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error()), { once: true })); };
   jobs.start(null, 'Slow question');
-  await vi.advanceTimersByTimeAsync(1);
-  expect(requests).toHaveLength(1);
+  // Local checkout IO precedes the first request; fake ticks alone do not settle filesystem work.
+  await vi.waitFor(() => expect(requests).toHaveLength(1));
   await vi.advanceTimersByTimeAsync(LIVE_LIMITS.milliseconds);
   expect(db.workspace().selected!.messages.at(-1)?.status).toBe('limit');
   expect(workers[0].killed).toBe(true);
@@ -538,6 +538,32 @@ test('a new registration cannot take over an existing conversation', async () =>
   expect(() => jobs.start(id, 'Follow up')).toThrow('authorization');
   expect(requests).toHaveLength(1);
   expect(store.read()!.registration!.tokens).toBeDefined();
+});
+
+test('an uncited configuration edit during analysis returns a partial snapshot result without publication or extra model work', async () => {
+  scripted(knowledgeScripts(), request => { if (request === 3) writeFileSync(join(root, 'config.json'), '{"mode":"changed"}\n'); });
+  jobs.start(null, 'Inspect the answer boundary'); await idle();
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'partial' });
+  expect(db.workspace().selected!.messages.at(-1)?.text).toContain('checkout changed');
+  expect(await knowledge.inspect()).toEqual([]);
+  expect(requests).toHaveLength(3);
+});
+
+test('saved evidence cannot be replayed after an uncited caller changes, even when the cited file is unchanged', async () => {
+  scripted(knowledgeScripts()); jobs.start(null, 'Inspect the boundary'); await idle();
+  const id = db.workspace().selected!.id, count = requests.length;
+  writeFileSync(join(root, 'caller.ts'), 'answer();\n');
+  jobs.start(id, 'Explain more'); await idle();
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'failed', text: expect.stringContaining('Saved evidence changed') });
+  expect(requests).toHaveLength(count);
+});
+
+test.each([2, 4])('checkout edits at model step %s cannot combine incompatible source snapshots or commit current knowledge', async step => {
+  scripted(knowledgeScripts(), request => { if (request === step) writeFileSync(join(root, 'caller.ts'), `answer(${step});\n`); });
+  jobs.start(null, 'Inspect the boundary'); await idle();
+  expect(db.workspace().selected!.messages.at(-1)?.status).toBe('partial');
+  expect(await knowledge.inspect()).toEqual([]);
+  expect(requests).toHaveLength(step);
 });
 
 test('main reuses query-selected knowledge and current cited evidence without an investigator or historical preload', async () => {
@@ -632,7 +658,7 @@ test('negative search files are dependencies: mutation after extraction withhold
   scripts.splice(1, 0, functionResponse('sources_search', { root, path: 'notes.md', query: 'handler implementation' }));
   scripted(scripts, request => { if (request === 5) writeFileSync(join(root, 'notes.md'), 'New handler implementation exists.\n'); });
   jobs.start(null, 'Explain the answer boundary'); await idle();
-  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', knowledgePublication: 'withheld' });
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'partial' });
   expect(await knowledge.inspect()).toEqual([]);
 });
 
@@ -641,7 +667,7 @@ test('a new file after a negative scoped search withholds stale model candidates
   scripts.splice(1, 0, functionResponse('sources_search', { root, path: '.', query: 'authentication middleware' }));
   scripted(scripts, request => { if (request === 5) writeFileSync(join(root, 'middleware.ts'), '// authentication middleware\n'); });
   jobs.start(null, 'Explain the answer boundary'); await idle();
-  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', knowledgePublication: 'withheld' });
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'partial' });
   expect(await knowledge.inspect()).toEqual([]);
 });
 

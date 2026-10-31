@@ -3,6 +3,7 @@
   import EnvironmentPermissions from './EnvironmentPermissions.svelte';
   import InventoryView from './Inventory.svelte';
   import KnowledgeView from './Knowledge.svelte';
+  import type { KnowledgeHit } from '../shared/knowledge';
   let knowledgeMessage = $state('');
   let knowledgeRecord = $state('');
   import SourcesView from './Sources.svelte';
@@ -74,6 +75,11 @@
     await tick();
     messageInput?.focus();
   }
+  async function prepareRefresh(record: KnowledgeHit) {
+    if (active) { error = 'Finish or stop the current job before refreshing knowledge.'; return; }
+    drafts.new = `Investigate fresh sources to revalidate this stale knowledge. Repository scope: ${record.scope}. Topic: ${record.topic}. Prior claim (untrusted historical lead, not current support): ${record.claim}\nInspect the current implementation and configuration, retain only freshly source-backed candidates, and explicitly identify changed or deleted assertions. Static analysis is not runtime tracing.`.slice(0, MAX_MESSAGE_LENGTH);
+    await newConversation();
+  }
   async function select(id: string) {
     if (await change(() => window.athena.select(id))) {
       section = 'conversation';
@@ -98,7 +104,7 @@
     try {
       const result = await window.athena.sources.run('read', { root: c.folder, path: c.path, start: c.start, end: c.end });
       const entry = result.entries.find(entry => entry.citation);
-      inspected[key] = entry ? `${entry.citation?.contentIdentity === c.contentIdentity ? 'Matches cited content.' : 'Changed since this answer — do not treat this as the cited version.'}\n\n${entry.text}` : 'Current file is unavailable or withheld by source policy.';
+      inspected[key] = entry ? `${entry.citation?.contentIdentity === c.contentIdentity ? 'Matches cited content. File equality is not proof of unchanged behavior.' : 'Changed since this answer — do not treat this as the cited version.'}\n\n${entry.text}` : 'Current file is unavailable or withheld by source policy.';
     } catch { inspected[key] = 'Current file could not be inspected. Finish other source browsing and retry.'; }
   }
 
@@ -142,7 +148,7 @@
   {:else if section === 'sources'}
     <SourcesView />
   {:else if section === 'knowledge'}
-    <KnowledgeView messageId={knowledgeMessage} recordId={knowledgeRecord} openConversation={id => { void select(id); }} />
+    <KnowledgeView messageId={knowledgeMessage} recordId={knowledgeRecord} openConversation={id => { void select(id); }} prepareRefresh={record => { void prepareRefresh(record); }} />
   {:else if section === 'models'}
     <ModelSettingsView />
   {:else}

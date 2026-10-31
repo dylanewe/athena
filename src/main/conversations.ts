@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { checkBeforeModelSend, environmentValues } from './secret-check';
 import { EPHEMERAL_NOTICE } from '../shared/environment';
 import type { Message as PiMessage } from '@earendil-works/pi-ai';
+import type { SourceCheckout } from '../shared/sources';
 import type { Exploration } from '../shared/investigation';
 import { LIVE_LIMITS, type ConversationBinding, type Evidence, type LiveResult } from '../shared/live';
 import { DatabaseSync } from 'node:sqlite';
@@ -145,12 +146,12 @@ export class Conversations {
     return { needsTitle: true, titlePrompt: String(first?.text ?? '') };
   }
 
-  liveContext(id: string): { history: PiMessage[]; evidence: Evidence[] } {
+  liveContext(id: string): { history: PiMessage[]; evidence: Evidence[]; checkouts?: SourceCheckout[] } {
     this.binding(id);
     if (this.db.prepare('SELECT sealed FROM conversations WHERE id = ?').get(id)?.sealed) return { history: [], evidence: [] };
-    const row = this.db.prepare(`SELECT a.history, a.evidence FROM live_attempts a JOIN messages m ON m.id = a.message_id
+    const row = this.db.prepare(`SELECT a.history, a.evidence, a.result FROM live_attempts a JOIN messages m ON m.id = a.message_id
       WHERE m.conversation_id = ? AND m.status = 'complete' ORDER BY m.rowid DESC LIMIT 1`).get(id);
-    return row ? { history: JSON.parse(String(row.history)), evidence: JSON.parse(String(row.evidence)) } : { history: [], evidence: [] };
+    return row ? { history: JSON.parse(String(row.history)), evidence: JSON.parse(String(row.evidence)), ...(row.result && JSON.parse(String(row.result)).checkouts ? { checkouts: JSON.parse(String(row.result)).checkouts } : {}) } : { history: [], evidence: [] };
   }
 
   beginLive(id: string | null, prompt: string, binding: ConversationBinding, retryId?: string): { conversationId: string; messageId: string; prompt: string } {
