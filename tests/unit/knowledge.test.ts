@@ -171,6 +171,25 @@ test('repository-boundary changes invalidate unchanged source content under the 
   finally { renameSync(join(nested, 'service.ts'), join(root, 'api', 'service.ts')); rmSync(nested, { recursive: true }); }
 });
 
+test('freshness deduplication cannot hide a referenced claim with obsolete repository ownership', async () => {
+  const nested = join(root, 'api', 'sub'); mkdirSync(nested);
+  renameSync(join(root, 'api', 'service.ts'), join(nested, 'service.ts'));
+  const read = async () => {
+    const result = await sources.run('read', { root, path: 'api/sub/service.ts', start: 1, end: 1 });
+    return [{ id: 'E1', citation: result.entries[0].citation!, text: result.entries[0].text! }];
+  };
+  try {
+    const [original] = await publish([{ ...candidate(), evidenceIds: ['E1'] }], { evidence: await read() });
+    mkdirSync(join(nested, '.git'));
+    snapshot.repositories.push({ ...snapshot.repositories[0], name: 'sub-api', path: nested });
+    try {
+      await expect(publish([{ ...candidate(), scope: 'sub-api', evidenceIds: ['E1'], relations: [{ kind: 'depends-on', target: original }] }], { evidence: await read() })).rejects.toThrow('changed');
+      expect(await knowledge.inspect()).toHaveLength(1);
+      expect((await knowledge.inspect())[0].validation).toBe('stale');
+    } finally { snapshot.repositories.pop(); }
+  } finally { renameSync(join(nested, 'service.ts'), join(root, 'api', 'service.ts')); rmSync(nested, { recursive: true }); }
+});
+
 test.each(['topic', 'summary', 'claim'] as const)('whitespace-only %s is malformed, not supported knowledge', async field => {
   await expect(publish([{ ...candidate(), [field]: '   ' }])).rejects.toThrow('Malformed');
   expect(await knowledge.inspect()).toEqual([]);
@@ -199,4 +218,3 @@ test('repository reconnection keeps name-based identity without treating paths o
   try { expect((await knowledge.inspect())[0].validation).toBe('supported'); }
   finally { renameSync(moved, join(root, 'api')); snapshot.repositories[0].path = join(root, 'api'); }
 });
-

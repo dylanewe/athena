@@ -45,6 +45,21 @@ test('lists and searches non-Git heterogeneous text and cites bounded UTF-8 rang
   expect((await read('notes.md')).entries[0].citation?.contentIdentity).not.toBe(excerpt.citation?.contentIdentity);
 });
 
+test('tracked scope metadata stays inside the serialized output budget even with a long canonical root', async () => {
+  const identityOverhead = Buffer.byteLength(JSON.stringify({ folder: '', repository: null, path: 'f00.txt', revision: null, contentIdentity: 'sha256:' + '0'.repeat(64) }));
+  const rootLength = Math.floor((L.outputBytes - 1024) / 60) - identityOverhead;
+  let longRoot = directory;
+  while (rootLength - longRoot.length > 201) longRoot = join(longRoot, 'r'.repeat(200));
+  longRoot = join(longRoot, 'r'.repeat(rootLength - longRoot.length - 1));
+  await mkdir(longRoot, { recursive: true });
+  await inventory.designate(longRoot, FOLDER_CONSENT);
+  for (let index = 0; index < 60; index++) await writeFile(join(longRoot, `f${String(index).padStart(2, '0')}.txt`), 'ordinary content\n');
+  const result = await sources.run('search', { root: longRoot, path: '.', query: 'absent' }, undefined, undefined, true);
+  expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(L.outputBytes);
+  expect(result.status).toBe('truncated');
+  expect(result.reason).toContain('limit');
+});
+
 test('uses current tracked/untracked/dirty files, nearest live repository ownership, saved aliases, and checkout revisions', async () => {
   await repository('parent');
   await file('parent/source.ts', 'old committed code');

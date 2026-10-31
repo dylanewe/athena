@@ -103,7 +103,12 @@ export class Sources {
         push({ path: name, kind: 'file', reason: error instanceof Denied ? error.reason : 'Unavailable or unsafe path.', overridable: error instanceof Denied && error.overridable, ...(error instanceof Denied && error.environment ? { environment: true } : {}) });
         return;
       }
-      if (trackInspected && name === path && operation !== 'read') scope = { folder: root, repository: repositoryIdentity(access.owner), path, revision: null, contentIdentity: '', operation, ...(operation === 'search' ? { query: input.query } : {}) };
+      if (trackInspected && name === path && operation !== 'read') {
+        scope = { folder: root, repository: repositoryIdentity(access.owner), path, revision: null, contentIdentity: 'sha256:' + '0'.repeat(64), operation, ...(operation === 'search' ? { query: input.query } : {}) };
+        // Reserve the final fixed-length identity envelope BEFORE admitting entries.
+        budget.output += Buffer.byteLength(JSON.stringify(scope)) + 32;
+        if (budget.output > L.outputBytes) throw new Stopped('Scope identity output-byte limit reached.');
+      }
       if (access.directory) {
         if (operation === 'read') { push({ path: name, kind: 'directory', reason: 'Choose a text file for range reads.' }); return; }
         if (name !== path) push({ path: name, kind: 'directory' });

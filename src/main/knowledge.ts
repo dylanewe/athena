@@ -202,7 +202,9 @@ export class Knowledge {
       const end = 'citation' in item ? item.citation.end : 1;
       const operation = 'operation' in item ? item.operation : 'read';
       const query = 'operation' in item ? item.query : undefined;
-      const key = JSON.stringify({ root, path, start, end, operation, query, identity: c.contentIdentity });
+      const key = JSON.stringify({ root, path, start, end, operation, query, identity: c.contentIdentity,
+        repository: repository ? { name: nameKey(repository.name), path: repository.path } : null,
+        ...('citation' in item ? { excerpt: item.text } : {}) });
       if (checked.has(key)) continue;
       checked.add(key);
       try {
