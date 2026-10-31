@@ -290,7 +290,7 @@ test('another real renderer cannot use owner-only conversation, source, or crede
   });
   const outsider = await second;
   expect(await outsider.evaluate(async () => {
-    const results = await Promise.allSettled([window.athena.knowledge.inspect(), window.athena.workspace(), window.athena.send(null, 'attack'), window.athena.retry('00000000-0000-4000-8000-000000000000'), window.athena.chatgpt.snapshot(), window.athena.chatgpt.connect(), window.athena.inventory.chooseFolder(), window.athena.models.test(), window.athena.apiModels.snapshot(), window.athena.apiModels.credential('deepseek', 'fake-attack-key'), window.athena.apiModels.importModels(), window.athena.sources.run('read', { root: '/', path: 'etc/hosts' })]);
+    const results = await Promise.allSettled([window.athena.knowledge.retrieve({ operation: 'search', query: '' }), window.athena.workspace(), window.athena.send(null, 'attack'), window.athena.retry('00000000-0000-4000-8000-000000000000'), window.athena.chatgpt.snapshot(), window.athena.chatgpt.connect(), window.athena.inventory.chooseFolder(), window.athena.models.test(), window.athena.apiModels.snapshot(), window.athena.apiModels.credential('deepseek', 'fake-attack-key'), window.athena.apiModels.importModels(), window.athena.sources.run('read', { root: '/', path: 'etc/hosts' })]);
     return results.every(result => result.status === 'rejected');
   })).toBe(true);
 });

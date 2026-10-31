@@ -136,6 +136,58 @@ test('an existing pre-search knowledge database gets a local index backfill with
   } finally { upgraded.close(); }
 });
 
+test('a single ranked response shares its 32-claim dependency traversal budget across candidates', async () => {
+  const leaves: string[] = [];
+  for (let batch = 0; batch < 2; batch++) leaves.push(...await publish(Array.from({ length: 10 }, (_, i) => ({ ...candidate(), id: `C${i + 1}`, topic: `Leaf ${batch * 10 + i}` }))));
+  for (let batch = 0; batch < 2; batch++) await publish(Array.from({ length: 10 }, (_, i) => ({ ...candidate(), id: `C${i + 1}`, topic: `Parent ${batch * 10 + i}`, relations: [{ kind: 'depends-on', target: leaves[batch * 10 + i] }] })));
+  const result = await knowledge.retrieve({ operation: 'search', query: 'parent', limit: 20 });
+  expect(result.items).toHaveLength(16); // Each parent requires its distinct leaf: 16 + 16 = 32.
+});
+
+test('relationship expansion counts its origin and all targets against one source-identity budget', async () => {
+  const directory = join(root, 'api', 'dependency-fixture'); mkdirSync(directory);
+  const identities = [];
+  try {
+    for (let i = 0; i < 260; i++) {
+      const path = `api/dependency-fixture/file-${i}.ts`; writeFileSync(join(root, path), 'export const value = true;\n');
+      const read = await sources.run('read', { root, path, start: 1, end: 1 });
+      const { start: _start, end: _end, ...identity } = read.entries[0].citation!;
+      identities.push(identity);
+    }
+    const observed = (await evidence()).slice(1);
+    const targets: string[] = [];
+    for (let i = 0; i < 6; i++) targets.push(...await publish([{ ...candidate(), topic: `Target ${i}` }], { evidence: observed, inspectedFiles: identities.slice(200 + i * 10, 210 + i * 10) }));
+    const [origin] = await publish([{ ...candidate(), topic: 'Origin', relations: targets.map(target => ({ kind: 'supports', target })) }], { evidence: observed, inspectedFiles: identities.slice(0, 200) });
+    const expanded = await knowledge.retrieve({ operation: 'expand', id: origin, kinds: ['supports'], limit: 20 });
+    expect(expanded.items).toHaveLength(5); // Origin: 201. Each target adds 10. Six would require 261 > 256.
+    expect(expanded.edges).toHaveLength(5);
+  } finally { rmSync(directory, { recursive: true }); }
+});
+
+test('list-derived claims are withheld when scope access changes, even without a cited descendant file', async () => {
+  const vendor = join(root, 'api', 'vendor'); mkdirSync(vendor);
+  writeFileSync(join(vendor, 'private-adapter.ts'), 'export const adapter = true;\n');
+  await sources.exception(root, 'api/vendor', true);
+  try {
+    const listing = await sources.run('list', { root, path: 'api' }, undefined, undefined, true);
+    const [id] = await publish([{ ...candidate(), claim: 'The vendor subtree includes private-adapter.ts.' }], { evidence: (await evidence()).slice(1), inspectedScopes: [listing.inspectedScope!] });
+    await sources.exception(root, 'api/vendor', false);
+    expect((await knowledge.inspect())[0].validation).toBe('stale'); // #8 inspection semantics remain.
+    for (const request of [{ operation: 'search', query: 'private' }, { operation: 'detail', id }, { operation: 'evidence', id, index: 0 }] as const) expect((await knowledge.retrieve(request)).items).toEqual([]);
+  } finally { await sources.exception(root, 'api/vendor', false); rmSync(vendor, { recursive: true }); }
+});
+
+test('the renderer gets only bounded excerpts, never the main-private verification evidence', async () => {
+  writeFileSync(join(root, 'api', 'README.md'), 'gateway '.repeat(225) + '\n');
+  const [id] = await publish();
+  const owner = { webContentsId: 1, url: 'file:///athena/index.html' };
+  const gateway = new KnowledgeGateway(knowledge, owner);
+  const result = await gateway.dispatch({ ...owner, isMainFrame: true }, 'retrieve', { operation: 'evidence', id, index: 0 });
+  expect(result).toMatchObject({ items: [{ evidence: [{ excerpt: expect.any(String), truncated: true }] }], currentCitation: { path: 'api/README.md' } });
+  expect(result).not.toHaveProperty('evidence');
+  expect(JSON.stringify(result)).not.toContain('gateway '.repeat(225));
+});
+
 test('normalization retains concise topics, declarations, source spans and inspected dependencies across restart', async () => {
   const ids = await publish();
   const records = await knowledge.inspect();
@@ -258,10 +310,10 @@ test('knowledge IPC is read-only and rejects foreign callers, payloads and publi
   const owner = { webContentsId: 1, url: 'file:///athena/index.html' };
   const caller = { ...owner, isMainFrame: true };
   const gateway = new KnowledgeGateway(knowledge, owner);
-  for (const foreign of [{ ...caller, webContentsId: 2 }, { ...caller, isMainFrame: false }, { ...caller, url: 'https://example.com' }]) await expect(gateway.dispatch(foreign, 'inspect', undefined)).rejects.toThrow('Unauthorized');
+  for (const foreign of [{ ...caller, webContentsId: 2 }, { ...caller, isMainFrame: false }, { ...caller, url: 'https://example.com' }]) await expect(gateway.dispatch(foreign, 'retrieve', { operation: 'search', query: '' })).rejects.toThrow('Unauthorized');
   await expect(gateway.dispatch(caller, 'inspect', {})).rejects.toThrow();
   await expect(gateway.dispatch(caller, 'publish', undefined)).rejects.toThrow();
-  expect(await gateway.dispatch(caller, 'inspect', undefined)).toEqual([]);
+  await expect(gateway.dispatch(caller, 'inspect', undefined)).rejects.toThrow(); // No whole-ledger renderer escape hatch.
   for (const payload of [undefined, {}, { operation: 'publish' }, { operation: 'search', query: 'x', limit: 1000 }, { operation: 'search', query: 'x', sql: 'SELECT *' }]) await expect(gateway.dispatch(caller, 'retrieve', payload)).rejects.toThrow();
   await expect(gateway.dispatch({ ...caller, isMainFrame: false }, 'retrieve', { operation: 'search', query: '' })).rejects.toThrow('Unauthorized');
   expect(await gateway.dispatch(caller, 'retrieve', { operation: 'search', query: '' })).toMatchObject({ items: [], notice: expect.stringContaining('not proof of absence') });
@@ -333,9 +385,15 @@ test('a new eligible file invalidates the searched scope before commit and after
 
 test('repository reconnection keeps name-based identity without treating paths or directory names as equivalence', async () => {
   const searched = await sources.run('search', { root, path: 'api', query: 'authentication' }, undefined, undefined, true);
-  await publish(undefined, { inspectedScopes: [searched.inspectedScope!] });
+  const [id] = await publish(undefined, { inspectedScopes: [searched.inspectedScope!] });
   const moved = join(root, 'renamed'); renameSync(join(root, 'api'), moved);
   snapshot.repositories[0].path = moved;
-  try { expect((await knowledge.inspect())[0].validation).toBe('supported'); }
+  try {
+    expect((await knowledge.inspect())[0].validation).toBe('supported');
+    const owner = { webContentsId: 1, url: 'file:///athena/index.html' };
+    const result = await new KnowledgeGateway(knowledge, owner).dispatch({ ...owner, isMainFrame: true }, 'retrieve', { operation: 'evidence', id, index: 0 });
+    expect(result.currentCitation?.path).toBe('renamed/README.md');
+    expect(result).not.toHaveProperty('evidence');
+  }
   finally { renameSync(moved, join(root, 'api')); snapshot.repositories[0].path = join(root, 'api'); }
 });

@@ -58,5 +58,7 @@ export interface KnowledgeResult {
   /** Main-owned runtime citation, only for a current evidence request. */
   evidence?: Evidence;
   evidenceId?: string;
+  /** UI navigation only; no unbounded verification text crosses the renderer bridge. */
+  currentCitation?: Evidence['citation'];
 }
-export interface KnowledgeBridge { inspect(): Promise<KnowledgeRecord[]>; retrieve(request: KnowledgeRequest): Promise<KnowledgeResult> }
+export interface KnowledgeBridge { retrieve(request: KnowledgeRequest): Promise<KnowledgeResult> }

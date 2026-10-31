@@ -49,11 +49,6 @@ const bridge: DesktopBridge = {
       if (!reply.ok) throw new Error(reply.error);
       return reply.result;
     },
-    inspect: async () => {
-      const reply = await ipcRenderer.invoke('athena:knowledge', 'inspect');
-      if (!reply.ok) throw new Error(reply.error);
-      return reply.result;
-    },
   },
   apiModels: {
     snapshot: () => apiModelRequest('snapshot'),

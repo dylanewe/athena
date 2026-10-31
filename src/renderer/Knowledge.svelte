@@ -12,10 +12,11 @@
   let offset = $state(0);
   let nextOffset = $state<number>();
   let pages = $state<number[]>([]);
+  let detailId = $state('');
   let excerpts = $state<Record<string, string>>({});
   let inspected = $state<Record<string, string>>({});
   async function load(next = 0) {
-    busy = true; error = ''; excerpts = {}; inspected = {};
+    busy = true; error = ''; excerpts = {}; inspected = {}; detailId = '';
     try {
       const result = await window.athena.knowledge.retrieve({ operation: 'search', query, ...(scope.trim() ? { scope: scope.trim() } : {}), exact, limit: 8, offset: next, ...(messageId && onlyMessage ? { messageId } : {}) });
       records = result.items; nextOffset = result.nextOffset; offset = next;
@@ -24,7 +25,7 @@
   }
   function search() { pages = []; void load(); }
   async function showClaim(id: string) {
-    busy = true; error = '';
+    busy = true; error = ''; onlyMessage = false; detailId = id; excerpts = {}; inspected = {};
     try {
       const result = await window.athena.knowledge.retrieve({ operation: 'detail', id });
       records = result.items; nextOffset = undefined; pages = []; offset = 0;
@@ -48,7 +49,7 @@
     try {
       // Recheck access and freshness before navigating; never replay a revoked retained excerpt.
       const retained = await window.athena.knowledge.retrieve({ operation: 'evidence', id: record.id, index });
-      const c = retained.evidence?.citation ?? retained.items[0]?.evidence[0]?.citation;
+      const c = retained.currentCitation ?? retained.items[0]?.evidence[0]?.citation;
       if (!c) { inspected[key] = 'Current file is unavailable or withheld.'; return; }
       const result = await window.athena.sources.run('read', { root: c.folder, path: c.path, start: c.start, end: c.end });
       const entry = result.entries.find(entry => entry.citation);
@@ -59,7 +60,7 @@
 </script>
 
 <main>
-  <header><div><div class="eyebrow">Source-backed · On this Mac</div><h1>Knowledge</h1></div><button disabled={busy} onclick={() => load(offset)}>Check freshness</button></header>
+  <header><div><div class="eyebrow">Source-backed · On this Mac</div><h1>Knowledge</h1></div><button disabled={busy} onclick={() => detailId ? showClaim(detailId) : load(offset)}>Check freshness</button></header>
   <div class="knowledge-content">
     <p class="intro">Find concise architectural and domain findings. Static inspection is not runtime observation.</p>
     <form class="search" onsubmit={event => { event.preventDefault(); search(); }}>

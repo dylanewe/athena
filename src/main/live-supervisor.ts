@@ -227,17 +227,21 @@ export class LiveSupervisor {
                   if (settled || this.active !== active || signal.aborted) return;
                   this.conversations.assertClean(result);
                   const { evidence: retained, ...bounded } = result;
-                  for (const item of result.items) if (active.knowledgeReferences.length < 32 && !active.knowledgeReferences.some(reference => reference.id === item.id)) active.knowledgeReferences.push({ id: item.id, topic: item.topic });
+                  let citation: Evidence | undefined;
                   if (retained) {
-                    let item = active.evidence.find(item => JSON.stringify(item.citation) === JSON.stringify(retained.citation) && item.text === retained.text);
-                    if (!item) {
+                    citation = active.evidence.find(item => JSON.stringify(item.citation) === JSON.stringify(retained.citation) && item.text === retained.text);
+                    if (!citation) {
                       if (active.evidence.length >= LIVE_LIMITS.evidence) throw new Error('Evidence limit.');
-                      item = { ...retained, id: `E${active.evidence.length + 1}` }; active.evidence.push(item);
+                      citation = { ...retained, id: `E${active.evidence.length + 1}` };
                     }
-                    bounded.evidenceId = item.id;
+                    bounded.evidenceId = citation.id;
                   }
-                  knowledgeBytes += Buffer.byteLength(JSON.stringify(bounded));
-                  if (knowledgeBytes > KNOWLEDGE_LIMITS.contextBytes) throw new Error('Knowledge context limit.');
+                  const bytes = Buffer.byteLength(JSON.stringify(bounded));
+                  if (knowledgeBytes + bytes > KNOWLEDGE_LIMITS.contextBytes) throw new Error('Knowledge context limit.');
+                  knowledgeBytes += bytes;
+                  // Only delivered results acquire citation/navigation ownership.
+                  if (citation && !active.evidence.some(item => item.id === citation.id)) active.evidence.push(citation);
+                  for (const item of result.items) if (active.knowledgeReferences.length < 32 && !active.knowledgeReferences.some(reference => reference.id === item.id)) active.knowledgeReferences.push({ id: item.id, topic: item.topic });
                   worker!.postMessage({ type: 'reply', id: lastId, knowledge: bounded });
                 } else if (message.type === 'inspect') {
                   if (++sourceCalls > 1000) { finish(failure('limit')); return; }

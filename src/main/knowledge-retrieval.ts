@@ -7,6 +7,11 @@ import type { Evidence } from '../shared/live';
 export const knowledgeName = (value: string) => value.normalize('NFC').toLowerCase();
 const NOTICE = 'Bounded, access-filtered indexed leads, not exhaustive knowledge or verified semantic truth. No match is not proof of absence. If insufficient, delegate investigate for bounded fresh source exploration. Static analysis is not runtime tracing; implementation evidence takes precedence over declarations.';
 
+interface RetrievalBudget {
+  records: Map<string, KnowledgeRecord | undefined>;
+  sources: Set<string>;
+}
+
 /** Local, rebuildable FTS index and bounded one-hop retrieval. Never model-generated SQL. */
 export class KnowledgeRetrieval {
   constructor(private readonly db: DatabaseSync,
@@ -42,6 +47,7 @@ export class KnowledgeRetrieval {
     const signal = AbortSignal.any([AbortSignal.timeout(10000), ...(external ? [external] : [])]);
     const offset = 'offset' in input ? input.offset ?? 0 : 0;
     const limit = input.operation === 'search' || input.operation === 'expand' ? input.limit ?? L.defaultResults : 1;
+    const budget: RetrievalBudget = { records: new Map(), sources: new Set() };
     let ids: string[];
     let edges: NonNullable<KnowledgeResult['edges']> = [];
     if (input.operation === 'search') {
@@ -62,12 +68,12 @@ export class KnowledgeRetrieval {
         .all(...params, limit + 1, offset).map(row => String(row.id));
     } else if (input.operation === 'expand') {
       // Only explicit, typed, one-hop edges. Cycles never recurse into model output.
-      const origin = await this.checked(input.id, signal, { remaining: L.sourceChecks });
+      const origin = await this.checked(input.id, signal, budget);
       if (!origin) return { items: [], notice: NOTICE };
       edges = origin.record.relations.filter(edge => input.kinds.includes(edge.kind)).map(({ kind, target }) => ({ source: input.id, kind, target }));
       ids = [...new Set(edges.map(edge => edge.target))].slice(offset, offset + limit + 1);
     } else ids = [input.id];
-    const items: KnowledgeHit[] = [], budget = { remaining: L.sourceChecks };
+    const items: KnowledgeHit[] = [];
     let evidence: Evidence | undefined;
     let consumed = 0;
     for (const id of ids.slice(0, limit)) {
@@ -103,8 +109,15 @@ export class KnowledgeRetrieval {
     if (evidence && Buffer.byteLength(JSON.stringify({ ...result, evidence })) <= L.bytes) result.evidence = evidence;
     return result;
   }
-  private async checked(id: string, signal: AbortSignal, budget: { remaining: number }): Promise<{ record: KnowledgeRecord; stale: boolean } | undefined> {
-    const record = this.load(id);
+  private async checked(id: string, signal: AbortSignal, budget: RetrievalBudget): Promise<{ record: KnowledgeRecord; stale: boolean } | undefined> {
+    const load = (key: string) => {
+      if (!budget.records.has(key)) {
+        if (budget.records.size >= L.graph) return;
+        budget.records.set(key, this.load(key));
+      }
+      return budget.records.get(key);
+    };
+    const record = load(id);
     if (!record) return;
     const visited = new Set<string>();
     const identities: (SourceIdentity | SourceScope)[] = [];
@@ -115,17 +128,25 @@ export class KnowledgeRetrieval {
       visited.add(item.id);
       identities.push(...item.dependencies, ...item.scopes);
       for (const edge of item.relations.filter(edge => edge.kind === 'depends-on')) {
-        const target = this.load(edge.target);
+        const target = load(edge.target);
         if (target) collect(target); else complete = false;
       }
     };
     collect(record);
     const unique = [...new Map(identities.map(item => [JSON.stringify(item), item])).values()];
     // Fail closed rather than exposing material whose current access cannot be checked.
-    if (!complete || unique.length > budget.remaining || signal.aborted) return;
-    budget.remaining -= unique.length;
-    for (const identity of unique) if (!await this.permitted(identity, signal)) return;
-    const stale = !complete || !await this.fresh(unique, signal);
+    if (!complete || signal.aborted) return;
+    const unchecked = unique.filter(item => !budget.sources.has(JSON.stringify(item)));
+    if (budget.sources.size + unchecked.length > L.sourceChecks) return;
+    for (const identity of unique) {
+      budget.sources.add(JSON.stringify(identity));
+      if (!await this.permitted(identity, signal)) return;
+    }
+    // Legacy scope fingerprints do not retain descendant membership. A mismatch
+    // could be revoked access, not merely changed content: conservatively withhold
+    // the whole derivation rather than releasing a potentially revoked stale lead.
+    if (!await this.fresh(unique.filter(item => 'operation' in item), signal)) return;
+    const stale = !await this.fresh(unique.filter(item => !('operation' in item)), signal);
     return { record, stale };
   }
 }

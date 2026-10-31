@@ -1,15 +1,17 @@
-import { authorize, noPayload, type Caller } from './bridge';
+import { authorize, type Caller } from './bridge';
 import type { Knowledge } from './knowledge';
-import type { KnowledgeRecord, KnowledgeRequest, KnowledgeResult } from '../shared/knowledge';
+import type { KnowledgeRequest, KnowledgeResult } from '../shared/knowledge';
 
 /** Read-only inspection. Publication is never a renderer/model command. */
 export class KnowledgeGateway {
   constructor(private readonly knowledge: Knowledge, private readonly owner: { webContentsId: number; url: string }) {}
-  async dispatch(caller: Caller, operation: unknown, payload: unknown): Promise<KnowledgeRecord[] | KnowledgeResult> {
+  async dispatch(caller: Caller, operation: unknown, payload: unknown): Promise<KnowledgeResult> {
     authorize(caller, this.owner);
-    if (operation === 'retrieve') return this.knowledge.retrieve(payload as KnowledgeRequest);
-    noPayload(payload);
-    if (operation !== 'inspect') throw new Error('Invalid knowledge request.');
-    return this.knowledge.inspect();
+    if (operation === 'retrieve') {
+      const { evidence, ...result } = await this.knowledge.retrieve(payload as KnowledgeRequest);
+      // Full retained text is a main-private verification envelope, not a UI excerpt.
+      return { ...result, ...(evidence ? { currentCitation: evidence.citation } : {}) };
+    }
+    throw new Error('Invalid knowledge request.');
   }
 }
