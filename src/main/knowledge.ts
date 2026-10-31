@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { Check } from 'typebox/value';
 import { knowledgeCandidatesSchema, type KnowledgeCandidate, type KnowledgeContext, type KnowledgeOwner, type KnowledgeRecord } from '../shared/knowledge';
 import type { Evidence } from '../shared/live';
-import type { SourceIdentity } from '../shared/sources';
+import type { SourceIdentity, SourceScope } from '../shared/sources';
 import type { Inventory } from './inventory';
 import type { Sources } from './sources';
 
@@ -13,6 +13,7 @@ interface Publication {
   candidates: unknown;
   evidence: Evidence[];
   inspectedFiles?: SourceIdentity[];
+  inspectedScopes?: SourceScope[];
   completed: boolean;
   environmentExposed: boolean;
   signal: AbortSignal;
@@ -37,6 +38,9 @@ export class Knowledge {
       CREATE TABLE IF NOT EXISTS dependencies (claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
         scope TEXT NOT NULL, path TEXT NOT NULL, identity TEXT NOT NULL, PRIMARY KEY(claim_id, scope, path, identity));
       CREATE INDEX IF NOT EXISTS dependency_source ON dependencies(scope, path);
+      CREATE TABLE IF NOT EXISTS scope_dependencies (claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+        scope TEXT NOT NULL, path TEXT NOT NULL, operation TEXT NOT NULL, query TEXT NOT NULL, identity TEXT NOT NULL,
+        PRIMARY KEY(claim_id, scope, path, operation, query, identity));
       CREATE TABLE IF NOT EXISTS relations (claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
         kind TEXT NOT NULL, target TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE, PRIMARY KEY(claim_id, kind, target));
       CREATE TABLE IF NOT EXISTS relation_owners (claim_id TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL,
@@ -53,7 +57,7 @@ export class Knowledge {
     return this.serial(async () => {
       const records = this.records();
       const stale = new Set<string>();
-      for (const record of records) if (!await this.fresh(record.dependencies, signal)) stale.add(record.id);
+      for (const record of records) if (!await this.fresh([...record.dependencies, ...record.scopes], signal)) stale.add(record.id);
       // Only explicit dependency edges propagate staleness; never similarity.
       let changed = true;
       while (changed) {
@@ -79,7 +83,7 @@ export class Knowledge {
       input.signal.throwIfAborted();
       if (!input.completed || input.environmentExposed) throw new Error('Only completed, unexposed investigations can publish knowledge.');
       input.assertPublishable?.();
-      this.assertClean({ candidates: input.candidates, evidence: input.evidence });
+      this.assertClean({ candidates: input.candidates, evidence: input.evidence, inspectedFiles: input.inspectedFiles, inspectedScopes: input.inspectedScopes });
     };
     guard();
     if (!Check(knowledgeCandidatesSchema, input.candidates)) throw new Error('Malformed knowledge candidates.');
@@ -92,7 +96,8 @@ export class Knowledge {
       const { start: _start, end: _end, ...identity } = item.citation;
       return identity;
     }), ...structuredClone(input.inspectedFiles ?? [])].map(item => [digest(item), item])).values()];
-    if (dependencies.length > 1000) throw new Error('Inspected dependency limit reached.');
+    const scopes = [...new Map(structuredClone(input.inspectedScopes ?? []).map(item => [digest(item), item])).values()];
+    if (dependencies.length + scopes.length > 1000) throw new Error('Inspected dependency limit reached.');
     const records = candidates.map(candidate => {
       const evidence = candidate.evidenceIds.map(id => {
         const item = observed.find(item => item.id === id);
@@ -107,9 +112,10 @@ export class Knowledge {
       const ordered = <T>(items: T[]) => items.sort((a, b) => digest(a).localeCompare(digest(b)));
       const id = 'K' + digest({ ...material,
         evidence: ordered(evidence.map(({ citation, text }) => ({ ...sourceIdentity(citation), start: citation.start, end: citation.end, text }))),
-        dependencies: ordered(dependencies.map(sourceIdentity)) });
+        dependencies: ordered(dependencies.map(sourceIdentity)),
+        scopes: ordered(scopes.map(scope => ({ ...sourceIdentity(scope), operation: scope.operation, query: scope.query }))) });
       const supported = candidate.provenance === 'declared' && candidate.perspective !== 'current' && evidence.some(item => item.text.split(/\r?\n/).some(line => line.trim() === material.claim));
-      const record: Stored = { ...material, id, evidence, dependencies,
+      const record: Stored = { ...material, id, evidence, dependencies, scopes,
         validation: supported ? 'supported' : 'unchecked',
         validationNote: supported ? 'The declaration is present verbatim. This does not certify that the declared behavior is implemented.' : 'Model interpretation; schema and citations verified, semantic truth not independently validated.' };
       return { candidate, record };
@@ -122,13 +128,13 @@ export class Knowledge {
       return { claim: record.id, kind: edge.kind, target };
     }));
     const referenced = new Set(edges.map(edge => edge.target));
-    const collect = (id: string): SourceIdentity[] => {
+    const collect = (id: string): (SourceIdentity | SourceScope)[] => {
       const record = existing.find(item => item.id === id);
       if (!record) return [];
-      return [...record.dependencies, ...record.relations.filter(edge => edge.kind === 'depends-on' && !referenced.has(edge.target)).flatMap(edge => { referenced.add(edge.target); return collect(edge.target); })];
+      return [...record.dependencies, ...record.scopes, ...record.relations.filter(edge => edge.kind === 'depends-on' && !referenced.has(edge.target)).flatMap(edge => { referenced.add(edge.target); return collect(edge.target); })];
     };
     const targetDependencies = [...referenced].flatMap(collect);
-    if (!await this.fresh([...observed, ...dependencies, ...targetDependencies], input.signal)) throw new Error('Knowledge sources changed before publication.');
+    if (!await this.fresh([...observed, ...dependencies, ...scopes, ...targetDependencies], input.signal)) throw new Error('Knowledge sources changed before publication.');
     guard();
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -137,6 +143,8 @@ export class Knowledge {
         this.db.prepare('INSERT OR IGNORE INTO owners VALUES (?, ?, ?)').run(record.id, input.owner.conversationId, input.owner.messageId);
         for (const item of dependencies) this.db.prepare('INSERT OR IGNORE INTO dependencies VALUES (?, ?, ?, ?)')
           .run(record.id, this.scope(item), this.sourcePath(item), item.contentIdentity);
+        for (const scope of scopes) this.db.prepare('INSERT OR IGNORE INTO scope_dependencies VALUES (?, ?, ?, ?, ?, ?)')
+          .run(record.id, this.scope(scope), this.sourcePath(scope), scope.operation, scope.query ?? '', scope.contentIdentity);
         // Repeated exact claims retain ALL inspected dependencies, not just the first run.
         const saved = this.db.prepare('SELECT value FROM claims WHERE id = ?').get(record.id)!;
         const previous = JSON.parse(String(saved.value)) as Stored;
@@ -148,7 +156,7 @@ export class Knowledge {
         this.db.prepare('INSERT OR IGNORE INTO relation_owners VALUES (?, ?, ?, ?, ?)').run(edge.claim, edge.kind, edge.target, input.owner.conversationId, input.owner.messageId);
       }
       // Recheck after writes while holding the transaction. No unfinished batch escapes on failure/cancellation.
-      if (!await this.fresh([...observed, ...dependencies, ...targetDependencies], input.signal)) throw new Error('Knowledge sources changed during publication.');
+      if (!await this.fresh([...observed, ...dependencies, ...scopes, ...targetDependencies], input.signal)) throw new Error('Knowledge sources changed during publication.');
       guard();
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
@@ -176,27 +184,34 @@ export class Knowledge {
     }
     return `folder:${citation.folder}`;
   }
-  private async fresh(evidence: (Evidence | SourceIdentity)[], signal?: AbortSignal): Promise<boolean> {
+  private async fresh(evidence: (Evidence | SourceIdentity | SourceScope)[], signal?: AbortSignal): Promise<boolean> {
     const checked = new Set<string>();
     for (const item of evidence) {
       signal?.throwIfAborted();
       const c = 'citation' in item ? item.citation : item;
-      let root = c.folder, path = c.path;
+      let root = c.folder, path = c.path, repository = c.repository;
       if (c.repository) {
         const snapshot = this.inventory.snapshot();
         const repo = snapshot.repositories.find(repo => nameKey(repo.name) === nameKey(c.repository!.name) && repo.presence === 'present');
         const folder = repo && snapshot.roots.find(folder => repo.path === folder.path || repo.path.startsWith(folder.path + '/'));
         if (!repo || !folder) return false;
         root = folder.path; path = relative(root, join(repo.path, this.sourcePath(c)));
+        repository = { name: repo.name, path: relative(root, repo.path) || '.' };
       }
       const start = 'citation' in item ? item.citation.start : 1;
       const end = 'citation' in item ? item.citation.end : 1;
-      const key = JSON.stringify({ root, path, start, end, identity: c.contentIdentity });
+      const operation = 'operation' in item ? item.operation : 'read';
+      const query = 'operation' in item ? item.query : undefined;
+      const key = JSON.stringify({ root, path, start, end, operation, query, identity: c.contentIdentity });
       if (checked.has(key)) continue;
       checked.add(key);
       try {
-        const result = await this.sources.run('read', { root, path, start, end }, signal);
-        if (result.status !== 'complete' || !result.entries.some(entry => !entry.ephemeral && (!('citation' in item) || entry.text === item.text) && entry.citation?.contentIdentity === c.contentIdentity)) return false;
+        const result = await this.sources.run(operation, { root, path, ...(operation === 'read' ? { start, end } : {}), ...(query ? { query } : {}) }, signal, undefined, operation !== 'read');
+        const sameOwner = (actual: SourceIdentity['repository']) => repository ? !!actual && nameKey(actual.name) === nameKey(repository.name) && actual.path === repository.path : actual === null;
+        if (result.status !== 'complete') return false;
+        if (operation !== 'read') {
+          if (!result.inspectedScope || result.inspectedScope.contentIdentity !== c.contentIdentity || !sameOwner(result.inspectedScope.repository)) return false;
+        } else if (!result.entries.some(entry => !entry.ephemeral && (!('citation' in item) || entry.text === item.text) && entry.citation?.contentIdentity === c.contentIdentity && sameOwner(entry.citation.repository))) return false;
       } catch { return false; }
     }
     return true;

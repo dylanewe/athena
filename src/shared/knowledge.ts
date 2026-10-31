@@ -1,8 +1,8 @@
 import { Type, type Static } from 'typebox';
 import type { Evidence } from './live';
-import type { SourceIdentity } from './sources';
+import type { SourceIdentity, SourceScope } from './sources';
 
-const bounded = (maxLength: number) => Type.String({ minLength: 1, maxLength, pattern: '^[^\\x00-\\x1f\\x7f]+$' });
+const bounded = (maxLength: number) => Type.String({ minLength: 1, maxLength, pattern: '^(?=.*\\S)[^\\x00-\\x1f\\x7f]+$' });
 export const knowledgeCandidatesSchema = Type.Array(Type.Object({
   id: Type.String({ pattern: '^C[1-9][0-9]{0,2}$' }),
   scope: bounded(4096), topic: bounded(120), summary: bounded(500),
@@ -25,6 +25,7 @@ export interface KnowledgeRecord extends Omit<KnowledgeCandidate, 'id' | 'eviden
   validationNote: string;
   evidence: Evidence[];
   dependencies: SourceIdentity[];
+  scopes: SourceScope[];
   relations: { kind: 'conflicts-with' | 'supports' | 'depends-on'; target: string; owners: KnowledgeOwner[] }[];
   owners: KnowledgeOwner[];
 }

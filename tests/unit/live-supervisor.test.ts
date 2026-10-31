@@ -564,6 +564,15 @@ test('negative search files are dependencies: mutation after extraction withhold
   expect(await knowledge.inspect()).toEqual([]);
 });
 
+test('a new file after a negative scoped search withholds stale model candidates before commit', async () => {
+  const scripts = knowledgeScripts();
+  scripts.splice(1, 0, functionResponse('sources_search', { root, path: '.', query: 'authentication middleware' }));
+  scripted(scripts, request => { if (request === 5) writeFileSync(join(root, 'middleware.ts'), '// authentication middleware\n'); });
+  jobs.start(null, 'Explain the answer boundary'); await idle();
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', knowledgePublication: 'withheld' });
+  expect(await knowledge.inspect()).toEqual([]);
+});
+
 test('malformed structured model submissions cannot publish until the investigator submits a valid candidate', async () => {
   const scripts = knowledgeScripts();
   scripts.splice(2, 0, functionResponse('finish_investigation', { findings: [], unresolvedQuestions: [], candidateKnowledgeChanges: [], knowledgeCandidates: [{ ...knowledgeCandidate(), evidenceIds: ['E999'] }] }));

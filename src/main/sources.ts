@@ -7,7 +7,7 @@ import ignore, { type Ignore } from 'ignore';
 import type { Inventory } from './inventory';
 import { FOLDER_CONSENT } from '../shared/inventory';
 import { suspectedSecret } from './secret-check';
-import { SOURCE_LIMITS as L, SOURCE_WARNING, type SourceCitation, type SourceEntry, type SourceException, type SourceOperation, type SourceRequest, type SourceResult } from '../shared/sources';
+import { SOURCE_LIMITS as L, SOURCE_WARNING, type SourceCitation, type SourceEntry, type SourceScope, type SourceException, type SourceOperation, type SourceRequest, type SourceResult } from '../shared/sources';
 
 const skipped = new Set(['node_modules', 'vendor', 'vendors', 'bower_components', 'dist', 'build', 'out', 'target', 'coverage', '__pycache__', 'venv', 'env', 'pods', 'carthage']);
 const generated = /(?:\.min\.(?:js|css)|\.map|\.lock|\.generated\.[^.]+|\.g\.[^.]+|^package-lock\.json|^npm-shrinkwrap\.json|^pnpm-lock\.yaml)$/i;
@@ -81,6 +81,11 @@ export class Sources {
       },
     };
     const result: SourceResult = { entries: [], status: 'complete', scanned: 0, bytesRead: 0, warning: SOURCE_WARNING };
+    let scope: SourceScope | undefined;
+    const repositoryIdentity = (owner: string | null): SourceCitation['repository'] => owner ? {
+      name: this.inventory.snapshot().repositories.find(repo => repo.path === owner)?.name ?? basename(owner),
+      path: relative(root, owner) || '.',
+    } : null;
     const push = (entry: SourceEntry) => {
       budget.check();
       const bytes = Buffer.byteLength(JSON.stringify(entry));
@@ -98,6 +103,7 @@ export class Sources {
         push({ path: name, kind: 'file', reason: error instanceof Denied ? error.reason : 'Unavailable or unsafe path.', overridable: error instanceof Denied && error.overridable, ...(error instanceof Denied && error.environment ? { environment: true } : {}) });
         return;
       }
+      if (trackInspected && name === path && operation !== 'read') scope = { folder: root, repository: repositoryIdentity(access.owner), path, revision: null, contentIdentity: '', operation, ...(operation === 'search' ? { query: input.query } : {}) };
       if (access.directory) {
         if (operation === 'read') { push({ path: name, kind: 'directory', reason: 'Choose a text file for range reads.' }); return; }
         if (name !== path) push({ path: name, kind: 'directory' });
@@ -122,10 +128,7 @@ export class Sources {
         const lines = content.split(/\r?\n/);
         const identity = createHash('sha256').update(content).digest('hex');
         const revision = access.owner ? await this.revision(root, access.owner, budget) : null;
-        const repository = access.owner ? {
-          name: this.inventory.snapshot().repositories.find(repo => repo.path === access.owner)?.name ?? basename(access.owner),
-          path: relative(root, access.owner) || '.',
-        } : null;
+        const repository = repositoryIdentity(access.owner);
         const beforeEntries = result.entries.length;
         const excerpt = (first: number, last: number) => {
           const value = lines.slice(first - 1, last).join('\n');
@@ -167,6 +170,14 @@ export class Sources {
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
     result.scanned = Math.min(budget.scanned, L.entries);
     result.bytesRead = budget.bytes;
+    if (scope && result.status === 'complete') {
+      // Stable membership/search-result identity, including negative searches. Paths
+      // are relative to the inspected scope so explicit repository reconnection works.
+      const identity = (c: Omit<SourceCitation, 'start' | 'end'>) => ({ repository: c.repository?.name.normalize('NFC').toLowerCase() ?? null, path: relative(path, c.path), revision: c.revision, contentIdentity: c.contentIdentity });
+      const sorted = (values: unknown[]) => values.map(value => JSON.stringify(value)).sort();
+      const material = { entries: sorted(result.entries.map(entry => ({ ...entry, path: relative(path, entry.path), ...(entry.citation ? { citation: { ...identity(entry.citation), start: entry.citation.start, end: entry.citation.end } } : {}) }))), inspectedFiles: sorted((result.inspectedFiles ?? []).map(identity)) };
+      result.inspectedScope = { ...scope, contentIdentity: 'sha256:' + createHash('sha256').update(JSON.stringify(material)).digest('hex') };
+    }
     return result;
   }
 

@@ -58,6 +58,7 @@
           {/each}
         </details>
         <details><summary>Inspected-file dependencies ({record.dependencies.length})</summary><ul>{#each record.dependencies as item}<li>{item.repository?.name ?? item.folder} · {item.path} · {item.contentIdentity}</li>{/each}</ul></details>
+        {#if record.scopes.length}<details><summary>Inspected search/list scopes ({record.scopes.length})</summary><ul>{#each record.scopes as scope}<li>{scope.operation} · {scope.repository?.name ?? scope.folder} · {scope.path}{scope.query ? ` · ${scope.query}` : ''} · {scope.contentIdentity}</li>{/each}</ul></details>{/if}
         <details><summary>Originating answers ({record.owners.length})</summary>{#each record.owners as owner}<p><button onclick={() => openConversation(owner.conversationId)}>Open conversation</button> <span class="meta">{owner.messageId}</span></p>{/each}</details>
         <p class="identity">{record.id}</p>
       </article>

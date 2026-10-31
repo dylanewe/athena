@@ -18,6 +18,7 @@ export interface SourceCitation {
   contentIdentity: string;
 }
 export type SourceIdentity = Omit<SourceCitation, 'start' | 'end'>;
+export interface SourceScope extends SourceIdentity { operation: 'list' | 'search'; query?: string }
 export interface SourceEntry {
   path: string;
   kind: 'file' | 'directory';
@@ -30,6 +31,7 @@ export interface SourceEntry {
 }
 export interface SourceResult {
   inspectedFiles?: SourceIdentity[];
+  inspectedScope?: SourceScope;
   entries: SourceEntry[];
   status: 'complete' | 'truncated' | 'cancelled';
   reason?: string;

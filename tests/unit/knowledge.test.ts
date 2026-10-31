@@ -158,8 +158,42 @@ test('knowledge IPC is read-only and rejects foreign callers, payloads and publi
   expect(await gateway.dispatch(caller, 'inspect', undefined)).toEqual([]);
 });
 
+test('repository-boundary changes invalidate unchanged source content under the old name', async () => {
+  // Adding a nearer repository boundary changes ownership even if file bytes do not change.
+  const nested = join(root, 'api', 'sub'); mkdirSync(nested);
+  renameSync(join(root, 'api', 'service.ts'), join(nested, 'service.ts'));
+  // Start from a claim citing a file below a directory that is not yet a repository.
+  const result = await sources.run('read', { root, path: 'api/sub/service.ts', start: 1, end: 1 });
+  const entry = result.entries[0];
+  await publish([{ ...candidate(), provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'] }], { evidence: [{ id: 'E1', citation: entry.citation!, text: entry.text! }] });
+  mkdirSync(join(nested, '.git'));
+  try { expect((await knowledge.inspect()).at(-1)?.validation).toBe('stale'); }
+  finally { renameSync(join(nested, 'service.ts'), join(root, 'api', 'service.ts')); rmSync(nested, { recursive: true }); }
+});
+
+test.each(['topic', 'summary', 'claim'] as const)('whitespace-only %s is malformed, not supported knowledge', async field => {
+  await expect(publish([{ ...candidate(), [field]: '   ' }])).rejects.toThrow('Malformed');
+  expect(await knowledge.inspect()).toEqual([]);
+});
+
+test('a new eligible file invalidates the searched scope before commit and after publication', async () => {
+  const searched = await sources.run('search', { root, path: 'api', query: 'authentication' }, undefined, undefined, true);
+  expect(searched.inspectedScope).toBeDefined();
+  const added = join(root, 'api', 'middleware.ts');
+  let checks = 0;
+  try {
+    await expect(publish(undefined, { inspectedScopes: [searched.inspectedScope!], assertPublishable: () => { if (++checks === 2) writeFileSync(added, 'export function authentication() {}\n'); } })).rejects.toThrow('changed');
+    expect(await knowledge.inspect()).toEqual([]);
+    rmSync(added);
+    await publish(undefined, { inspectedScopes: [searched.inspectedScope!] });
+    writeFileSync(added, 'export function authentication() {}\n');
+    expect((await knowledge.inspect())[0].validation).toBe('stale');
+  } finally { rmSync(added, { force: true }); }
+});
+
 test('repository reconnection keeps name-based identity without treating paths or directory names as equivalence', async () => {
-  await publish();
+  const searched = await sources.run('search', { root, path: 'api', query: 'authentication' }, undefined, undefined, true);
+  await publish(undefined, { inspectedScopes: [searched.inspectedScope!] });
   const moved = join(root, 'renamed'); renameSync(join(root, 'api'), moved);
   snapshot.repositories[0].path = moved;
   try { expect((await knowledge.inspect())[0].validation).toBe('supported'); }

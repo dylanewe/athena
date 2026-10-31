@@ -12,7 +12,7 @@ import { CHATGPT_ERRORS, parseChatGPTUsage, type ChatGPTUsage } from '../shared/
 import type { Sources } from './sources';
 import type { Inventory } from './inventory';
 import type { Knowledge } from './knowledge';
-import type { SourceIdentity } from '../shared/sources';
+import type { SourceIdentity, SourceScope } from '../shared/sources';
 import { sourceRequest } from './source-bridge';
 import { checkBeforeModelSend } from './secret-check';
 import { MAX_TITLE_LENGTH } from '../shared/contracts';
@@ -28,7 +28,7 @@ export interface LiveWorker {
 }
 interface Active {
   conversationId: string; messageId: string; prompt: string; controller: AbortController; environment: EnvironmentPermissions;
-  apiKey?: boolean; text: string; evidence: Evidence[]; dependencies: SourceIdentity[]; dependencyCoverageComplete: boolean; exploration?: Exploration; title?: string; requests: number; usage?: ChatGPTUsage; stop?: () => void;
+  apiKey?: boolean; text: string; evidence: Evidence[]; dependencies: SourceIdentity[]; scopes: SourceScope[]; dependencyCoverageComplete: boolean; exploration?: Exploration; title?: string; requests: number; usage?: ChatGPTUsage; stop?: () => void;
   timer?: ReturnType<typeof setTimeout>; progressTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -65,7 +65,7 @@ export class LiveSupervisor {
     const job = this.conversations.beginLive(id, prompt, binding, retryId);
     const controller = new AbortController();
     const environment = new EnvironmentPermissions(this.sources, controller.signal, () => this.conversations.markEphemeral(job.messageId), () => this.cancel(), this.changed, content => this.conversations.rememberEnvironment(content));
-    const active: Active = { ...job, apiKey: !!binding.apiKey, controller, environment, text: '', evidence: [], dependencies: [], dependencyCoverageComplete: true, requests: 0 };
+    const active: Active = { ...job, apiKey: !!binding.apiKey, controller, environment, text: '', evidence: [], dependencies: [], scopes: [], dependencyCoverageComplete: true, requests: 0 };
     this.active = active;
     active.timer = setTimeout(() => this.end(active, { status: 'limit', text: active.text + '\n\nTime limit reached. Retry explicitly when ready.', history: [], requests: active.requests, usageComplete: false }), LIVE_LIMITS.milliseconds);
     this.changed();
@@ -97,7 +97,7 @@ export class LiveSupervisor {
         if (this.knowledge && candidates?.length && outcome.status === 'complete' && !active.environment.tainted && !this.conversations.isEphemeral(active.messageId)) {
           try {
             await this.knowledge.publish({ owner: { conversationId: active.conversationId, messageId: active.messageId }, candidates,
-              evidence: active.evidence, inspectedFiles: active.dependencies, completed: active.dependencyCoverageComplete && (outcome.exploration?.result ?? active.exploration?.result)?.status === 'complete' && !(outcome.exploration?.result ?? active.exploration?.result)?.scopeTruncated,
+              evidence: active.evidence, inspectedFiles: active.dependencies, inspectedScopes: active.scopes, completed: active.dependencyCoverageComplete && (outcome.exploration?.result ?? active.exploration?.result)?.status === 'complete' && !(outcome.exploration?.result ?? active.exploration?.result)?.scopeTruncated,
               environmentExposed: active.environment.tainted, signal: active.controller.signal,
               assertPublishable: () => {
                 if (this.active !== active || active.environment.tainted || this.conversations.isEphemeral(active.messageId)) throw new Error('Knowledge publication revoked.');
@@ -236,7 +236,12 @@ export class LiveSupervisor {
                   if (result.status !== 'complete') active.dependencyCoverageComplete = false;
                   for (const item of result.inspectedFiles ?? []) {
                     if (!active.dependencies.some(previous => JSON.stringify(previous) === JSON.stringify(item))) active.dependencies.push(item);
-                    if (active.dependencies.length > 1000) { finish(failure('limit')); return; }
+                    if (active.dependencies.length + active.scopes.length > 1000) { finish(failure('limit')); return; }
+                  }
+                  if (operation !== 'read') {
+                    if (!result.inspectedScope) active.dependencyCoverageComplete = false;
+                    else if (!active.scopes.some(previous => JSON.stringify(previous) === JSON.stringify(result.inspectedScope))) active.scopes.push(result.inspectedScope);
+                    if (active.dependencies.length + active.scopes.length > 1000) { finish(failure('limit')); return; }
                   }
                   const found: Evidence[] = [];
                   for (const entry of result.entries) {
