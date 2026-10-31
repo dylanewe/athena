@@ -32,6 +32,7 @@ interface Active {
   conversationId: string; messageId: string; prompt: string; controller: AbortController; environment: EnvironmentPermissions;
   knowledgeReferences: { id: string; topic: string }[];
   checkouts: SourceCheckout[];
+  retainedCheckouts: SourceCheckout[];
   apiKey?: boolean; text: string; evidence: Evidence[]; dependencies: SourceIdentity[]; scopes: SourceScope[]; dependencyCoverageComplete: boolean; exploration?: Exploration; title?: string; requests: number; usage?: ChatGPTUsage; stop?: () => void;
   timer?: ReturnType<typeof setTimeout>; progressTimer?: ReturnType<typeof setTimeout>;
 }
@@ -70,7 +71,7 @@ export class LiveSupervisor {
     const job = this.conversations.beginLive(id, prompt, binding, retryId);
     const controller = new AbortController();
     const environment = new EnvironmentPermissions(this.sources, controller.signal, () => this.conversations.markEphemeral(job.messageId), () => this.cancel(), this.changed, content => this.conversations.rememberEnvironment(content));
-    const active: Active = { ...job, apiKey: !!binding.apiKey, controller, environment, knowledgeReferences: [], checkouts: [], text: '', evidence: [], dependencies: [], scopes: [], dependencyCoverageComplete: true, requests: 0 };
+    const active: Active = { ...job, apiKey: !!binding.apiKey, controller, environment, knowledgeReferences: [], checkouts: [], retainedCheckouts: [], text: '', evidence: [], dependencies: [], scopes: [], dependencyCoverageComplete: true, requests: 0 };
     this.active = active;
     active.timer = setTimeout(() => this.end(active, { status: 'limit', text: active.text + '\n\nTime limit reached. Retry explicitly when ready.', history: [], requests: active.requests, usageComplete: false }), LIVE_LIMITS.milliseconds);
     this.changed();
@@ -82,7 +83,8 @@ export class LiveSupervisor {
         active.checkouts = await this.checkouts.capture(active.controller.signal);
         const previous = this.conversations.liveContext(job.conversationId);
         active.evidence = previous.evidence;
-        if (!await this.verify(previous.evidence, active.controller.signal) || previous.evidence.length > 0 && (!previous.checkouts?.length || !await this.checkouts.fresh(previous.checkouts, active.controller.signal))) throw new LiveError('Saved evidence changed or is no longer permitted. Start a new conversation to investigate current sources.');
+        active.retainedCheckouts = previous.checkouts ?? [];
+        if (!await this.verify(previous.evidence, active.controller.signal) || (previous.evidence.length > 0 || previous.sourceBacked || active.retainedCheckouts.length > 0) && (!active.retainedCheckouts.length || !await this.checkouts.fresh(active.retainedCheckouts, active.controller.signal))) throw new LiveError('Saved evidence changed or is no longer permitted. Start a new conversation to investigate current sources.');
         if (this.active !== active) return;
         const work = async (access: (role?: ModelRole, bytes?: number) => Promise<string | ApiGrant>, signal: AbortSignal) => {
           const snapshot = this.inventory.snapshot();
@@ -104,7 +106,7 @@ export class LiveSupervisor {
         if (this.knowledge && candidates?.length && outcome.status === 'complete' && !active.environment.tainted && !this.conversations.isEphemeral(active.messageId)) {
           try {
             await this.knowledge.publish({ owner: { conversationId: active.conversationId, messageId: active.messageId }, candidates,
-              evidence: active.evidence, inspectedFiles: active.dependencies, inspectedScopes: active.scopes, checkouts: active.checkouts, completed: active.dependencyCoverageComplete && (outcome.exploration?.result ?? active.exploration?.result)?.status === 'complete' && !(outcome.exploration?.result ?? active.exploration?.result)?.scopeTruncated,
+              evidence: active.evidence, inspectedFiles: active.dependencies, inspectedScopes: active.scopes, checkouts: this.usedCheckouts(active), completed: active.dependencyCoverageComplete && (outcome.exploration?.result ?? active.exploration?.result)?.status === 'complete' && !(outcome.exploration?.result ?? active.exploration?.result)?.scopeTruncated,
               environmentExposed: active.environment.tainted, signal: active.controller.signal,
               assertPublishable: () => {
                 if (this.active !== active || active.environment.tainted || this.conversations.isEphemeral(active.messageId)) throw new Error('Knowledge publication revoked.');
@@ -134,11 +136,14 @@ export class LiveSupervisor {
     if (this.active) this.end(this.active, { status: 'cancelled', text: this.active.text + '\n\nCancelled. Environment permissions expired. Data already transmitted to a provider cannot be recalled. Usage already incurred may remain. Retry explicitly when ready.', history: [], requests: this.active.requests, usageComplete: false });
     else { this.retrySaving(); this.changed(); }
   }
-  private checkoutIdentities(active: Active): SourceIdentity[] { return [...active.evidence.map(item => item.citation), ...active.dependencies, ...active.scopes]; }
+  private checkoutIdentities(active: Active): SourceIdentity[] { return [...active.evidence.map(item => item.citation), ...active.dependencies, ...active.scopes, ...active.retainedCheckouts]; }
+  private usedCheckouts(active: Active): SourceCheckout[] {
+    return [...new Map([...this.checkouts.select(this.checkoutIdentities(active), active.checkouts), ...active.retainedCheckouts].map(snapshot => [JSON.stringify(snapshot), snapshot])).values()];
+  }
   private async checkoutValid(active: Active): Promise<boolean> {
     const identities = this.checkoutIdentities(active);
     const snapshots = this.checkouts.select(identities, active.checkouts);
-    return this.checkouts.covers(identities, snapshots) && await this.checkouts.fresh(snapshots, active.controller.signal);
+    return this.checkouts.covers(identities, snapshots) && await this.checkouts.fresh(this.usedCheckouts(active), active.controller.signal);
   }
   private checkoutPartial(active: Active, result?: LiveResult): LiveResult {
     return { ...(result ?? { requests: active.requests, usageComplete: false }), status: 'partial', history: [],
@@ -241,10 +246,10 @@ export class LiveSupervisor {
                 } else if (message.type === 'knowledge') {
                   if (!active.requests || !this.knowledge || ++knowledgeCalls > KNOWLEDGE_LIMITS.calls) throw new Error('Knowledge request limit.');
                   this.conversations.assertClean(message.input);
-                  const result = await this.knowledge.retrieve(message.input as KnowledgeRequest, signal);
+                  const result = await this.knowledge.retrieve(message.input as KnowledgeRequest, signal, { persistInvalidations: !active.environment.tainted && !this.conversations.isEphemeral(active.messageId) });
                   if (settled || this.active !== active || signal.aborted) return;
                   this.conversations.assertClean(result);
-                  const { evidence: retained, ...bounded } = result;
+                  const { evidence: retained, derivation, ...bounded } = result;
                   let citation: Evidence | undefined;
                   if (retained) {
                     citation = active.evidence.find(item => JSON.stringify(item.citation) === JSON.stringify(retained.citation) && item.text === retained.text);
@@ -258,7 +263,13 @@ export class LiveSupervisor {
                   if (knowledgeBytes + bytes > KNOWLEDGE_LIMITS.contextBytes) throw new Error('Knowledge context limit.');
                   knowledgeBytes += bytes;
                   // Only delivered results acquire citation/navigation ownership.
-                  if (citation && !active.evidence.some(item => item.id === citation.id)) active.evidence.push(citation);
+                  if (citation) {
+                    if (!active.evidence.some(item => item.id === citation.id)) active.evidence.push(citation);
+                    active.retainedCheckouts = [...new Map([...active.retainedCheckouts, ...(derivation?.checkouts ?? [])].map(snapshot => [JSON.stringify(snapshot), snapshot])).values()];
+                    active.dependencies = [...new Map([...active.dependencies, ...(derivation?.files ?? [])].map(identity => [JSON.stringify(identity), identity])).values()];
+                    active.scopes = [...new Map([...active.scopes, ...(derivation?.scopes ?? [])].map(identity => [JSON.stringify(identity), identity])).values()];
+                    if (active.dependencies.length + active.scopes.length > 1000) { finish(failure('limit')); return; }
+                  }
                   for (const item of result.items) if (active.knowledgeReferences.length < 32 && !active.knowledgeReferences.some(reference => reference.id === item.id)) active.knowledgeReferences.push({ id: item.id, topic: item.topic });
                   worker!.postMessage({ type: 'reply', id: lastId, knowledge: bounded });
                 } else if (message.type === 'inspect') {
@@ -349,7 +360,7 @@ export class LiveSupervisor {
   private end(active: Active, result: LiveResult): void {
     if (this.active !== active) return;
     this.active = undefined;
-    result = { ...result, ...(!active.environment.tainted && result.status === 'complete' ? { checkouts: this.checkouts.select(this.checkoutIdentities(active), active.checkouts) } : {}), ...(active.knowledgeReferences.length && !active.environment.tainted ? { knowledgeReferences: active.knowledgeReferences } : {}), ...(active.exploration && !result.exploration ? { exploration: active.exploration } : {}), ...(active.title && !result.title ? { title: active.title } : {}) };
+    result = { ...result, ...(!active.environment.tainted && result.status === 'complete' ? { checkouts: this.usedCheckouts(active) } : {}), ...(active.knowledgeReferences.length && !active.environment.tainted ? { knowledgeReferences: active.knowledgeReferences } : {}), ...(active.exploration && !result.exploration ? { exploration: active.exploration } : {}), ...(active.title && !result.title ? { title: active.title } : {}) };
     if (result.status !== 'complete' && result.exploration) {
       const previous = result.exploration.result;
       result.exploration = { ...result.exploration, result: { ...previous, status: 'partial',

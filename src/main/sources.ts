@@ -15,6 +15,7 @@ const credentialFormat = /\.(?:pem|key|p12|pfx|keystore|jks|tfstate|tfvars)$/i;
 const binary = /\.(?:pdf|png|jpe?g|gif|webp|ico|bmp|heic|svgz|zip|gz|tar|7z|rar|exe|dll|so|dylib|o|a|class|jar|wasm|woff2?|ttf|mp[34]|mov|sqlite3?|db|pyc)$/i;
 const within = (root: string, path: string) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
 class Denied extends Error { constructor(readonly reason: string, readonly overridable = false, readonly environment = false) { super(reason); } }
+class IncompleteRead extends Denied {}
 class Stopped extends Error { constructor(readonly reason: string) { super(reason); } }
 function location(value: unknown): string {
   if (typeof value !== 'string' || !value || value.length > 4096 || isAbsolute(value) || /[\u0000-\u001f\\]/.test(value) ||
@@ -113,6 +114,7 @@ export class Sources {
       try { access = await this.access(root, name, budget, permission); }
       catch (error) {
         if (error instanceof Stopped) throw error;
+        if (checkout && (!(error instanceof Denied) || error instanceof IncompleteRead)) result.status = 'truncated';
         push({ path: name, kind: 'file', reason: error instanceof Denied ? error.reason : 'Unavailable or unsafe path.', overridable: error instanceof Denied && error.overridable, ...(error instanceof Denied && error.environment ? { environment: true } : {}) });
         return;
       }
@@ -181,6 +183,7 @@ export class Sources {
         }
       } catch (error) {
         if (error instanceof Stopped) throw error;
+        if (checkout && (!(error instanceof Denied) || error instanceof IncompleteRead)) result.status = 'truncated';
         push({ path: name, kind: 'file', reason: error instanceof Denied ? error.reason : 'File unavailable or changed during read.', overridable: error instanceof Denied && error.overridable });
       }
     };
@@ -289,20 +292,20 @@ export class Sources {
       if (error instanceof Stopped) throw error;
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'ENOENT' || code === 'ENOTDIR') return null;
-      throw new Denied('Safety metadata unavailable or over limit; content withheld.');
+      throw new IncompleteRead('Safety metadata unavailable or over limit; content withheld.');
     }
   }
   private async text(root: string, path: string, budget: Budget, max: number): Promise<string> {
     budget.check();
     const absolute = await this.safePath(root, path);
     const before = await lstat(absolute);
-    if (!before.isFile() || before.size > max) throw new Denied('Unsupported or oversized input.');
+    if (!before.isFile() || before.size > max) throw new IncompleteRead('Unsupported or oversized input.');
     if (budget.bytes + before.size + 1 > L.totalBytes) throw new Stopped('Input-byte limit reached.');
     budget.check();
     const file = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       const stat = await file.stat();
-      if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino || stat.size > max) throw new Denied('File changed during access check.');
+      if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino || stat.size > max) throw new IncompleteRead('File changed during access check.');
       await this.safePath(root, path);
       budget.check();
       const buffer = Buffer.alloc(stat.size + 1);
@@ -316,7 +319,7 @@ export class Sources {
       }
       budget.check();
       const after = await file.stat();
-      if (length !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) throw new Denied('File changed during read; retry.');
+      if (length !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) throw new IncompleteRead('File changed during read; retry.');
       const data = buffer.subarray(0, length);
       if (data.includes(0) || data.some(byte => byte < 9 || (byte > 13 && byte < 32))) throw new Denied('Unsupported binary input.');
       try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data); }

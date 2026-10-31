@@ -146,12 +146,15 @@ export class Conversations {
     return { needsTitle: true, titlePrompt: String(first?.text ?? '') };
   }
 
-  liveContext(id: string): { history: PiMessage[]; evidence: Evidence[]; checkouts?: SourceCheckout[] } {
+  liveContext(id: string): { history: PiMessage[]; evidence: Evidence[]; checkouts?: SourceCheckout[]; sourceBacked?: boolean } {
     this.binding(id);
     if (this.db.prepare('SELECT sealed FROM conversations WHERE id = ?').get(id)?.sealed) return { history: [], evidence: [] };
     const row = this.db.prepare(`SELECT a.history, a.evidence, a.result FROM live_attempts a JOIN messages m ON m.id = a.message_id
       WHERE m.conversation_id = ? AND m.status = 'complete' ORDER BY m.rowid DESC LIMIT 1`).get(id);
-    return row ? { history: JSON.parse(String(row.history)), evidence: JSON.parse(String(row.evidence)), ...(row.result && JSON.parse(String(row.result)).checkouts ? { checkouts: JSON.parse(String(row.result)).checkouts } : {}) } : { history: [], evidence: [] };
+    if (!row) return { history: [], evidence: [] };
+    const result = row.result ? JSON.parse(String(row.result)) : {};
+    return { history: JSON.parse(String(row.history)), evidence: JSON.parse(String(row.evidence)),
+      ...(result.checkouts ? { checkouts: result.checkouts } : {}), ...(result.investigation?.inspectedScope?.length ? { sourceBacked: true } : {}) };
   }
 
   beginLive(id: string | null, prompt: string, binding: ConversationBinding, retryId?: string): { conversationId: string; messageId: string; prompt: string } {

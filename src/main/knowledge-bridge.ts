@@ -8,7 +8,7 @@ export class KnowledgeGateway {
   async dispatch(caller: Caller, operation: unknown, payload: unknown): Promise<KnowledgeResult> {
     authorize(caller, this.owner);
     if (operation === 'retrieve') {
-      const { evidence, ...result } = await this.knowledge.retrieve(payload as KnowledgeRequest);
+      const { evidence, derivation: _derivation, ...result } = await this.knowledge.retrieve(payload as KnowledgeRequest);
       // Full retained text is a main-private verification envelope, not a UI excerpt.
       return { ...result, ...(evidence ? { currentCitation: evidence.citation } : {}) };
     }

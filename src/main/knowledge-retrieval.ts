@@ -11,6 +11,7 @@ interface RetrievalBudget {
   records: Map<string, KnowledgeRecord | undefined>;
   sources: Set<string>;
   checkouts: Map<string, boolean>;
+  persistInvalidations: boolean;
 }
 
 /** Local, rebuildable FTS index and bounded one-hop retrieval. Never model-generated SQL. */
@@ -20,7 +21,8 @@ export class KnowledgeRetrieval {
     private readonly permitted: (identity: SourceIdentity, signal: AbortSignal) => Promise<boolean>,
     private readonly fresh: (identities: (SourceIdentity | SourceScope)[], signal: AbortSignal) => Promise<boolean>,
     private readonly currentEvidence: (evidence: Evidence, signal: AbortSignal) => Promise<Evidence | undefined>,
-    private readonly checkoutFresh: (snapshots: SourceCheckout[], signal: AbortSignal) => Promise<boolean>) {
+    private readonly checkoutFresh: (snapshots: SourceCheckout[], signal: AbortSignal) => Promise<boolean>,
+    private readonly invalidate: (ids: string[]) => void) {
     db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(id UNINDEXED, topic, aliases, summary, claim, evidence, tokenize='unicode61 remove_diacritics 2');
       CREATE TABLE IF NOT EXISTS knowledge_names (scope TEXT NOT NULL, name TEXT NOT NULL, id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE, PRIMARY KEY(scope, name, id));
       CREATE TRIGGER IF NOT EXISTS knowledge_delete AFTER DELETE ON claims BEGIN DELETE FROM knowledge_fts WHERE id = OLD.id; END;
@@ -43,13 +45,13 @@ export class KnowledgeRetrieval {
       this.db.prepare('INSERT INTO knowledge_names VALUES (?, ?, ?)').run(knowledgeName(record.scope), name, record.id);
     }
   }
-  async retrieve(input: KnowledgeRequest, external?: AbortSignal): Promise<KnowledgeResult> {
+  async retrieve(input: KnowledgeRequest, external?: AbortSignal, persistInvalidations = true): Promise<KnowledgeResult> {
     if (!Check(knowledgeRequestSchema, input)) throw new Error('Invalid bounded knowledge request.');
     if (input.operation === 'search' && input.exact && !input.scope) throw new Error('Exact name lookup requires a repository scope.');
     const signal = AbortSignal.any([AbortSignal.timeout(10000), ...(external ? [external] : [])]);
     const offset = 'offset' in input ? input.offset ?? 0 : 0;
     const limit = input.operation === 'search' || input.operation === 'expand' ? input.limit ?? L.defaultResults : 1;
-    const budget: RetrievalBudget = { records: new Map(), sources: new Set(), checkouts: new Map() };
+    const budget: RetrievalBudget = { records: new Map(), sources: new Set(), checkouts: new Map(), persistInvalidations };
     let ids: string[];
     let edges: NonNullable<KnowledgeResult['edges']> = [];
     if (input.operation === 'search') {
@@ -77,6 +79,7 @@ export class KnowledgeRetrieval {
     } else ids = [input.id];
     const items: KnowledgeHit[] = [];
     let evidence: Evidence | undefined;
+    let derivation: KnowledgeResult['derivation'];
     let consumed = 0;
     for (const id of ids.slice(0, limit)) {
       external?.throwIfAborted();
@@ -99,7 +102,10 @@ export class KnowledgeRetrieval {
         const item = record.evidence[input.index];
         if (!item) continue;
         hit.evidence = [{ index: input.index, citation: item.citation, excerpt: item.text.slice(0, L.excerpt), truncated: item.text.length > L.excerpt }];
-        if (!stale) evidence = await this.currentEvidence(item, signal);
+        if (!stale) {
+          evidence = await this.currentEvidence(item, signal);
+          if (evidence) derivation = checked.derivation;
+        }
       }
       const visibleEdges = edges.filter(edge => [...items, hit].some(item => item.id === edge.target));
       if (Buffer.byteLength(JSON.stringify({ items: [...items, hit], edges: visibleEdges, notice: NOTICE })) > L.bytes - 128) { consumed--; break; }
@@ -108,10 +114,12 @@ export class KnowledgeRetrieval {
     const next = offset + consumed;
     const result: KnowledgeResult = { items, ...(ids.length > consumed && next <= L.offset && consumed > 0 ? { nextOffset: next } : {}), notice: NOTICE };
     if (edges.length) result.edges = edges.filter(edge => items.some(item => item.id === edge.target));
-    if (evidence && Buffer.byteLength(JSON.stringify({ ...result, evidence })) <= L.bytes) result.evidence = evidence;
+    if (evidence && derivation?.checkouts.length && Buffer.byteLength(JSON.stringify({ ...result, evidence, derivation })) <= L.bytes) {
+      result.evidence = evidence; result.derivation = derivation;
+    }
     return result;
   }
-  private async checked(id: string, signal: AbortSignal, budget: RetrievalBudget): Promise<{ record: KnowledgeRecord; stale: boolean } | undefined> {
+  private async checked(id: string, signal: AbortSignal, budget: RetrievalBudget): Promise<{ record: KnowledgeRecord; stale: boolean; derivation: NonNullable<KnowledgeResult['derivation']> } | undefined> {
     const load = (key: string) => {
       if (!budget.records.has(key)) {
         if (budget.records.size >= L.graph) return;
@@ -121,6 +129,7 @@ export class KnowledgeRetrieval {
     };
     const record = load(id);
     if (!record) return;
+    const invalidate = (ids = [record.id]) => { if (budget.persistInvalidations) this.invalidate(ids); };
     const visited = new Set<string>();
     const identities: (SourceIdentity | SourceScope)[] = [];
     let complete = true, invalidated = false;
@@ -145,18 +154,28 @@ export class KnowledgeRetrieval {
     if (budget.sources.size + unchecked.length > L.sourceChecks) return;
     for (const identity of unique) {
       budget.sources.add(JSON.stringify(identity));
-      if (!await this.permitted(identity, signal)) return;
+      if (!await this.permitted(identity, signal)) { invalidate(); return; }
     }
     // Legacy scope fingerprints do not retain descendant membership. A mismatch
     // could be revoked access, not merely changed content: conservatively withhold
     // the whole derivation rather than releasing a potentially revoked stale lead.
-    if (!await this.fresh(unique.filter(item => 'operation' in item), signal)) return;
+    if (!await this.fresh(unique.filter(item => 'operation' in item), signal)) { invalidate(); return; }
     for (const snapshot of checkouts) {
       const key = JSON.stringify(snapshot);
       if (!budget.checkouts.has(key)) budget.checkouts.set(key, await this.checkoutFresh([snapshot], signal));
       if (!budget.checkouts.get(key)) invalidated = true;
     }
     const stale = invalidated || !await this.fresh(unique.filter(item => !('operation' in item)), signal);
-    return { record, stale };
+    if (stale) {
+      const staleIds = [...visited].filter(id => {
+        const item = budget.records.get(id)!;
+        return item.validation === 'stale' || !item.checkouts?.length || item.checkouts.some(snapshot => budget.checkouts.get(JSON.stringify(snapshot)) === false);
+      });
+      invalidate([...new Set([record.id, ...staleIds])]);
+    }
+    return { record, stale, derivation: {
+      files: unique.filter(item => !('operation' in item)), scopes: unique.filter((item): item is SourceScope => 'operation' in item),
+      checkouts: [...new Map(checkouts.map(snapshot => [JSON.stringify(snapshot), snapshot])).values()],
+    } };
   }
 }

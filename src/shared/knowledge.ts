@@ -59,6 +59,8 @@ export interface KnowledgeResult {
   notice: string;
   /** Main-owned runtime citation, only for a current evidence request. */
   evidence?: Evidence;
+  /** Main-private transitive provenance accompanying runtime evidence; never sent to renderer/model. */
+  derivation?: { checkouts: SourceCheckout[]; files: SourceIdentity[]; scopes: SourceScope[] };
   evidenceId?: string;
   /** UI navigation only; no unbounded verification text crosses the renderer bridge. */
   currentCitation?: Evidence['citation'];

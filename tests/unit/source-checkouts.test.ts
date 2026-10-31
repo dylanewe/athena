@@ -1,4 +1,9 @@
-import { afterEach, beforeEach, expect, test } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { open } from 'node:fs/promises';
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, open: vi.fn(actual.open) };
+});
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -42,6 +47,21 @@ test('local census includes tracked and untracked sources, edits, renames, delet
   baseline = await checkouts.capture(); git('checkout', '-qb', 'same-commit');
   expect(await checkouts.fresh(baseline)).toBe(false); // Same file bytes and commit, different branch.
   expect(git('branch', '--show-current').toString().trim()).toBe('same-commit');
+});
+
+test('repeated eligible-file read failures never certify a complete or fresh checkout', async () => {
+  const baseline = await checkouts.capture();
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+  vi.mocked(open).mockImplementation(async (...args) => {
+    if (String(args[0]).endsWith('/service.ts')) throw Object.assign(new Error('fixture IO failure'), { code: 'EIO' });
+    return actual.open(...args);
+  });
+  try {
+    expect(await checkouts.fresh(baseline)).toBe(false);
+    const failed = await checkouts.capture();
+    expect(failed[0].complete).toBe(false);
+    expect(await checkouts.fresh(failed)).toBe(false);
+  } finally { vi.mocked(open).mockImplementation(actual.open); }
 });
 
 test('census uses analysis eligibility and never gains environment or ignored-file access', async () => {

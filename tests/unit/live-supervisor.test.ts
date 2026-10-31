@@ -549,6 +549,45 @@ test('an uncited configuration edit during analysis returns a partial snapshot r
   expect(requests).toHaveLength(3);
 });
 
+test('citation-free source investigations retain checkout provenance and cannot replay changed source history', async () => {
+  scripted([functionResponse('investigate', { question: 'Find a nonexistent handler' }),
+    functionResponse('sources_search', { root, path: '.', query: 'absent-handler' }),
+    functionResponse('finish_investigation', { findings: [], unresolvedQuestions: ['No match is not proof of absence.'], candidateKnowledgeChanges: [] }), textResponse('No match was observed.')]);
+  jobs.start(null, 'Find a handler'); await idle();
+  const id = db.workspace().selected!.id, count = requests.length;
+  expect(db.liveContext(id).evidence).toEqual([]);
+  writeFileSync(join(root, 'caller.ts'), 'absent-handler();\n');
+  jobs.start(id, 'Explain more'); await idle();
+  expect(db.workspace().selected!.messages.at(-1)?.status).toBe('failed');
+  expect(requests).toHaveLength(count);
+});
+
+test.each(['during', 'follow-up'] as const)('reused evidence retains its cross-repository dependency closure for %s edits', async when => {
+  for (const name of ['a', 'b']) {
+    mkdirSync(join(root, name, '.git'), { recursive: true });
+    writeFileSync(join(root, name, 'source.ts'), 'export const value = 1;\n');
+    snapshot.repositories.push({ name, path: join(root, name), presence: 'present', documentationRoots: [], boundaries: [], fileCount: 1, examined: false });
+  }
+  const publish = async (scope: string, relations: { kind: 'depends-on'; target: string }[] = []) => {
+    const result = await sources.run('read', { root, path: `${scope}/source.ts`, start: 1, end: 1 });
+    return knowledge.publish({ owner: { conversationId: scope, messageId: scope }, candidates: [{ ...knowledgeCandidate(), scope, relations }],
+      evidence: [{ id: 'E1', citation: result.entries[0].citation!, text: result.entries[0].text! }], completed: true, environmentExposed: false, signal: new AbortController().signal });
+  };
+  const [b] = await publish('b'), [a] = await publish('a', [{ kind: 'depends-on', target: b }]);
+  scripted([functionResponse('retrieve_knowledge', { operation: 'evidence', id: a, index: 0 }), textResponse('Current source [E1].')],
+    request => { if (when === 'during' && request === 2) writeFileSync(join(root, 'b', 'caller.ts'), 'value();\n'); });
+  jobs.start(null, 'Reuse the claim'); await idle();
+  const id = db.workspace().selected!.id;
+  if (when === 'during') expect(db.workspace().selected!.messages.at(-1)?.status).toBe('partial');
+  else {
+    expect(db.workspace().selected!.messages.at(-1)?.status).toBe('complete');
+    const count = requests.length; writeFileSync(join(root, 'b', 'caller.ts'), 'value();\n');
+    jobs.start(id, 'Explain more'); await idle();
+    expect(db.workspace().selected!.messages.at(-1)?.status).toBe('failed');
+    expect(requests).toHaveLength(count);
+  }
+});
+
 test('saved evidence cannot be replayed after an uncited caller changes, even when the cited file is unchanged', async () => {
   scripted(knowledgeScripts()); jobs.start(null, 'Inspect the boundary'); await idle();
   const id = db.workspace().selected!.id, count = requests.length;

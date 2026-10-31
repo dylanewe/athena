@@ -52,6 +52,30 @@ test('local checkout scans invalidate an unchanged citation when an uninspected 
   expect((await knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('stale');
 });
 
+test.each(['retrieve', 'inspect'] as const)('%s freshness observations persist invalidation even after an edit is reverted', async operation => {
+  const [id] = await publish();
+  const caller = join(root, 'api', 'caller.ts');
+  try {
+    writeFileSync(caller, 'serve();\n');
+    if (operation === 'retrieve') expect((await knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('stale');
+    else expect((await knowledge.inspect())[0].validation).toBe('stale');
+    rmSync(caller);
+    expect((await knowledge.retrieve({ operation: 'evidence', id, index: 0 })).evidence).toBeUndefined();
+    expect((await knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('stale');
+  } finally { rmSync(caller, { force: true }); }
+});
+
+test('read-only job retrieval can report stale leads without writing new invalidations from a tainted context', async () => {
+  const [id] = await publish();
+  const caller = join(root, 'api', 'caller.ts');
+  try {
+    writeFileSync(caller, 'serve();\n');
+    expect((await knowledge.retrieve({ operation: 'detail', id }, undefined, { persistInvalidations: false })).items[0].freshness).toBe('stale');
+    rmSync(caller);
+    expect((await knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('current');
+  } finally { rmSync(caller, { force: true }); }
+});
+
 test('configuration, deletion, rename and checkout revision changes invalidate unchanged cited implementations', async () => {
   const caller = join(root, 'api', 'caller.ts'), renamed = join(root, 'api', 'renamed.ts'), config = join(root, 'api', 'config.json');
   const head = join(root, 'api', '.git', 'HEAD');
@@ -259,6 +283,7 @@ test('the renderer gets only bounded excerpts, never the main-private verificati
   const result = await gateway.dispatch({ ...owner, isMainFrame: true }, 'retrieve', { operation: 'evidence', id, index: 0 });
   expect(result).toMatchObject({ items: [{ evidence: [{ excerpt: expect.any(String), truncated: true }] }], currentCitation: { path: 'api/README.md' } });
   expect(result).not.toHaveProperty('evidence');
+  expect(result).not.toHaveProperty('derivation');
   expect(JSON.stringify(result)).not.toContain('gateway '.repeat(225));
 });
 

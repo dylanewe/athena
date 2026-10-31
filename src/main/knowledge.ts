@@ -56,10 +56,13 @@ export class Knowledge {
     this.retrieval = new KnowledgeRetrieval(this.db, id => this.records(id)[0],
       (identity, signal) => this.permitted(identity, signal), (identities, signal) => this.fresh(identities, signal),
       (evidence, signal) => this.currentEvidence(evidence, signal),
-      (snapshots, signal) => this.checkouts.fresh(snapshots, signal));
+      (snapshots, signal) => this.checkouts.fresh(snapshots, signal), ids => this.invalidate(ids));
   }
-  retrieve(request: KnowledgeRequest, signal?: AbortSignal): Promise<KnowledgeResult> {
-    return this.serial(() => this.retrieval.retrieve(request, signal));
+  retrieve(request: KnowledgeRequest, signal?: AbortSignal, options = { persistInvalidations: true }): Promise<KnowledgeResult> {
+    return this.serial(() => this.retrieval.retrieve(request, signal, options.persistInvalidations));
+  }
+  private invalidate(ids: string[]): void {
+    for (const id of ids) this.db.prepare('INSERT OR IGNORE INTO invalidations VALUES (?, ?)').run(id, 'Checkout or source access changed. Needs explicit revalidation; retained evidence is historical.');
   }
   publish(input: Publication): Promise<string[]> { return this.serial(() => this.publishValidated(input)); }
   /** Launch/pre-investigation local census. Invalidations are sticky, including across reverts/restarts. */
@@ -69,7 +72,7 @@ export class Knowledge {
       for (const record of records) {
         signal?.throwIfAborted();
         if (record.validation === 'stale' || !record.checkouts?.length || !await this.checkouts.fresh(record.checkouts, signal) || !await this.fresh([...record.dependencies, ...record.scopes], signal)) {
-          this.db.prepare('INSERT OR IGNORE INTO invalidations VALUES (?, ?)').run(record.id, 'Checkout or source access changed. Needs explicit revalidation; retained evidence is historical.');
+          this.invalidate([record.id]);
         }
       }
       this.propagateInvalidations(records);
@@ -86,22 +89,9 @@ export class Knowledge {
       }
     }
   }
-  inspect(signal?: AbortSignal): Promise<KnowledgeRecord[]> {
-    return this.serial(async () => {
-      const records = this.records();
-      const stale = new Set<string>();
-      for (const record of records) if (record.validation === 'stale' || !record.checkouts?.length || !await this.checkouts.fresh(record.checkouts, signal) || !await this.fresh([...record.dependencies, ...record.scopes], signal)) stale.add(record.id);
-      // Only explicit dependency edges propagate staleness; never similarity.
-      let changed = true;
-      while (changed) {
-        changed = false;
-        for (const record of records) if (!stale.has(record.id) && record.relations.some(edge => edge.kind === 'depends-on' && stale.has(edge.target))) {
-          stale.add(record.id); changed = true;
-        }
-      }
-      signal?.throwIfAborted();
-      return records.map(record => stale.has(record.id) ? { ...record, validation: 'stale', validationNote: 'An inspected dependency changed, moved without reconnection, or is no longer permitted.' } : record);
-    });
+  async inspect(signal?: AbortSignal): Promise<KnowledgeRecord[]> {
+    await this.scan(signal);
+    return this.serial(async () => { signal?.throwIfAborted(); return this.records(); });
   }
   clear(): Promise<void> { return this.serial(async () => { this.db.exec('DELETE FROM claims'); }); }
   close(): void { this.db.close(); }
