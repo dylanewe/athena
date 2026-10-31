@@ -246,7 +246,7 @@ export class LiveSupervisor {
                 } else if (message.type === 'knowledge') {
                   if (!active.requests || !this.knowledge || ++knowledgeCalls > KNOWLEDGE_LIMITS.calls) throw new Error('Knowledge request limit.');
                   this.conversations.assertClean(message.input);
-                  const result = await this.knowledge.retrieve(message.input as KnowledgeRequest, signal, { persistInvalidations: !active.environment.tainted && !this.conversations.isEphemeral(active.messageId) });
+                  const result = await this.knowledge.retrieve(message.input as KnowledgeRequest, signal, { canPersistInvalidations: () => this.active === active && !active.environment.tainted && !this.conversations.isEphemeral(active.messageId) && !signal.aborted });
                   if (settled || this.active !== active || signal.aborted) return;
                   this.conversations.assertClean(result);
                   const { evidence: retained, derivation, ...bounded } = result;

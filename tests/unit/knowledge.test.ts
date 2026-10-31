@@ -50,10 +50,11 @@ test('local checkout scans invalidate an unchanged citation when an uninspected 
   expect(replacement).not.toBe(id);
   expect((await knowledge.retrieve({ operation: 'detail', id: replacement })).items[0].freshness).toBe('current');
   expect((await knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('stale');
+  expect((await knowledge.retrieve({ operation: 'detail', id: replacement })).items[0].freshness).toBe('current');
 });
 
 test.each(['retrieve', 'inspect'] as const)('%s freshness observations persist invalidation even after an edit is reverted', async operation => {
-  const [id] = await publish();
+  const [id, sibling] = await publish([candidate(), { ...candidate(), id: 'C2', topic: 'Sibling contribution' }]);
   const caller = join(root, 'api', 'caller.ts');
   try {
     writeFileSync(caller, 'serve();\n');
@@ -62,6 +63,7 @@ test.each(['retrieve', 'inspect'] as const)('%s freshness observations persist i
     rmSync(caller);
     expect((await knowledge.retrieve({ operation: 'evidence', id, index: 0 })).evidence).toBeUndefined();
     expect((await knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('stale');
+    expect((await knowledge.retrieve({ operation: 'detail', id: sibling })).items[0].freshness).toBe('stale');
   } finally { rmSync(caller, { force: true }); }
 });
 
@@ -74,6 +76,45 @@ test('read-only job retrieval can report stale leads without writing new invalid
     rmSync(caller);
     expect((await knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('current');
   } finally { rmSync(caller, { force: true }); }
+});
+
+test('invalidation authority is rechecked at write time after an asynchronous lookup starts', async () => {
+  const [id] = await publish();
+  const caller = join(root, 'api', 'caller.ts');
+  let permitted = true;
+  try {
+    writeFileSync(caller, 'serve();\n');
+    const lookup = knowledge.retrieve({ operation: 'detail', id }, undefined, { canPersistInvalidations: () => permitted });
+    permitted = false; // Models/settings UI can seal an in-flight job while local IO is pending.
+    expect((await lookup).items[0].freshness).toBe('stale');
+    rmSync(caller);
+    expect((await knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('current');
+  } finally { rmSync(caller, { force: true }); }
+});
+
+test.each(['deleted-file', 'changed-scope'] as const)('%s observations invalidate the affected dependency, not unrelated valid contributions', async change => {
+  const other = join(root, 'other'); mkdirSync(join(other, '.git'), { recursive: true });
+  writeFileSync(join(other, 'notes.md'), 'Independent implementation.\n');
+  snapshot.repositories.push({ ...snapshot.repositories[0], name: 'other', path: other });
+  const service = join(root, 'api', 'service.ts'), caller = join(root, 'api', 'caller.ts');
+  try {
+    const listing = await sources.run('list', { root, path: 'api' }, undefined, undefined, true);
+    const [dependency] = await publish(undefined, change === 'changed-scope' ? { inspectedScopes: [listing.inspectedScope!] } : {});
+    const read = await sources.run('read', { root, path: 'other/notes.md', start: 1, end: 1 });
+    const observed = [{ id: 'E1', citation: read.entries[0].citation!, text: read.entries[0].text! }];
+    const [dependent, unrelated] = await publish([
+      { ...candidate(), scope: 'other', evidenceIds: ['E1'], topic: 'Dependent', relations: [{ kind: 'depends-on', target: dependency }] },
+      { ...candidate(), id: 'C2', scope: 'other', evidenceIds: ['E1'], topic: 'Independent' },
+    ], { evidence: observed });
+    if (change === 'deleted-file') rmSync(service); else writeFileSync(caller, 'serve();\n');
+    expect((await knowledge.retrieve({ operation: 'detail', id: dependent })).items).toEqual([]);
+    if (change === 'deleted-file') writeFileSync(service, 'export function serve() { return "ready"; }\n'); else rmSync(caller);
+    for (const id of [dependency, dependent]) expect((await knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('stale');
+    expect((await knowledge.retrieve({ operation: 'detail', id: unrelated })).items[0].freshness).toBe('current');
+  } finally {
+    writeFileSync(service, 'export function serve() { return "ready"; }\n'); rmSync(caller, { force: true });
+    snapshot.repositories.pop(); rmSync(other, { recursive: true });
+  }
 });
 
 test('configuration, deletion, rename and checkout revision changes invalidate unchanged cited implementations', async () => {
@@ -232,6 +273,20 @@ test('an existing pre-search knowledge database gets a local index backfill with
     expect((await upgraded.retrieve({ operation: 'search', query: 'Request serving', scope: 'PUBLIC-API', exact: true })).items[0].id).toBe(id);
     expect((await upgraded.retrieve({ operation: 'search', query: 'requests' })).items[0].id).toBe(id);
   } finally { upgraded.close(); }
+});
+
+test('checkout ownership indexes backfill locally and preserve scope-wide invalidation across an upgrade', async () => {
+  const [first, sibling] = await publish([candidate(), { ...candidate(), id: 'C2', topic: 'Sibling' }]);
+  const oldProfile = new DatabaseSync(join(directory, 'knowledge.sqlite'));
+  oldProfile.exec('DROP TABLE checkout_dependencies; DROP TABLE checkout_index_version'); oldProfile.close();
+  const upgraded = new Knowledge(join(directory, 'knowledge.sqlite'), sources, inventory, () => {});
+  const caller = join(root, 'api', 'caller.ts');
+  try {
+    writeFileSync(caller, 'serve();\n');
+    expect((await upgraded.retrieve({ operation: 'detail', id: first })).items[0].freshness).toBe('stale');
+    rmSync(caller);
+    expect((await upgraded.retrieve({ operation: 'detail', id: sibling })).items[0].freshness).toBe('stale');
+  } finally { upgraded.close(); rmSync(caller, { force: true }); }
 });
 
 test('a single ranked response shares its 32-claim dependency traversal budget across candidates', async () => {

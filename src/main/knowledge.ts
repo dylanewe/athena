@@ -36,9 +36,13 @@ export class Knowledge {
     private readonly assertClean: (material: unknown) => void) {
     this.checkouts = new SourceCheckouts(sources, inventory);
     this.db = new DatabaseSync(path);
+    const checkoutIndexMissing = !this.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'checkout_index_version'").get();
     this.db.exec(`PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS claims (id TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS invalidations (claim_id TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE CASCADE, reason TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS checkout_dependencies (claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+        scope TEXT NOT NULL, identity TEXT NOT NULL, PRIMARY KEY(claim_id, scope, identity));
+      CREATE INDEX IF NOT EXISTS checkout_source ON checkout_dependencies(scope, identity);
       CREATE TABLE IF NOT EXISTS owners (claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
         conversation_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY(claim_id, message_id));
       CREATE TABLE IF NOT EXISTS dependencies (claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
@@ -53,27 +57,61 @@ export class Knowledge {
         conversation_id TEXT NOT NULL, message_id TEXT NOT NULL,
         FOREIGN KEY(claim_id, kind, target) REFERENCES relations(claim_id, kind, target) ON DELETE CASCADE,
         PRIMARY KEY(claim_id, kind, target, message_id));`);
+    if (checkoutIndexMissing) {
+      // Local, restart-safe index backfill only; legacy records still require revalidation.
+      this.db.exec('BEGIN IMMEDIATE');
+      try {
+        for (const row of this.db.prepare('SELECT id, value FROM claims').iterate()) {
+          const record = JSON.parse(String(row.value)) as Stored;
+          for (const snapshot of record.checkouts ?? []) this.indexCheckout(record.id, snapshot);
+        }
+        this.db.exec('CREATE TABLE checkout_index_version (version INTEGER PRIMARY KEY); INSERT INTO checkout_index_version VALUES (1); COMMIT');
+      } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    }
     this.retrieval = new KnowledgeRetrieval(this.db, id => this.records(id)[0],
       (identity, signal) => this.permitted(identity, signal), (identities, signal) => this.fresh(identities, signal),
       (evidence, signal) => this.currentEvidence(evidence, signal),
-      (snapshots, signal) => this.checkouts.fresh(snapshots, signal), ids => this.invalidate(ids));
+      (snapshots, signal) => this.checkouts.fresh(snapshots, signal), (ids, affected) => this.invalidate(ids, affected));
   }
-  retrieve(request: KnowledgeRequest, signal?: AbortSignal, options = { persistInvalidations: true }): Promise<KnowledgeResult> {
-    return this.serial(() => this.retrieval.retrieve(request, signal, options.persistInvalidations));
+  retrieve(request: KnowledgeRequest, signal?: AbortSignal, options: { persistInvalidations?: boolean; canPersistInvalidations?: () => boolean } = {}): Promise<KnowledgeResult> {
+    return this.serial(() => this.retrieval.retrieve(request, signal, () => options.persistInvalidations !== false && (options.canPersistInvalidations?.() ?? true)));
   }
-  private invalidate(ids: string[]): void {
-    for (const id of ids) this.db.prepare('INSERT OR IGNORE INTO invalidations VALUES (?, ?)').run(id, 'Checkout or source access changed. Needs explicit revalidation; retained evidence is historical.');
+  private indexCheckout(id: string, snapshot: SourceCheckout): void {
+    this.db.prepare('INSERT OR IGNORE INTO checkout_dependencies VALUES (?, ?, ?)').run(id, this.scope(snapshot), snapshot.contentIdentity);
+  }
+  private invalidate(ids: string[], affectedSources: SourceIdentity[] = []): void {
+    const note = 'Checkout or source access changed. Needs explicit revalidation; retained evidence is historical.';
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const id of ids) {
+        this.db.prepare('INSERT OR IGNORE INTO invalidations VALUES (?, ?)').run(id, note);
+        // Invalidate contributions sharing an observed incompatible checkout, without a whole-ledger retrieval scan.
+        // An already-stale claim alone supplies no changed scope and cannot invalidate a newly revalidated contribution.
+        for (const scope of new Set(affectedSources.map(source => this.scope(source)))) this.db.prepare(`
+          INSERT OR IGNORE INTO invalidations SELECT d.claim_id, ? FROM checkout_dependencies d
+          JOIN checkout_dependencies changed ON changed.scope = d.scope AND changed.identity = d.identity
+          WHERE changed.claim_id = ? AND changed.scope = ?`).run(note, id, scope);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   publish(input: Publication): Promise<string[]> { return this.serial(() => this.publishValidated(input)); }
   /** Launch/pre-investigation local census. Invalidations are sticky, including across reverts/restarts. */
   scan(signal?: AbortSignal): Promise<void> {
     return this.serial(async () => {
       const records = this.records();
+      const checkoutChecks = new Map<string, boolean>();
       for (const record of records) {
         signal?.throwIfAborted();
-        if (record.validation === 'stale' || !record.checkouts?.length || !await this.checkouts.fresh(record.checkouts, signal) || !await this.fresh([...record.dependencies, ...record.scopes], signal)) {
-          this.invalidate([record.id]);
+        if (record.validation === 'stale' || !record.checkouts?.length) { this.invalidate([record.id]); continue; }
+        const changed: SourceCheckout[] = [];
+        for (const snapshot of record.checkouts) {
+          const key = JSON.stringify(snapshot);
+          if (!checkoutChecks.has(key)) checkoutChecks.set(key, await this.checkouts.fresh([snapshot], signal));
+          if (!checkoutChecks.get(key)) changed.push(snapshot);
         }
+        if (changed.length) this.invalidate([record.id], changed);
+        else if (!await this.fresh([...record.dependencies, ...record.scopes], signal)) this.invalidate([record.id], [...record.dependencies, ...record.scopes]);
       }
       this.propagateInvalidations(records);
     });
@@ -186,6 +224,7 @@ export class Knowledge {
       for (const { record } of records) {
         this.db.prepare('INSERT OR IGNORE INTO claims VALUES (?, ?)').run(record.id, JSON.stringify(record));
         this.db.prepare('INSERT OR IGNORE INTO owners VALUES (?, ?, ?)').run(record.id, input.owner.conversationId, input.owner.messageId);
+        for (const snapshot of checkouts) this.indexCheckout(record.id, snapshot);
         for (const item of dependencies) this.db.prepare('INSERT OR IGNORE INTO dependencies VALUES (?, ?, ?, ?)')
           .run(record.id, this.scope(item), this.sourcePath(item), item.contentIdentity);
         for (const scope of scopes) this.db.prepare('INSERT OR IGNORE INTO scope_dependencies VALUES (?, ?, ?, ?, ?, ?)')

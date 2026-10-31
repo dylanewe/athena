@@ -89,7 +89,10 @@ export class Conversations {
     ).all(summary.id) as unknown as Message[] : [];
     for (const message of messages) {
       const attempt = this.db.prepare('SELECT result, evidence FROM live_attempts WHERE message_id = ?').get(message.id);
-      if (attempt?.result) Object.assign(message, JSON.parse(String(attempt.result)), { evidence: JSON.parse(String(attempt.evidence)) });
+      if (attempt?.result) {
+        const { checkouts: _checkouts, ...visible } = JSON.parse(String(attempt.result));
+        Object.assign(message, visible, { evidence: JSON.parse(String(attempt.evidence)) });
+      }
       Object.assign(message, this.ephemeral.get(message.id));
     }
     const active = this.db.prepare("SELECT conversation_id FROM messages WHERE status = 'running'").get();
@@ -245,14 +248,14 @@ export class Conversations {
     }
     const history = JSON.stringify(result.history);
     if (Buffer.byteLength(history) > LIVE_LIMITS.historyBytes) throw new Error('History exceeds the local limit.');
-    const { history: _history, reason: _reason, exploration, title: _title, ...publicResult } = result;
+    const { history: _history, reason: _reason, exploration, title: _title, ...savedResult } = result;
     const ephemeral = !!this.db.prepare('SELECT ephemeral FROM live_attempts WHERE message_id = ?').get(messageId)?.ephemeral;
     this.transaction(() => {
       if (result.title) this.db.prepare(`UPDATE conversations SET title = ?, model_title = 1 WHERE model_title = 0
         AND id = (SELECT conversation_id FROM messages WHERE id = ?)`).run(result.title, messageId);
       this.finish(messageId, result.status === 'partial' || result.status === 'limit' ? 'failed' : result.status, result.text);
       this.db.prepare('UPDATE live_attempts SET history = ?, evidence = ?, result = ?, exploration = ? WHERE message_id = ?')
-        .run(result.status === 'complete' ? history : '[]', JSON.stringify(evidence), JSON.stringify({ ...publicResult, ...(ephemeral ? { ephemeral: true } : {}), ...(exploration ? { investigation: exploration.result } : {}) }), exploration ? JSON.stringify(exploration) : null, messageId);
+        .run(result.status === 'complete' ? history : '[]', JSON.stringify(evidence), JSON.stringify({ ...savedResult, ...(ephemeral ? { ephemeral: true } : {}), ...(exploration ? { investigation: exploration.result } : {}) }), exploration ? JSON.stringify(exploration) : null, messageId);
     });
   }
 

@@ -581,6 +581,8 @@ test.each(['during', 'follow-up'] as const)('reused evidence retains its cross-r
   if (when === 'during') expect(db.workspace().selected!.messages.at(-1)?.status).toBe('partial');
   else {
     expect(db.workspace().selected!.messages.at(-1)?.status).toBe('complete');
+    expect(db.workspace().selected!.messages.at(-1)).not.toHaveProperty('checkouts');
+    expect(db.liveContext(id).checkouts).toEqual(expect.arrayContaining([expect.objectContaining({ repository: { name: 'b', path: 'b' } })]));
     const count = requests.length; writeFileSync(join(root, 'b', 'caller.ts'), 'value();\n');
     jobs.start(id, 'Explain more'); await idle();
     expect(db.workspace().selected!.messages.at(-1)?.status).toBe('failed');
