@@ -11,6 +11,8 @@ import { ChatGPTError } from './chatgpt-protocol';
 import { CHATGPT_ERRORS, parseChatGPTUsage, type ChatGPTUsage } from '../shared/chatgpt';
 import type { Sources } from './sources';
 import type { Inventory } from './inventory';
+import type { Knowledge } from './knowledge';
+import type { SourceIdentity } from '../shared/sources';
 import { sourceRequest } from './source-bridge';
 import { checkBeforeModelSend } from './secret-check';
 import { MAX_TITLE_LENGTH } from '../shared/contracts';
@@ -26,7 +28,7 @@ export interface LiveWorker {
 }
 interface Active {
   conversationId: string; messageId: string; prompt: string; controller: AbortController; environment: EnvironmentPermissions;
-  apiKey?: boolean; text: string; evidence: Evidence[]; exploration?: Exploration; title?: string; requests: number; usage?: ChatGPTUsage; stop?: () => void;
+  apiKey?: boolean; text: string; evidence: Evidence[]; dependencies: SourceIdentity[]; dependencyCoverageComplete: boolean; exploration?: Exploration; title?: string; requests: number; usage?: ChatGPTUsage; stop?: () => void;
   timer?: ReturnType<typeof setTimeout>; progressTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -37,7 +39,7 @@ export class LiveSupervisor {
   get saveError(): string | undefined { return this.unsaved ? 'The conversation stopped, but its result could not be saved. Check disk space and choose Retry saving.' : undefined; }
   constructor(private readonly conversations: Conversations, private readonly chatgpt: ChatGPTSettings,
     private readonly sources: Sources, private readonly inventory: Pick<Inventory, 'snapshot'>,
-    private readonly spawn: () => LiveWorker, private readonly changed: () => void, private readonly apiSettings?: ApiSettings) {}
+    private readonly spawn: () => LiveWorker, private readonly changed: () => void, private readonly apiSettings?: ApiSettings, private readonly knowledge?: Knowledge) {}
 
   start(id: string | null, prompt: string, retryId?: string): void {
     this.retrySaving();
@@ -63,7 +65,7 @@ export class LiveSupervisor {
     const job = this.conversations.beginLive(id, prompt, binding, retryId);
     const controller = new AbortController();
     const environment = new EnvironmentPermissions(this.sources, controller.signal, () => this.conversations.markEphemeral(job.messageId), () => this.cancel(), this.changed, content => this.conversations.rememberEnvironment(content));
-    const active: Active = { ...job, apiKey: !!binding.apiKey, controller, environment, text: '', evidence: [], requests: 0 };
+    const active: Active = { ...job, apiKey: !!binding.apiKey, controller, environment, text: '', evidence: [], dependencies: [], dependencyCoverageComplete: true, requests: 0 };
     this.active = active;
     active.timer = setTimeout(() => this.end(active, { status: 'limit', text: active.text + '\n\nTime limit reached. Retry explicitly when ready.', history: [], requests: active.requests, usageComplete: false }), LIVE_LIMITS.milliseconds);
     this.changed();
@@ -77,8 +79,10 @@ export class LiveSupervisor {
         const work = async (access: (role?: ModelRole, bytes?: number) => Promise<string | ApiGrant>, signal: AbortSignal) => {
           const snapshot = this.inventory.snapshot();
           const roots = snapshot.roots.map(root => ({ path: root.path, repositories: snapshot.repositories.filter(repo => repo.path === root.path || repo.path.startsWith(root.path + '/')).map(repo => ({ name: repo.name, path: repo.path })) }));
-          checkBeforeModelSend({ history: previous.history, roots });
-          outcome = await this.run(active, { ...(binding.apiKey ? { apiKey: binding.apiKey } : {}), model: binding.model, prompt: job.prompt, history: previous.history, roots, ...this.conversations.naming(job.conversationId) }, access, signal);
+          const knowledge = this.knowledge ? await this.knowledge.reusable(signal) : [];
+          signal.throwIfAborted();
+          this.conversations.assertClean({ history: previous.history, roots, knowledge });
+          outcome = await this.run(active, { ...(binding.apiKey ? { apiKey: binding.apiKey } : {}), model: binding.model, prompt: job.prompt, history: previous.history, roots, knowledge, ...this.conversations.naming(job.conversationId) }, access, signal);
           if (outcome.reason && !binding.apiKey) throw new ChatGPTError(outcome.reason);
         };
         if (binding.apiKey) await work((role, bytes) => this.apiSettings!.grant(binding.apiKey!, role!, bytes!, active.controller.signal), active.controller.signal);
@@ -89,7 +93,20 @@ export class LiveSupervisor {
           const citationsValid = [...outcome.text.matchAll(/\[(E\d+)\]/g)].every(match => active.evidence.some(evidence => evidence.id === match[1]));
           if (!identitiesValid || !citationsValid) outcome = { ...outcome, status: 'partial', history: [], text: outcome.text + '\n\nPartial: evidence changed, became unavailable, or a citation could not be verified. Retry for current evidence.' };
         }
-        this.end(active, outcome);
+        const candidates = outcome.exploration?.result.knowledgeCandidates ?? active.exploration?.result.knowledgeCandidates;
+        if (this.knowledge && candidates?.length && outcome.status === 'complete' && !active.environment.tainted && !this.conversations.isEphemeral(active.messageId)) {
+          try {
+            await this.knowledge.publish({ owner: { conversationId: active.conversationId, messageId: active.messageId }, candidates,
+              evidence: active.evidence, inspectedFiles: active.dependencies, completed: active.dependencyCoverageComplete && (outcome.exploration?.result ?? active.exploration?.result)?.status === 'complete' && !(outcome.exploration?.result ?? active.exploration?.result)?.scopeTruncated,
+              environmentExposed: active.environment.tainted, signal: active.controller.signal,
+              assertPublishable: () => {
+                if (this.active !== active || active.environment.tainted || this.conversations.isEphemeral(active.messageId)) throw new Error('Knowledge publication revoked.');
+                this.conversations.assertClean({ outcome, exploration: active.exploration, evidence: active.evidence });
+              } });
+            outcome.knowledgePublication = 'published';
+          } catch { outcome.knowledgePublication = 'withheld'; }
+        }
+        if (this.active === active) this.end(active, outcome);
       } catch (error) {
         if (this.active !== active) return;
         const message = error instanceof ChatGPTError || error instanceof LiveError || error instanceof ApiSettingsError || error instanceof ModelSettingsError ? error.message : 'Conversation failed. Check the pinned connection settings and retry explicitly.';
@@ -216,6 +233,11 @@ export class LiveSupervisor {
                   const result = await active.environment.run(operation, input);
                   if (settled || this.active !== active || signal.aborted) return;
                   if (!result.entries.some(entry => entry.ephemeral)) checkBeforeModelSend(result);
+                  if (result.status !== 'complete') active.dependencyCoverageComplete = false;
+                  for (const item of result.inspectedFiles ?? []) {
+                    if (!active.dependencies.some(previous => JSON.stringify(previous) === JSON.stringify(item))) active.dependencies.push(item);
+                    if (active.dependencies.length > 1000) { finish(failure('limit')); return; }
+                  }
                   const found: Evidence[] = [];
                   for (const entry of result.entries) {
                     if (!entry.citation || entry.text === undefined) continue;
@@ -262,13 +284,13 @@ export class LiveSupervisor {
   private exploration(value: Exploration, model: string, evidence: Evidence[], provider = 'openai'): Exploration {
     const result = value.result;
     if (Buffer.byteLength(JSON.stringify(value)) > LIVE_LIMITS.historyBytes || !Array.isArray(value.history) || !result || !['complete', 'partial'].includes(result.status) ||
-        !Array.isArray(result.evidence) || result.evidence.length > INVESTIGATION_LIMITS.references || !validFindings({ findings: result.findings, unresolvedQuestions: result.unresolvedQuestions, candidateKnowledgeChanges: result.candidateKnowledgeChanges }, evidence) ||
+        !Array.isArray(result.evidence) || result.evidence.length > INVESTIGATION_LIMITS.references || !validFindings({ findings: result.findings, unresolvedQuestions: result.unresolvedQuestions, candidateKnowledgeChanges: result.candidateKnowledgeChanges, ...(result.knowledgeCandidates ? { knowledgeCandidates: result.knowledgeCandidates } : {}) }, evidence) ||
         !Array.isArray(result.inspectedScope) || result.inspectedScope.length > INVESTIGATION_LIMITS.scope || !result.inspectedScope.every(path => typeof path === 'string' && path.length <= 512) || typeof result.scopeTruncated !== 'boolean' ||
         Buffer.byteLength(JSON.stringify(result)) > INVESTIGATION_LIMITS.resultBytes) throw new Error('Invalid investigation result.');
     for (const item of result.evidence) {
       if (!evidence.some(observed => observed.id === item.id && JSON.stringify(observed.citation) === JSON.stringify(item.citation) && observed.text.slice(0, INVESTIGATION_LIMITS.excerpt) === item.text)) throw new Error('Unknown investigation evidence.');
     }
-    if (result.findings.some(finding => finding.evidenceIds.some(id => !result.evidence.some(item => item.id === id)))) throw new Error('Missing evidence reference.');
+    if ([...result.findings, ...(result.knowledgeCandidates ?? [])].some(finding => finding.evidenceIds.some(id => !result.evidence.some(item => item.id === id)))) throw new Error('Missing evidence reference.');
     for (const message of value.history) {
       if (!message || !['user', 'assistant', 'toolResult'].includes(message.role) || (message.role === 'assistant' && (message.model !== model || message.provider !== provider))) throw new Error('Invalid exploration history.');
     }

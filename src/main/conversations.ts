@@ -200,6 +200,10 @@ export class Conversations {
     });
   }
 
+  isEphemeral(messageId: string): boolean {
+    return !!this.db.prepare('SELECT ephemeral FROM live_attempts WHERE message_id = ?').get(messageId)?.ephemeral;
+  }
+
   private protect(messageId: string, material: unknown): boolean {
     if (this.db.prepare('SELECT ephemeral FROM live_attempts WHERE message_id = ?').get(messageId)?.ephemeral) return true;
     try { this.assertClean(material); return false; }

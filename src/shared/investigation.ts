@@ -2,6 +2,7 @@ import { Type, type Static } from 'typebox';
 import { Check } from 'typebox/value';
 import type { Message } from '@earendil-works/pi-ai';
 import type { Evidence } from './live';
+import { knowledgeCandidatesSchema } from './knowledge';
 
 export const INVESTIGATION_LIMITS = { resultBytes: 64 * 1024, references: 32, excerpt: 512, scope: 32, inspections: 8, inspectionCharacters: 4000 } as const;
 const notes = Type.Array(Type.String({ minLength: 1, maxLength: 500 }), { maxItems: 8 });
@@ -13,6 +14,7 @@ export const findingsSchema = Type.Object({
   }, { additionalProperties: false }), { maxItems: 12 }),
   unresolvedQuestions: notes,
   candidateKnowledgeChanges: notes,
+  knowledgeCandidates: Type.Optional(knowledgeCandidatesSchema),
 }, { additionalProperties: false });
 export type Findings = Static<typeof findingsSchema>;
 export interface InvestigatorResult extends Findings {
@@ -26,5 +28,6 @@ export interface Exploration { history: Message[]; result: InvestigatorResult }
 export function validFindings(value: unknown, evidence: Evidence[]): value is Findings {
   return Check(findingsSchema, value) && value.findings.every(finding =>
     (finding.support !== 'source' || finding.evidenceIds.length > 0) &&
-    finding.evidenceIds.every(id => evidence.some(item => item.id === id)));
+    finding.evidenceIds.every(id => evidence.some(item => item.id === id))) &&
+    (value.knowledgeCandidates ?? []).every(candidate => candidate.evidenceIds.every(id => evidence.some(item => item.id === id)));
 }

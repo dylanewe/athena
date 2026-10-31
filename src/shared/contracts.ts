@@ -5,6 +5,7 @@ import type { ModelBridge } from './models';
 import type { SourceBridge } from './sources';
 import type { ChatGPTBridge, ChatGPTUsage } from './chatgpt';
 import type { Evidence } from './live';
+import type { KnowledgeBridge } from './knowledge';
 import type { InvestigatorResult } from './investigation';
 
 export const MAX_TITLE_LENGTH = 100;
@@ -25,6 +26,7 @@ export interface Message {
   requests?: number;
   activity?: string;
   ephemeral?: boolean;
+  knowledgePublication?: 'published' | 'withheld';
 }
 export interface ConversationSummary {
   id: string;
@@ -48,6 +50,7 @@ export interface DemoJob {
   text: string;
 }
 export interface DesktopBridge {
+  knowledge: KnowledgeBridge;
   apiModels: ApiSettingsBridge;
   chatgpt: ChatGPTBridge;
   sources: SourceBridge;

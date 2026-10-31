@@ -4,7 +4,7 @@ import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 /** Isolated fake saved registration; OAuth itself is exercised in chatgpt.spec.ts. */
-export async function installLiveFixture(application: ElectronApplication, directory: string, root?: string, environment = false) {
+export async function installLiveFixture(application: ElectronApplication, directory: string, root?: string, environment = false, knowledge = false) {
   const fixture = join(directory, 'live-worker-fixture.mjs');
   writeFileSync(fixture, `
     const frame = value => 'data: ' + JSON.stringify(value) + '\\n\\n';
@@ -29,7 +29,7 @@ export async function installLiveFixture(application: ElectronApplication, direc
         if (hasTool('investigate') && !called('investigate')) return call('investigate', {question:'Find the exported answer'});
         if (hasTool('sources_read')) {
           if (!called('sources_read')) return call('sources_read', {root:${JSON.stringify(root ?? '')},path:${JSON.stringify(environment ? '.env' : 'answer.ts')},start:1,end:1});
-          return call('finish_investigation', {findings:[{claim:${JSON.stringify(environment ? 'PASSWORD=synthetic-desktop-env-7' : 'The value is 42')},support:'source',evidenceIds:['E1']}],unresolvedQuestions:['Runtime behavior was not observed'],candidateKnowledgeChanges:['Constant location could be remembered']});
+          return call('finish_investigation', {findings:[{claim:${JSON.stringify(environment ? 'PASSWORD=synthetic-desktop-env-7' : 'The value is 42')},support:'source',evidenceIds:['E1']}],unresolvedQuestions:['Runtime behavior was not observed'],candidateKnowledgeChanges:['Constant location could be remembered']${knowledge ? ',knowledgeCandidates:' + JSON.stringify([{ id: 'C1', scope: `folder:${root}`, topic: 'Answer ownership', summary: 'A synchronous answer boundary.', kind: 'responsibility', claim: 'The answer module owns the application answer value.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [] }]) : ''}});
         }
       }
       const text = ${JSON.stringify(environment ? 'PASSWORD=synthetic-desktop-env-7' : root ? 'The answer is 42 [E1], answer.ts:1.' : 'Fixture response.')};

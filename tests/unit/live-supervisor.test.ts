@@ -10,6 +10,7 @@ import { ChatGPTStore } from '../../src/main/chatgpt-store';
 import { ISSUER, SCOPES, type OAuthProtocol, type Registration } from '../../src/main/chatgpt-protocol';
 import { Sources } from '../../src/main/sources';
 import { LiveSupervisor } from '../../src/main/live-supervisor';
+import { Knowledge } from '../../src/main/knowledge';
 import { runLiveAgent } from '../../src/worker/live-agent';
 import { LIVE_LIMITS, type LiveParentMessage } from '../../src/shared/live';
 import type { InventorySnapshot } from '../../src/shared/inventory';
@@ -32,6 +33,13 @@ function investigationScripts(root: string, answer = 'The value is 42 [E1], answ
   return [functionResponse('investigate', { question: 'Find the answer' }), toolResponse(root, true, path),
     functionResponse('finish_investigation', { findings: path === 'answer.ts' ? [{ claim: 'The value is 42', support: 'source', evidenceIds: ['E1'] }] : [], unresolvedQuestions: [], candidateKnowledgeChanges: [] }), textResponse(answer)];
 }
+function knowledgeCandidate() {
+  return { id: 'C1', scope: `folder:${root}`, topic: 'Answer boundary', summary: 'A synchronous value boundary.', kind: 'responsibility', claim: 'The answer module owns the application answer value.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [] };
+}
+function knowledgeScripts() {
+  return [functionResponse('investigate', { question: 'Inspect the answer boundary' }), toolResponse(root),
+    functionResponse('finish_investigation', { findings: [], unresolvedQuestions: [], candidateKnowledgeChanges: [], knowledgeCandidates: [knowledgeCandidate()] }), textResponse('Inspected the answer boundary [E1].')];
+}
 function scripted(scripts: string[], before?: (request: number) => void) {
   http = async (_url, init) => {
     requests.push(JSON.parse(String(init?.body))); before?.(requests.length);
@@ -42,6 +50,7 @@ function scripted(scripts: string[], before?: (request: number) => void) {
 }
 let directory: string, root: string, db: Conversations, chatgpt: ChatGPTSettings, sources: Sources, jobs: LiveSupervisor;
 let snapshot: InventorySnapshot;
+let knowledge: Knowledge;
 let requests: Record<string, unknown>[], workers: Worker[], http: typeof fetch, oauth: OAuthProtocol, store: ChatGPTStore;
 class Worker extends EventEmitter {
   killed = false;
@@ -120,7 +129,7 @@ test('outbound approval reaches child and main contexts but echoes, titles and t
   writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);
   scripted([
     functionResponse('investigate', { question: 'Inspect environment' }), toolResponse(root, true, '.env'),
-    functionResponse('finish_investigation', { findings: [{ claim: 'PASSWORD=' + canary, support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: [], candidateKnowledgeChanges: [canary] }),
+    functionResponse('finish_investigation', { findings: [{ claim: 'PASSWORD=' + canary, support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: [], candidateKnowledgeChanges: [canary], knowledgeCandidates: [{ ...knowledgeCandidate(), claim: canary }] }),
     functionResponse('set_conversation_title', { title: canary }), textResponse('PASSWORD=' + canary),
   ]);
   jobs.start(null, 'Inspect environment');
@@ -135,6 +144,8 @@ test('outbound approval reaches child and main contexts but echoes, titles and t
   const conversation = db.workspace().selected!;
   expect(conversation.title.includes(canary)).toBe(false);
   expect(db.exploration(conversation.messages.at(-1)!.id)).toBeUndefined();
+  expect(await knowledge.inspect()).toEqual([]);
+  expect(readdirSync(directory).filter(file => file.startsWith('knowledge.sqlite')).some(file => readFileSync(join(directory, file)).includes(canary))).toBe(false);
   expect(db.liveContext(conversation.id)).toEqual({ history: [], evidence: [] });
   expect(() => jobs.start(conversation.id, 'Explain more')).toThrow('new conversation');
   expect(() => jobs.start(null, 'Echo ' + canary)).toThrow('secret checks');
@@ -233,9 +244,10 @@ beforeEach(async () => {
   chatgpt.connect(); await expect.poll(() => chatgpt.snapshot().activity).toBe('idle'); chatgpt.selectModel('fixture-model');
   requests = []; workers = [];
   http = async (_url, init) => { requests.push(JSON.parse(String(init?.body))); return new Response(new TextEncoder().encode(textResponse('Hello from ChatGPT'))); };
-  jobs = new LiveSupervisor(db, chatgpt, sources, inventory, () => { const worker = new Worker(); workers.push(worker); return worker; }, () => {});
+  knowledge = new Knowledge(join(directory, 'knowledge.sqlite'), sources, inventory, material => db.assertClean(material));
+  jobs = new LiveSupervisor(db, chatgpt, sources, inventory, () => { const worker = new Worker(); workers.push(worker); return worker; }, () => {}, undefined, knowledge);
 });
-afterEach(async () => { vi.useRealTimers(); jobs.cancel(); await chatgpt.close(); sources.close(); db.close(); rmSync(directory, { recursive: true, force: true }); });
+afterEach(async () => { vi.useRealTimers(); jobs.cancel(); await chatgpt.close(); knowledge.close(); sources.close(); db.close(); rmSync(directory, { recursive: true, force: true }); });
 
 test('main delegates fresh exploration to one isolated investigator and receives only bounded findings', async () => {
   const scripts = [
@@ -525,6 +537,53 @@ test('a new registration cannot take over an existing conversation', async () =>
   expect(() => jobs.start(id, 'Follow up')).toThrow('authorization');
   expect(requests).toHaveLength(1);
   expect(store.read()!.registration!.tokens).toBeDefined();
+});
+
+test('completed scripted extraction publishes once and reuses only freshness-checked knowledge in a new investigator', async () => {
+  scripted(knowledgeScripts()); jobs.start(null, 'Explain the answer boundary'); await idle();
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', knowledgePublication: 'published' });
+  const records = await knowledge.inspect();
+  expect(records).toHaveLength(1);
+  expect(records[0]).toMatchObject({ validation: 'unchecked', claim: 'The answer module owns the application answer value.' });
+  scripted(knowledgeScripts()); jobs.start(null, 'Explain the boundary again'); await idle();
+  expect(JSON.stringify(requests[5])).toContain(records[0].id);
+  expect((await knowledge.inspect())[0].owners).toHaveLength(2);
+  writeFileSync(join(root, 'answer.ts'), 'changed\n');
+  expect((await knowledge.inspect())[0].validation).toBe('stale');
+  scripted(investigationScripts(root)); jobs.start(null, 'Inspect current sources'); await idle();
+  expect(JSON.stringify(requests[9])).not.toContain(records[0].id);
+});
+
+test('negative search files are dependencies: mutation after extraction withholds knowledge even without an answer citation', async () => {
+  writeFileSync(join(root, 'notes.md'), 'No handler is documented.\n');
+  const scripts = knowledgeScripts();
+  scripts.splice(1, 0, functionResponse('sources_search', { root, path: 'notes.md', query: 'handler implementation' }));
+  scripted(scripts, request => { if (request === 5) writeFileSync(join(root, 'notes.md'), 'New handler implementation exists.\n'); });
+  jobs.start(null, 'Explain the answer boundary'); await idle();
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', knowledgePublication: 'withheld' });
+  expect(await knowledge.inspect()).toEqual([]);
+});
+
+test('malformed structured model submissions cannot publish until the investigator submits a valid candidate', async () => {
+  const scripts = knowledgeScripts();
+  scripts.splice(2, 0, functionResponse('finish_investigation', { findings: [], unresolvedQuestions: [], candidateKnowledgeChanges: [], knowledgeCandidates: [{ ...knowledgeCandidate(), evidenceIds: ['E999'] }] }));
+  scripted(scripts); jobs.start(null, 'Explain the answer boundary'); await idle();
+  expect(requests).toHaveLength(5);
+  expect(await knowledge.inspect()).toHaveLength(1);
+  expect(db.workspace().selected!.messages.at(-1)?.knowledgePublication).toBe('published');
+});
+
+test('a canceled job after a complete extraction does not promote checkpoint candidates', async () => {
+  const scripts = knowledgeScripts(); scripts.pop();
+  http = async (_url, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    if (scripts.length) return new Response(new TextEncoder().encode(scripts.shift()));
+    return new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error()), { once: true }));
+  };
+  jobs.start(null, 'Explain the answer boundary');
+  await expect.poll(() => requests.length).toBe(4);
+  jobs.cancel(); await idle();
+  expect(await knowledge.inspect()).toEqual([]);
 });
 
 test('disconnect cancels the active worker and cannot activate another model or billing route', async () => {

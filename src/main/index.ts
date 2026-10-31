@@ -3,6 +3,8 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Conversations } from './conversations';
+import { Knowledge } from './knowledge';
+import { KnowledgeGateway } from './knowledge-bridge';
 import { DesktopGateway } from './bridge';
 import { LiveSupervisor, LiveError } from './live-supervisor';
 import { Inventory } from './inventory';
@@ -34,6 +36,8 @@ const rendererDirectory = join(output, 'renderer');
 const documentURL = pathToFileURL(join(rendererDirectory, 'index.html')).href;
 let window: BrowserWindow | undefined;
 let conversations: Conversations | undefined;
+let knowledge: Knowledge | undefined;
+let knowledgeGateway: KnowledgeGateway | undefined;
 let jobs: LiveSupervisor | undefined;
 let gateway: DesktopGateway | undefined;
 let inventory: Inventory | undefined;
@@ -89,6 +93,7 @@ function createWindow() {
     const result = await dialog.showOpenDialog(window, { title: 'Import a trusted Pi models.json only (no auth, settings, or extensions)', properties: ['openFile'], filters: [{ name: 'Pi models configuration', extensions: ['json'] }] });
     return result.canceled ? undefined : result.filePaths[0];
   }, () => jobs?.revokeApiAuthority(), () => inventory!.snapshot().roots.map(root => root.path));
+  knowledgeGateway = new KnowledgeGateway(knowledge!, { webContentsId: window.webContents.id, url: documentURL });
   sourceGateway = new SourceGateway(sources!, { webContentsId: window.webContents.id, url: documentURL });
   chatgptGateway = new ChatGPTGateway(chatgpt!, { webContentsId: window.webContents.id, url: documentURL }, url => shell.openExternal(url), () => jobs?.cancel());
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -97,7 +102,7 @@ function createWindow() {
   window.webContents.on('render-process-gone', () => { jobs?.cancel(); inventory?.cancel(); modelSettings?.cancel(); sourceGateway?.cancel(); chatgpt?.cancel(); });
   window.on('minimize', () => jobs?.lifecycle('minimize'));
   window.on('close', () => { jobs?.lifecycle('window-close'); inventory?.cancel(); modelSettings?.cancel(); sourceGateway?.cancel(); chatgpt?.cancel(); });
-  window.on('closed', () => { gateway = undefined; inventoryGateway = undefined; modelGateway = undefined; apiGateway = undefined; sourceGateway = undefined; chatgptGateway = undefined; window = undefined; });
+  window.on('closed', () => { knowledgeGateway = undefined; gateway = undefined; inventoryGateway = undefined; modelGateway = undefined; apiGateway = undefined; sourceGateway = undefined; chatgptGateway = undefined; window = undefined; });
   void window.loadURL(documentURL);
 }
 
@@ -120,7 +125,7 @@ if (!app.requestSingleInstanceLock()) {
     }
   });
   app.on('window-all-closed', () => app.quit());
-  app.on('will-quit', () => { conversations?.close(); inventory?.close(); modelSettings?.close(); apiSettings?.close(); sources?.close(); });
+  app.on('will-quit', () => { knowledge?.close(); conversations?.close(); inventory?.close(); modelSettings?.close(); apiSettings?.close(); sources?.close(); });
   void app.whenReady().then(() => {
     const stateDirectory = join(app.getPath('userData'), 'state');
     mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
@@ -133,6 +138,9 @@ if (!app.requestSingleInstanceLock()) {
     const sourceDatabase = join(stateDirectory, 'sources.sqlite');
     sources = new Sources(sourceDatabase, inventory);
     chmodSync(sourceDatabase, 0o600);
+    const knowledgeDatabase = join(stateDirectory, 'knowledge.sqlite');
+    knowledge = new Knowledge(knowledgeDatabase, sources, inventory, material => conversations!.assertClean(material));
+    chmodSync(knowledgeDatabase, 0o600);
     const modelDatabase = join(stateDirectory, 'models.sqlite');
     modelSettings = new ModelSettings(modelDatabase, {
       // On macOS safeStorage encrypts using a key held in the login Keychain.
@@ -160,7 +168,14 @@ if (!app.requestSingleInstanceLock()) {
     })), notify);
     jobs = new LiveSupervisor(conversations, chatgpt, sources, inventory, () => utilityProcess.fork(join(output, 'live.js'), [], {
       serviceName: 'Athena ChatGPT conversation', env: {}, stdio: 'ignore', cwd: stateDirectory,
-    }), notify, apiSettings);
+    }), notify, apiSettings, knowledge);
+    ipcMain.handle('athena:knowledge', async (event, operation: unknown, payload: unknown) => {
+      try {
+        if (!knowledgeGateway || quitting) throw new Error();
+        const result = await knowledgeGateway.dispatch({ webContentsId: event.sender.id, isMainFrame: event.senderFrame === event.sender.mainFrame, url: event.senderFrame?.url ?? '' }, operation, payload);
+        return { ok: true, result };
+      } catch { return { ok: false, error: 'Knowledge inspection unavailable. Check source permissions and local storage, then retry.' }; }
+    });
     ipcMain.handle('athena:api-models', async (event, operation: unknown, payload: unknown) => {
       try {
         if (!apiGateway || quitting) throw new Error();

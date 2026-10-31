@@ -65,7 +65,7 @@ export class Sources {
     return this.exceptions();
   }
 
-  async run(operation: SourceOperation, input: SourceRequest, signal?: AbortSignal, permission?: EnvironmentAccess): Promise<SourceResult> {
+  async run(operation: SourceOperation, input: SourceRequest, signal?: AbortSignal, permission?: EnvironmentAccess, trackInspected = false): Promise<SourceResult> {
     if (!['list', 'search', 'read'].includes(operation)) throw new Denied('Unsupported source operation.');
     const root = this.root(input.root);
     const path = location(input.path);
@@ -126,6 +126,7 @@ export class Sources {
           name: this.inventory.snapshot().repositories.find(repo => repo.path === access.owner)?.name ?? basename(access.owner),
           path: relative(root, access.owner) || '.',
         } : null;
+        const beforeEntries = result.entries.length;
         const excerpt = (first: number, last: number) => {
           const value = lines.slice(first - 1, last).join('\n');
           const max = Math.min(16 * 1024, L.outputBytes - budget.output - 2048);
@@ -141,6 +142,13 @@ export class Sources {
             budget.check();
             if (lines[index].toLowerCase().includes(input.query!.toLowerCase())) excerpt(index + 1, index + 1);
           }
+        }
+        // Cited matches already carry an identity. Retain negative search dependencies too.
+        if (trackInspected && !result.entries.slice(beforeEntries).some(entry => entry.citation)) {
+          const inspected = { folder: root, repository, path: name, revision, contentIdentity: `sha256:${identity}` };
+          const identityBytes = Buffer.byteLength(JSON.stringify(inspected));
+          if ((result.inspectedFiles?.length ?? 0) >= L.results || budget.output + identityBytes > L.outputBytes) throw new Stopped('Inspected-file identity limit reached.');
+          (result.inspectedFiles ??= []).push(inspected); budget.output += identityBytes;
         }
       } catch (error) {
         if (error instanceof Stopped) throw error;

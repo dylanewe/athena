@@ -55,7 +55,7 @@ export class EnvironmentPermissions {
   async run(operation: SourceOperation, input: SourceRequest): Promise<SourceResult> {
     const approved = [...this.permissions.values()].find(p => p.root === input.root && p.path === input.path && this.valid(p, 'external'));
     if (operation === 'read' && approved) return this.read(approved, input, 'external');
-    const result = await this.sources.run(operation, input, this.signal);
+    const result = await this.sources.run(operation, input, this.signal, undefined, true);
     if (this.expired || this.signal.aborted) return { ...result, entries: [], status: 'cancelled' };
     for (const entry of result.entries.filter(item => item.environment)) {
       let permission = [...this.permissions.values()].find(p => p.root === input.root && p.path === entry.path);

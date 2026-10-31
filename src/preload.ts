@@ -43,6 +43,13 @@ async function apiModelRequest(operation: string, payload?: unknown): Promise<Ap
 }
 
 const bridge: DesktopBridge = {
+  knowledge: {
+    inspect: async () => {
+      const reply = await ipcRenderer.invoke('athena:knowledge', 'inspect');
+      if (!reply.ok) throw new Error(reply.error);
+      return reply.result;
+    },
+  },
   apiModels: {
     snapshot: () => apiModelRequest('snapshot'),
     configure: json => apiModelRequest('configure', { json }),

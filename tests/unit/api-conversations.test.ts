@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ApiSettings } from '../../src/main/api-settings';
 import { Conversations } from '../../src/main/conversations';
 import { Sources } from '../../src/main/sources';
 import { LiveSupervisor } from '../../src/main/live-supervisor';
+import { Knowledge } from '../../src/main/knowledge';
 import type { ChatGPTSettings } from '../../src/main/chatgpt-settings';
 import { runLiveAgent } from '../../src/worker/live-agent';
 import type { LiveParentMessage, LiveStart } from '../../src/shared/live';
@@ -15,6 +16,10 @@ import { FOLDER_CONSENT } from '../../src/shared/inventory';
 let directory: string, root: string, settings: ApiSettings, conversations: Conversations, sources: Sources, supervisor: LiveSupervisor;
 let http: typeof fetch, requests: { url: string; body: Record<string, unknown>; headers: Headers }[], workers: Worker[], reservations: number[];
 let scripts: string[];
+let knowledge: Knowledge;
+function knowledgeCandidate(claim = 'The answer boundary owns the application answer value.') {
+  return { id: 'C1', scope: `folder:${root}`, topic: 'Answer boundary', summary: 'A synchronous answer boundary.', kind: 'responsibility', claim, provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [] };
+}
 const response = (text?: string, tool?: string, args?: unknown) => [
   { choices: [{ index: 0, delta: { role: 'assistant', ...(tool ? { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: tool, arguments: JSON.stringify(args) } }] } : { content: text }) }, finish_reason: null }] },
   { choices: [{ index: 0, delta: {}, finish_reason: tool ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 } },
@@ -61,20 +66,23 @@ beforeEach(() => {
     return new Response(scripts.shift(), { headers: { 'content-type': 'text/event-stream' } });
   };
   const noOAuth = { snapshot: vi.fn(() => { throw new Error('OAuth unavailable'); }) } as unknown as ChatGPTSettings;
-  supervisor = new LiveSupervisor(conversations, noOAuth, sources, inventory, () => { const w = new Worker(); workers.push(w); return w; }, () => {}, settings);
+  knowledge = new Knowledge(join(directory, 'knowledge.sqlite'), sources, inventory, material => conversations.assertClean(material));
+  supervisor = new LiveSupervisor(conversations, noOAuth, sources, inventory, () => { const w = new Worker(); workers.push(w); return w; }, () => {}, settings, knowledge);
 });
-afterEach(() => { supervisor.cancel(); sources.close(); conversations.close(); settings.close(); rmSync(directory, { recursive: true, force: true }); });
+afterEach(() => { supervisor.cancel(); knowledge.close(); sources.close(); conversations.close(); settings.close(); rmSync(directory, { recursive: true, force: true }); });
 async function idle() { await expect.poll(() => conversations.workspace().activeConversationId).toBeNull(); }
 
 test('real Pi agents use separate pinned API-key providers, preserve source boundaries and reserve each request', async () => {
   scripts = [response(undefined, 'investigate', { question: 'Find the answer' }), response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }),
-    response(undefined, 'finish_investigation', { findings: [{ claim: 'Value is 42', support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: ['Runtime not observed'], candidateKnowledgeChanges: [] }), response('Value is 42 [E1].')];
+    response(undefined, 'finish_investigation', { findings: [{ claim: 'Value is 42', support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: ['Runtime not observed'], candidateKnowledgeChanges: [], knowledgeCandidates: [knowledgeCandidate()] }), response('Value is 42 [E1].')];
   supervisor.start(null, 'Find the answer'); await idle();
   expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', text: 'Value is 42 [E1].', requests: 4, investigation: { status: 'complete' } });
   expect(requests.map(r => r.body.model)).toEqual(['main-one', 'investigator-one', 'investigator-one', 'main-one']);
   expect(requests.map(r => r.url)).toEqual(['https://main.example/v1/chat/completions', 'https://investigator.example/v1/chat/completions', 'https://investigator.example/v1/chat/completions', 'https://main.example/v1/chat/completions']);
   expect(requests.map(r => r.headers.get('authorization'))).toEqual(['Bearer fake-main-key', 'Bearer fake-investigator-key', 'Bearer fake-investigator-key', 'Bearer fake-main-key']);
   expect(requests.every(r => r.body.max_tokens === 1024)).toBe(true); expect(reservations).toHaveLength(4);
+  expect(await knowledge.inspect()).toHaveLength(1);
+  expect(conversations.workspace().selected!.messages.at(-1)?.knowledgePublication).toBe('published');
   const binding = conversations.binding(conversations.workspace().selected!.id);
   expect(JSON.stringify(binding)).not.toContain('fake-main-key');
   expect(binding.apiKey?.investigator.model.id).toBe('investigator-one');
@@ -103,7 +111,7 @@ test('API-key outbound environment approval propagates across separately pinned 
   const canary = 'synthetic-api-environment-7';
   writeFileSync(join(root, '.env'), 'PASSWORD=' + canary);
   scripts = [response(undefined, 'investigate', { question: 'Read configuration' }), response(undefined, 'sources_read', { root, path: '.env' }),
-    response(undefined, 'finish_investigation', { findings: [{ claim: 'PASSWORD=' + canary, support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: [], candidateKnowledgeChanges: [] }), response('PASSWORD=' + canary)];
+    response(undefined, 'finish_investigation', { findings: [{ claim: 'PASSWORD=' + canary, support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: [], candidateKnowledgeChanges: [], knowledgeCandidates: [knowledgeCandidate(canary)] }), response('PASSWORD=' + canary)];
   supervisor.start(null, 'Read configuration');
   await expect.poll(() => supervisor.environmentPermissions().length).toBe(1);
   supervisor.environment(supervisor.environmentPermissions()[0].id, 'external'); await idle();
@@ -114,6 +122,8 @@ test('API-key outbound environment approval propagates across separately pinned 
   const conversation = conversations.workspace().selected!;
   expect(conversation.messages.at(-1)).toMatchObject({ status: 'complete', ephemeral: true });
   expect(conversation.messages.at(-1)?.text.includes(canary)).toBe(true);
+  expect(await knowledge.inspect()).toEqual([]);
+  expect(readdirSync(directory).filter(file => file.startsWith('knowledge.sqlite')).some(file => readFileSync(join(directory, file)).includes(canary))).toBe(false);
   expect(conversations.liveContext(conversation.id)).toEqual({ history: [], evidence: [] });
   conversations.close(); conversations = new Conversations(join(directory, 'conversations.sqlite'));
   expect(JSON.stringify(conversations.workspace()).includes(canary)).toBe(false);

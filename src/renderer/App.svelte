@@ -2,6 +2,8 @@
   import { onMount, tick } from 'svelte';
   import EnvironmentPermissions from './EnvironmentPermissions.svelte';
   import InventoryView from './Inventory.svelte';
+  import KnowledgeView from './Knowledge.svelte';
+  let knowledgeMessage = $state('');
   import SourcesView from './Sources.svelte';
   import ModelSettingsView from './ModelSettings.svelte';
   import { MAX_MESSAGE_LENGTH, type Workspace } from '../shared/contracts';
@@ -9,7 +11,7 @@
   let defaultModel = $state<string | null>(null);
   let inspected = $state<Record<string, string>>({});
 
-  let section = $state<'conversation' | 'inventory' | 'models' | 'sources'>('conversation');
+  let section = $state<'conversation' | 'inventory' | 'models' | 'sources' | 'knowledge'>('conversation');
   let workspace = $state<Workspace | null>(null);
   let error = $state('');
   let busy = $state(false);
@@ -116,6 +118,7 @@
     <div class="brand"><span class="brand-mark" aria-hidden="true">a.</span><span>Athena</span></div>
     <button class="new-conversation" aria-pressed={section === 'inventory'} onclick={() => section = section === 'inventory' ? 'conversation' : 'inventory'}>Repositories</button>
     <button class="new-conversation" aria-pressed={section === 'sources'} onclick={() => section = section === 'sources' ? 'conversation' : 'sources'}>Sources</button>
+    <button class="new-conversation" aria-pressed={section === 'knowledge'} onclick={() => { knowledgeMessage = ''; section = 'knowledge'; }}>Knowledge</button>
     <button class="new-conversation" aria-pressed={section === 'models'} onclick={() => section = section === 'models' ? 'conversation' : 'models'}>Model settings</button>
     <div class="sidebar-heading">Your conversations</div>
     <button class="new-conversation" onclick={newConversation} disabled={busy || !workspace}><span aria-hidden="true">+</span> New conversation</button>
@@ -137,6 +140,8 @@
     <InventoryView />
   {:else if section === 'sources'}
     <SourcesView />
+  {:else if section === 'knowledge'}
+    <KnowledgeView messageId={knowledgeMessage} openConversation={id => { void select(id); }} />
   {:else if section === 'models'}
     <ModelSettingsView />
   {:else}
@@ -158,6 +163,11 @@
                 {#if message.ephemeral}<p class="draft-note">Ephemeral · Not saved · May contain sensitive values</p>{/if}
                 <p>{message.text}</p>
                 {#if message.status === 'running' && message.activity}<p class="draft-note">{message.activity}</p>{/if}
+                {#if message.knowledgePublication === 'published'}
+                  <button type="button" onclick={() => { knowledgeMessage = message.id; section = 'knowledge'; }}>Inspect retained knowledge</button>
+                {:else if message.knowledgePublication === 'withheld'}
+                  <p class="draft-note">Knowledge not retained: validation, freshness or local storage checks did not complete. The answer remains available.</p>
+                {/if}
                 {#if message.investigation}
                   <details class="evidence"><summary>Investigation · {message.status === 'running' ? 'in progress' : message.investigation.status}</summary>
                     <p class="draft-note">Static source inspection, not runtime observation.</p>
@@ -170,6 +180,16 @@
                     {#if message.investigation.unresolvedQuestions.length}
                       <strong>Unresolved questions</strong>
                       <ul>{#each message.investigation.unresolvedQuestions as question}<li>{question}</li>{/each}</ul>
+                    {/if}
+                    {#if message.investigation.knowledgeCandidates?.length}
+                      <strong>Normalization candidates · {message.knowledgePublication === 'published' ? 'retained with validation labels' : 'not published'}</strong>
+                      {#each message.investigation.knowledgeCandidates as candidate}
+                        <details><summary>{candidate.scope} · {candidate.topic}</summary>
+                          <p>{candidate.summary}</p><p>{candidate.claim}</p>
+                          <p class="draft-note">{candidate.provenance} · {candidate.perspective} · {candidate.evidenceIds.map(id => `[${id}]`).join(' ')} · Semantic truth not certified</p>
+                          {#each candidate.relations as relation}<p class="draft-note">{relation.kind} · {relation.target}</p>{/each}
+                        </details>
+                      {/each}
                     {/if}
                     {#if message.investigation.candidateKnowledgeChanges.length}
                       <strong>Candidate knowledge changes (not applied)</strong>

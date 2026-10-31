@@ -45,6 +45,36 @@ function resume() { if (pausedWorker) { try { process.kill(pausedWorker, 'SIGCON
 test.beforeEach(async () => { directory = realpathSync(mkdtempSync(join(tmpdir(), 'athena-desktop-'))); await launch(); });
 test.afterEach(async () => { resume(); await application?.close().catch(() => {}); rmSync(directory, { recursive: true, force: true }); });
 
+test('normalized knowledge opens from the answer, exposes evidence independently, survives restart and warns about staleness', async () => {
+  const root = join(directory, 'repo'); mkdirSync(root); writeFileSync(join(root, 'answer.ts'), 'export const answer = 42;\n');
+  await installLiveFixture(application, directory, root, false, true);
+  await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] }); }, root);
+  await page.evaluate(() => window.athena.inventory.chooseFolder());
+  await page.getByRole('button', { name: 'Repositories', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'I understand the folder permission' }).check();
+  await page.getByRole('button', { name: 'Save consent and discover' }).click();
+  await expect.poll(() => page.evaluate(async () => (await window.athena.inventory.snapshot()).discovery.status)).not.toBe('running');
+  await newConversation(); await send('Explain answer ownership');
+  await page.getByRole('button', { name: 'Inspect retained knowledge', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Knowledge', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Answer ownership', exact: true })).toBeVisible();
+  await expect(page.getByText('unchecked', { exact: true })).toBeVisible();
+  await page.getByText('Evidence (1)', { exact: true }).click();
+  await expect(page.locator('pre')).toContainText('export const answer = 42;');
+  await page.getByRole('button', { name: 'Inspect current file', exact: true }).click();
+  await expect(page.getByText('Matches retained content.', { exact: false })).toBeVisible();
+  await application.close(); await launch();
+  await page.getByRole('button', { name: 'Knowledge', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Answer ownership', exact: true })).toBeVisible();
+  writeFileSync(join(root, 'answer.ts'), 'export const answer = 43;\n');
+  await page.getByRole('button', { name: 'Check freshness', exact: true }).click();
+  await expect(page.getByText('stale', { exact: true })).toBeVisible();
+  await page.getByText('Originating answers (1)', { exact: true }).click();
+  await page.getByRole('button', { name: 'Open conversation', exact: true }).click();
+  await expect(page.getByRole('log')).toContainText('The answer is 42 [E1]');
+  expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: { workers: number } }).liveFixture.workers)).toBe(0);
+});
+
 test('unsent drafts stay local and unpersisted; no model or catalog request on launch', async () => {
   await newConversation();
   await expect(page.getByLabel('Conversation name')).toHaveCount(0);
@@ -226,7 +256,7 @@ test('local preview can be revoked from the UI without external permission and e
 });
 
 test('renderer stays sandboxed with narrow bridge and rejects malformed retry requests', async () => {
-  expect(await page.evaluate(() => ({ node: typeof (globalThis as Record<string, unknown>).process, require: typeof (globalThis as Record<string, unknown>).require, bridge: Object.keys(window.athena).sort() }))).toEqual({ node: 'undefined', require: 'undefined', bridge: ['apiModels','cancel','chatgpt','environment','inventory','models','onChange','retry','select','send','sources','workspace'] });
+  expect(await page.evaluate(() => ({ node: typeof (globalThis as Record<string, unknown>).process, require: typeof (globalThis as Record<string, unknown>).require, bridge: Object.keys(window.athena).sort() }))).toEqual({ node: 'undefined', require: 'undefined', bridge: ['apiModels','cancel','chatgpt','environment','inventory','knowledge','models','onChange','retry','select','send','sources','workspace'] });
   expect(await application.evaluate(({ app, BrowserWindow }) => app.getAppMetrics().find(metric => metric.pid === BrowserWindow.getAllWindows()[0].webContents.getOSProcessId())?.sandboxed)).toBe(true);
   for (const url of ['https://example.com', 'file:///etc/hosts']) expect(await page.evaluate(async url => { try { await fetch(url); return 'accessible'; } catch { return 'denied'; } }, url)).toBe('denied');
   expect(await page.evaluate(async () => { try { await window.athena.retry('arbitrary-path'); return 'accepted'; } catch { return 'rejected'; } })).toBe('rejected');
@@ -241,7 +271,7 @@ test('another real renderer cannot use owner-only conversation, source, or crede
   });
   const outsider = await second;
   expect(await outsider.evaluate(async () => {
-    const results = await Promise.allSettled([window.athena.workspace(), window.athena.send(null, 'attack'), window.athena.retry('00000000-0000-4000-8000-000000000000'), window.athena.chatgpt.snapshot(), window.athena.chatgpt.connect(), window.athena.inventory.chooseFolder(), window.athena.models.test(), window.athena.apiModels.snapshot(), window.athena.apiModels.credential('deepseek', 'fake-attack-key'), window.athena.apiModels.importModels(), window.athena.sources.run('read', { root: '/', path: 'etc/hosts' })]);
+    const results = await Promise.allSettled([window.athena.knowledge.inspect(), window.athena.workspace(), window.athena.send(null, 'attack'), window.athena.retry('00000000-0000-4000-8000-000000000000'), window.athena.chatgpt.snapshot(), window.athena.chatgpt.connect(), window.athena.inventory.chooseFolder(), window.athena.models.test(), window.athena.apiModels.snapshot(), window.athena.apiModels.credential('deepseek', 'fake-attack-key'), window.athena.apiModels.importModels(), window.athena.sources.run('read', { root: '/', path: 'etc/hosts' })]);
     return results.every(result => result.status === 'rejected');
   })).toBe(true);
 });

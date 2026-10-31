@@ -17,6 +17,7 @@ export interface SourceCitation {
   revision: string | null;
   contentIdentity: string;
 }
+export type SourceIdentity = Omit<SourceCitation, 'start' | 'end'>;
 export interface SourceEntry {
   path: string;
   kind: 'file' | 'directory';
@@ -28,6 +29,7 @@ export interface SourceEntry {
   text?: string;
 }
 export interface SourceResult {
+  inspectedFiles?: SourceIdentity[];
   entries: SourceEntry[];
   status: 'complete' | 'truncated' | 'cancelled';
   reason?: string;
