@@ -40,7 +40,7 @@ test('dependency discrepancies return both bounded evidence trails without certi
   writeFileSync(join(root, 'api', 'service.ts'), 'export function serve() { return C.call(); }\n');
   const [declared, implementation, negative] = await publish([
     { ...candidate(), claim: 'Use dependency B.', topic: 'Dependency selection', relations: [{ kind: 'conflicts-with', target: 'C2' }] },
-    { ...candidate(), id: 'C2', topic: 'Dependency selection', claim: 'The implementation calls C.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'] },
+    { ...candidate(), id: 'C2', topic: 'Dependency selection', claim: 'The implementation calls C.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [{ kind: 'conflicts-with', target: 'C1' }] },
     { ...candidate(), id: 'C3', claim: 'No path to B was discovered in the inspected scope.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'] },
   ]);
   for (const request of [{ operation: 'detail', id: declared }, { operation: 'search', query: 'dependency' }] as const) {

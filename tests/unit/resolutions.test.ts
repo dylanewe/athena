@@ -27,14 +27,14 @@ async function fixture() {
   const path = join(directory, 'resolutions.sqlite');
   const open = () => new Resolutions(path, knowledge, value => conversations.assertClean(value), () => { if (!writable) throw new Error('Clean idle context required.'); });
   const resolutions = open(); cleanup.push(() => resolutions.close());
-  const publish = async () => {
+  const publish = async (location = root, scope = 'service', dependency?: string) => {
     const evidence = await Promise.all(['README.md', 'service.ts'].map(async (path, index) => {
-      const result = await sources.run('read', { root, path, start: 1, end: 1 });
+      const result = await sources.run('read', { root: location, path, start: 1, end: 1 });
       return { id: `E${index + 1}`, citation: result.entries[0].citation!, text: result.entries[0].text! };
     }));
     return knowledge.publish({ owner: { conversationId: 'conversation', messageId: 'message' }, candidates: [
-      { id: 'C1', scope: 'service', topic: 'Dependency', summary: 'Declared dependency.', kind: 'decision', claim: 'Use dependency B.', provenance: 'declared', perspective: 'intended', evidenceIds: ['E1'], relations: [{ kind: 'conflicts-with', target: 'C2' }] },
-      { id: 'C2', scope: 'service', topic: 'Dependency', summary: 'Implementation dependency.', kind: 'behavior', claim: 'The implementation calls C.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E2'], relations: [] },
+      { id: 'C1', scope, topic: 'Dependency', summary: 'Declared dependency.', kind: 'decision', claim: 'Use dependency B.', provenance: 'declared', perspective: 'intended', evidenceIds: ['E1'], relations: [{ kind: 'conflicts-with', target: 'C2' }, ...(dependency ? [{ kind: 'depends-on', target: dependency }] : [])] },
+      { id: 'C2', scope, topic: 'Dependency', summary: 'Implementation dependency.', kind: 'behavior', claim: 'The implementation calls C.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E2'], relations: [] },
     ], evidence, completed: true, environmentExposed: false, signal: new AbortController().signal });
   };
   return { directory, root, knowledge, resolutions, publish, conversations, snapshot, open, setWritable: (value: boolean) => { writable = value; } };
@@ -64,6 +64,43 @@ test('user resolutions bind both evidence versions, survive derived replacement,
   expect((await reopened.read({ operation: 'list', claimId: newer[0] })).items[0].revision).toBe(3);
   expect((await reopened.read({ operation: 'list', claimId: replacements[0] })).items[0]).toMatchObject({ revision: 2, status: 'requires-reconsideration' });
   expect(readFileSync(join(f.root, 'README.md'), 'utf8')).toBe('Use dependency B.\n');
+});
+
+function otherSource(f: Awaited<ReturnType<typeof fixture>>) {
+  const location = join(f.directory, 'other'); mkdirSync(join(location, '.git'), { recursive: true });
+  writeFileSync(join(location, 'README.md'), 'Use dependency B.\n');
+  writeFileSync(join(location, 'service.ts'), 'export const result = C.call();\n');
+  f.snapshot.roots.push({ ...f.snapshot.roots[0], path: location });
+  f.snapshot.repositories.push({ ...f.snapshot.repositories[0], name: 'other', path: location });
+  return location;
+}
+
+test('reconnection cannot launder revoked annotation text onto accessible claims, even after an earlier authorized reconnection', async () => {
+  const f = await fixture(); const ids = await f.publish();
+  const saved = (await f.resolutions.write({ operation: 'annotate', kind: 'note', text: 'Private source A explanation.', claimIds: ids })).items[0];
+  const other = otherSource(f); const replacements = await f.publish(other, 'other');
+  const roots = [...f.snapshot.roots]; f.snapshot.roots = [roots[1]];
+  expect((await f.resolutions.read({ operation: 'inspect', id: saved.id })).items).toEqual([]);
+  await expect(f.resolutions.write({ operation: 'reconnect', id: saved.id, claimIds: replacements })).rejects.toThrow();
+  f.snapshot.roots = roots;
+  expect((await f.resolutions.read({ operation: 'inspect', id: saved.id })).items[0].revision).toBe(1);
+  await f.resolutions.write({ operation: 'reconnect', id: saved.id, claimIds: replacements });
+  f.snapshot.roots = [roots[1]];
+  expect((await f.resolutions.read({ operation: 'list', claimId: replacements[0] })).items).toEqual([]);
+  expect((await f.resolutions.attach(await f.knowledge.retrieve({ operation: 'detail', id: replacements[0] }))).items[0].annotations).toBeUndefined();
+});
+
+test('adding transitive evidence to an unchanged claim identity requires reconsideration before an ordinary claim read', async () => {
+  const f = await fixture(); const ids = await f.publish();
+  const other = otherSource(f); const dependencies = await f.publish(other, 'other');
+  const saved = (await f.resolutions.write({ operation: 'annotate', kind: 'intent', text: 'Intent for the original evidence versions.', claimIds: [ids[0]] })).items[0];
+  const republished = await f.publish(f.root, 'service', dependencies[0]);
+  expect(republished[0]).toBe(ids[0]);
+  expect((await f.resolutions.read({ operation: 'inspect', id: saved.id })).items[0].status).toBe('requires-reconsideration');
+  writeFileSync(join(other, 'service.ts'), 'export const result = D.call();\n');
+  expect((await f.resolutions.read({ operation: 'inspect', id: saved.id })).items[0].status).toBe('requires-reconsideration');
+  f.snapshot.roots = [f.snapshot.roots[0]];
+  expect((await f.resolutions.read({ operation: 'inspect', id: saved.id })).items).toEqual([]);
 });
 
 test('source-change reconsideration is sticky, while model reads do not persist observations', async () => {

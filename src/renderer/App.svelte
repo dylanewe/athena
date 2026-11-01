@@ -176,8 +176,10 @@
                     {#each message.knowledgeReferences as reference}<button type="button" onclick={() => { knowledgeMessage = ''; knowledgeRecord = reference.id; section = 'knowledge'; }}>Inspect knowledge: {reference.topic}</button>{/each}
                   </details>
                 {/if}
+                {#if message.knowledgePublication === 'published' || message.knowledgeReferences?.length}
+                  <AnswerContradictions messageId={message.knowledgePublication === 'published' ? message.id : undefined} references={message.knowledgeReferences ?? []} />
+                {/if}
                 {#if message.knowledgePublication === 'published'}
-                  <AnswerContradictions messageId={message.id} />
                   <button type="button" onclick={() => { knowledgeMessage = message.id; knowledgeRecord = ''; section = 'knowledge'; }}>Inspect retained knowledge</button>
                 {:else if message.knowledgePublication === 'withheld'}
                   <p class="draft-note">Knowledge not retained: validation, freshness or local storage checks did not complete. The answer remains available.</p>

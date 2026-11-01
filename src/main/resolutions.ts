@@ -64,6 +64,7 @@ export class Resolutions {
       if (input.operation === 'reconnect' && !previous) throw new Error('Annotation unavailable.');
       const now = new Date().toISOString();
       const stored: Stored = input.operation === 'annotate' ? { id: randomUUID(), kind: input.kind, text: input.text.trim(), createdAt: now } : this.stored(previous!);
+      if (previous && !await this.view(stored, undefined, signal, false)) throw new Error('Original annotation derivations are unavailable.');
       const revision = previous ? Number(this.db.prepare('SELECT MAX(revision) AS revision FROM revisions WHERE annotation_id = ?').get(stored.id)!.revision) + 1 : 1;
       if (revision > 32) throw new Error('Annotation revision limit reached. Create a new annotation.');
       const value: Revision = { targets, confirmedAt: now };
@@ -71,6 +72,7 @@ export class Resolutions {
         const state = await this.knowledge.checkResolutionTarget(target, signal);
         if (!state?.connected) throw new Error('Knowledge changed during annotation. Reload and reconsider.');
       }
+      if (previous && !await this.view(stored, undefined, signal, false)) throw new Error('Annotation access changed before reconnection.');
       guard({ stored, value }); signal.throwIfAborted();
       this.db.exec('BEGIN IMMEDIATE');
       try {
@@ -101,6 +103,18 @@ export class Resolutions {
   private stored(row: Record<string, unknown>): Stored {
     return { id: String(row.id), kind: String(row.kind) as Stored['kind'], text: String(row.text), createdAt: String(row.created_at) };
   }
+  private async targetStates(targets: ResolutionTarget[], signal: AbortSignal, budget: ReadBudget) {
+    const states: { connected: boolean; freshness: 'current' | 'stale' }[] = [];
+    for (const target of targets) {
+      const sourceCount = target.record.dependencies.length + target.record.scopes.length;
+      if (--budget.targets < 0 || (budget.sources -= sourceCount) < 0) return;
+      signal.throwIfAborted();
+      const state = await this.knowledge.checkResolutionTarget(target, signal);
+      if (!state) return;
+      states.push(state);
+    }
+    return states;
+  }
   private async view(stored: Stored, requested: number | undefined, signal: AbortSignal, observe = true, budget = readBudget()): Promise<ResolutionView | undefined> {
     const row = requested === undefined
       ? this.db.prepare('SELECT revision, value, reconsider FROM revisions WHERE annotation_id = ? ORDER BY revision DESC LIMIT 1').get(stored.id)
@@ -108,15 +122,14 @@ export class Resolutions {
     if (!row) return;
     const value = JSON.parse(String(row.value)) as Revision;
     this.assertClean({ stored, value });
-    const states: { connected: boolean; freshness: 'current' | 'stale' }[] = [];
-    for (const target of value.targets) {
-      const sourceCount = target.record.dependencies.length + target.record.scopes.length;
-      if (--budget.targets < 0 || (budget.sources -= sourceCount) < 0) return;
-      signal.throwIfAborted();
-      const state = await this.knowledge.checkResolutionTarget(target, signal);
-      if (!state) return; // An annotation can reveal source-derived material too: withhold revoked derivations.
-      states.push(state);
+    // The explanation is unchanged across reconnections: its original source-access provenance cannot be laundered away.
+    if (Number(row.revision) !== 1) {
+      const origin = JSON.parse(String(this.db.prepare('SELECT value FROM revisions WHERE annotation_id = ? AND revision = 1').get(stored.id)!.value)) as Revision;
+      this.assertClean(origin);
+      if (!await this.targetStates(origin.targets, signal, budget)) return;
     }
+    const states = await this.targetStates(value.targets, signal, budget);
+    if (!states) return;
     const changed = states.some(state => state.freshness === 'stale');
     // A user-visible observation remains sticky across reverts. Model/tainted reads are strictly read-only.
     if (changed && observe && !row.reconsider) {

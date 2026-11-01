@@ -143,7 +143,7 @@ export class Knowledge {
       const { record, derivation, stale } = checked;
       const snapshot: KnowledgeRecord = { ...record, owners: [], relations: [], dependencies: derivation.files,
         scopes: derivation.scopes, checkouts: derivation.checkouts, validation: stale ? 'stale' : record.validation };
-      const version = digest({ id: record.id, evidence: record.evidence, dependencies: derivation.files, scopes: derivation.scopes, checkouts: derivation.checkouts });
+      const version = this.resolutionVersion(record, derivation);
       // Only bounded excerpts are retained in durable annotation snapshots, never a second full source ledger.
       snapshot.evidence = record.evidence.map(item => ({ ...item, text: item.text.slice(0, 1200) }));
       this.assertClean(snapshot);
@@ -153,9 +153,14 @@ export class Knowledge {
   checkResolutionTarget(target: ResolutionTarget, signal: AbortSignal) {
     return this.serial(async () => {
       const current = target.generation === this.generation() ? this.records(target.record.id)[0] : undefined;
-      const checked = await this.retrieval.inspectSnapshot({ ...target.record, ...(current?.validation === 'stale' ? { validation: 'stale' as const } : {}) }, signal);
-      return checked ? { connected: !!current, freshness: checked.stale ? 'stale' as const : 'current' as const } : undefined;
+      const checked = await this.retrieval.compareAnnotationSnapshot(target.record, signal, !!current);
+      if (!checked) return;
+      const changed = checked.current && target.version !== this.resolutionVersion(checked.current.record, checked.current.derivation);
+      return { connected: !!current, freshness: checked.retained.stale || checked.current?.stale || changed ? 'stale' as const : 'current' as const };
     });
+  }
+  private resolutionVersion(record: KnowledgeRecord, derivation: NonNullable<KnowledgeResult['derivation']>): string {
+    return digest({ id: record.id, evidence: record.evidence, dependencies: derivation.files, scopes: derivation.scopes, checkouts: derivation.checkouts });
   }
   clear(): Promise<void> { return this.serial(async () => {
     this.db.exec('BEGIN IMMEDIATE');

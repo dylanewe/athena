@@ -70,6 +70,12 @@ test('contradictions show both source trails in answers and details, with durabl
   await resolutions.getByRole('button', { name: 'Save user annotation', exact: true }).click();
   await expect(resolutions).toContainText('Recorded for these versions only — not verification');
   await expect(page.getByRole('region', { name: 'Contradictory claims' }).first()).toContainText('Use dependency B.');
+  await installLiveFixture(application, directory, root, false, false, true, true);
+  await newConversation(); await send('Reuse the retained dependency discrepancy');
+  await expect.poll(() => page.evaluate(async () => (await window.athena.workspace()).activeConversationId)).toBeNull();
+  await expect(page.getByRole('button', { name: 'Inspect retained knowledge', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Contradictory claims' }).first()).toContainText('export const result = C.call();');
+  await expect(page.getByRole('region', { name: 'Contradictory claims' }).first()).toContainText('Use dependency B.');
   await application.close();
   for (const suffix of ['', '-wal', '-shm']) rmSync(join(directory, 'state', 'knowledge.sqlite' + suffix), { force: true });
   await launch();

@@ -27,11 +27,16 @@ export async function installLiveFixture(application: ElectronApplication, direc
       }
       if (${JSON.stringify(reuse)} && hasTool('retrieve_knowledge')) {
         const knowledgeCalls = body.input.filter(item => item.type === 'function_call' && item.name === 'retrieve_knowledge');
-        if (!knowledgeCalls.length) return call('retrieve_knowledge', {operation:'search',query:'answer'});
+        if (!knowledgeCalls.length) return call('retrieve_knowledge', {operation:'search',query:${JSON.stringify(discrepancy ? 'dependency' : 'answer')}});
         if (knowledgeCalls.length === 1) {
           const result = body.input.findLast(item => item.type === 'function_call_output');
-          const hit = JSON.parse(result.output).items[0];
+          const items = JSON.parse(result.output).items;
+          const hit = ${JSON.stringify(discrepancy)} ? items.find(item => item.provenance === 'declared') : items[0];
           return call('retrieve_knowledge', {operation:'evidence',id:hit.id,index:0});
+        }
+        if (${JSON.stringify(discrepancy)} && knowledgeCalls.length === 2) {
+          const result = body.input.filter(item => item.type === 'function_call_output').map(item => { try { return JSON.parse(item.output); } catch { return {}; } }).find(item => item.items?.length > 1);
+          return call('retrieve_knowledge', {operation:'evidence',id:result.items.find(item => item.provenance === 'statically-inferred').id,index:0});
         }
       }
       if (${JSON.stringify(root ?? '')} && !${JSON.stringify(reuse)}) {

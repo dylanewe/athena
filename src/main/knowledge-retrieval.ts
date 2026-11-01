@@ -1,12 +1,18 @@
 import { relative } from 'node:path';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { Check } from 'typebox/value';
-import { KNOWLEDGE_LIMITS as L, knowledgeRequestSchema, type KnowledgeRequest, type KnowledgeRecord, type KnowledgeHit, type KnowledgeResult } from '../shared/knowledge';
+import { KNOWLEDGE_LIMITS as L, knowledgeRequestSchema, type KnowledgeRequest, type KnowledgeRecord, type KnowledgeContext, type KnowledgeHit, type KnowledgeResult } from '../shared/knowledge';
 import type { SourceCheckout, SourceIdentity, SourceScope } from '../shared/sources';
 import type { Evidence } from '../shared/live';
 
 export const knowledgeName = (value: string) => value.normalize('NFC').toLowerCase();
 const NOTICE = 'Bounded, access-filtered indexed leads, not exhaustive knowledge or verified semantic truth. No match is not proof of absence. If insufficient, delegate investigate for bounded fresh source exploration. Static analysis is not runtime tracing; implementation evidence takes precedence over declarations.';
+
+function claimContext(record: KnowledgeRecord, stale: boolean): KnowledgeContext {
+  return { id: record.id, scope: record.scope, topic: record.topic, summary: record.summary, claim: record.claim, kind: record.kind,
+    provenance: record.provenance, perspective: record.perspective, validation: stale ? 'stale' : record.validation,
+    validationNote: stale ? 'An inspected dependency changed or bounded freshness could not be established. Use only as an investigation lead.' : record.validationNote };
+}
 
 interface RetrievalBudget {
   records: Map<string, KnowledgeRecord | undefined>;
@@ -88,22 +94,18 @@ export class KnowledgeRetrieval {
       consumed++;
       if (!checked) continue;
       const { record, stale } = checked;
-      const hit: KnowledgeHit = { id: record.id, scope: record.scope, topic: record.topic, aliases: record.aliases ?? [], summary: record.summary,
-        claim: record.claim, kind: record.kind, provenance: record.provenance, perspective: record.perspective,
-        validation: stale ? 'stale' : record.validation, validationNote: stale ? 'An inspected dependency changed or bounded freshness could not be established. Use only as an investigation lead.' : record.validationNote,
+      const hit: KnowledgeHit = { ...claimContext(record, stale), aliases: record.aliases ?? [],
         freshness: stale ? 'stale' : 'current', evidence: record.evidence.map((item, index) => ({ index, citation: item.citation })),
         owners: record.owners.slice(0, 8), relations: record.relations.slice(0, 8).map(({ kind, target }) => ({ kind, target })),
         conflicts: [], truncated: record.owners.length > 8 || record.relations.length > 8 };
-      const conflicts = record.relations.filter(edge => edge.kind === 'conflicts-with');
+      const conflicts = [...new Map(record.relations.filter(edge => edge.kind === 'conflicts-with').map(edge => [edge.target, edge])).values()];
       const excerpts = (record: KnowledgeRecord) => record.evidence.map((item, index) => ({ index, citation: item.citation, ...(index < 2 ? { excerpt: item.text.slice(0, L.excerpt), truncated: item.text.length > L.excerpt } : {}) }));
       if (conflicts.length || input.operation === 'detail') hit.evidence = excerpts(record);
       for (const edge of conflicts.slice(0, 3)) {
         const other = await this.checked(edge.target, signal, budget);
         if (!other) { hit.truncated = true; continue; }
         const r = other.record;
-        hit.conflicts.push({ id: r.id, scope: r.scope, topic: r.topic, summary: r.summary, claim: r.claim, kind: r.kind,
-          provenance: r.provenance, perspective: r.perspective, validation: other.stale ? 'stale' : r.validation,
-          validationNote: r.validationNote, freshness: other.stale ? 'stale' : 'current', evidence: excerpts(r) });
+        hit.conflicts.push({ ...claimContext(r, other.stale), freshness: other.stale ? 'stale' : 'current', evidence: excerpts(r) });
         hit.truncated ||= r.evidence.length > 2;
       }
       hit.truncated ||= conflicts.length > 3 || (conflicts.length > 0 || input.operation === 'detail') && record.evidence.length > 2;
@@ -133,8 +135,13 @@ export class KnowledgeRetrieval {
     }
     return result;
   }
-  async inspectSnapshot(record: KnowledgeRecord, signal: AbortSignal) {
-    return this.checked(record.id, signal, { records: new Map([[record.id, record]]), sources: new Set(), checkouts: new Map(), canPersistInvalidations: () => false });
+  async compareAnnotationSnapshot(record: KnowledgeRecord, signal: AbortSignal, connected: boolean) {
+    const budget: RetrievalBudget = { records: new Map(), sources: new Set(), checkouts: new Map(), canPersistInvalidations: () => false };
+    const current = connected ? await this.checked(record.id, signal, budget) : undefined;
+    if (connected && !current) return;
+    budget.records.set(record.id, record);
+    const retained = await this.checked(record.id, signal, budget);
+    return retained ? { current, retained } : undefined;
   }
   async annotationTarget(id: string, signal: AbortSignal) {
     return this.checked(id, signal, { records: new Map(), sources: new Set(), checkouts: new Map(), canPersistInvalidations: () => false });
