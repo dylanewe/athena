@@ -49,9 +49,13 @@ export interface KnowledgeHit extends KnowledgeContext {
   evidence: { index: number; citation: Evidence['citation']; excerpt?: string; truncated?: boolean }[];
   owners: KnowledgeOwner[];
   relations: { kind: KnowledgeRecord['relations'][number]['kind']; target: string; owners?: KnowledgeOwner[] }[];
+  /** Bounded explicit contradictions, independently access/freshness checked. Never semantic proof. */
+  conflicts: KnowledgeConflict[];
+  annotations?: import('./resolutions').ResolutionSummary[];
   detail?: { dependencies: SourceIdentity[]; scopes: SourceScope[]; dependencyCount: number; scopeCount: number };
   truncated: boolean;
 }
+export type KnowledgeConflict = KnowledgeContext & Pick<KnowledgeHit, 'freshness' | 'evidence'>;
 export interface KnowledgeResult {
   items: KnowledgeHit[];
   edges?: { source: string; kind: KnowledgeRecord['relations'][number]['kind']; target: string }[];

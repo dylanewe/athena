@@ -1,0 +1,129 @@
+import { afterEach, expect, test } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { Knowledge } from '../../src/main/knowledge';
+import { Resolutions } from '../../src/main/resolutions';
+import { Sources } from '../../src/main/sources';
+import { DatabaseSync } from 'node:sqlite';
+import { ResolutionGateway } from '../../src/main/resolution-bridge';
+import { Conversations } from '../../src/main/conversations';
+import { FOLDER_CONSENT, type InventorySnapshot } from '../../src/shared/inventory';
+
+const cleanup: (() => void)[] = [];
+afterEach(() => { for (const action of cleanup.splice(0).reverse()) action(); });
+async function fixture() {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'athena-resolutions-')));
+  cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
+  const root = join(directory, 'repo'); mkdirSync(join(root, '.git'), { recursive: true });
+  writeFileSync(join(root, 'README.md'), 'Use dependency B.\n');
+  writeFileSync(join(root, 'service.ts'), 'export const result = C.call();\n');
+  const snapshot: InventorySnapshot = { roots: [{ path: root, consent: FOLDER_CONSENT, acceptedAt: 'now', includedLocations: [] }], repositories: [{ name: 'service', path: root, presence: 'present', documentationRoots: [], boundaries: [], fileCount: 2, examined: false }], candidates: [], discovery: { status: 'complete', visited: 0, current: '', nonGitFiles: 0, failures: [] } };
+  const inventory = { snapshot: () => structuredClone(snapshot) };
+  const conversations = new Conversations(join(directory, 'conversations.sqlite')); cleanup.push(() => conversations.close());
+  const sources = new Sources(':memory:', inventory); cleanup.push(() => sources.close());
+  const knowledge = new Knowledge(join(directory, 'knowledge.sqlite'), sources, inventory, value => conversations.assertClean(value)); cleanup.push(() => knowledge.close());
+  let writable = true;
+  const path = join(directory, 'resolutions.sqlite');
+  const open = () => new Resolutions(path, knowledge, value => conversations.assertClean(value), () => { if (!writable) throw new Error('Clean idle context required.'); });
+  const resolutions = open(); cleanup.push(() => resolutions.close());
+  const publish = async () => {
+    const evidence = await Promise.all(['README.md', 'service.ts'].map(async (path, index) => {
+      const result = await sources.run('read', { root, path, start: 1, end: 1 });
+      return { id: `E${index + 1}`, citation: result.entries[0].citation!, text: result.entries[0].text! };
+    }));
+    return knowledge.publish({ owner: { conversationId: 'conversation', messageId: 'message' }, candidates: [
+      { id: 'C1', scope: 'service', topic: 'Dependency', summary: 'Declared dependency.', kind: 'decision', claim: 'Use dependency B.', provenance: 'declared', perspective: 'intended', evidenceIds: ['E1'], relations: [{ kind: 'conflicts-with', target: 'C2' }] },
+      { id: 'C2', scope: 'service', topic: 'Dependency', summary: 'Implementation dependency.', kind: 'behavior', claim: 'The implementation calls C.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E2'], relations: [] },
+    ], evidence, completed: true, environmentExposed: false, signal: new AbortController().signal });
+  };
+  return { directory, root, knowledge, resolutions, publish, conversations, snapshot, open, setWritable: (value: boolean) => { writable = value; } };
+}
+
+test('user resolutions bind both evidence versions, survive derived replacement, and reconnect only by explicit confirmation', async () => {
+  const f = await fixture();
+  const ids = await f.publish();
+  const saved = (await f.resolutions.write({ operation: 'annotate', kind: 'obsolete-declaration', text: 'B was an early plan; keep C.', claimIds: ids })).items[0];
+  expect(saved).toMatchObject({ author: 'user', revision: 1, status: 'recorded-for-these-versions', bindings: [{ claim: 'Use dependency B.' }, { claim: 'The implementation calls C.' }] });
+  expect((await f.resolutions.read({ operation: 'list', claimId: ids[1] })).items[0].id).toBe(saved.id);
+  expect((await f.knowledge.retrieve({ operation: 'detail', id: ids[0] })).items[0].validation).toBe('conflicting');
+  await f.knowledge.clear();
+  const replacements = await f.publish();
+  expect(replacements).toEqual(ids); // Even identical content-derived IDs cannot rebind a rebuilt ledger.
+  expect((await f.resolutions.read({ operation: 'list', claimId: replacements[0] })).items).toEqual([]);
+  expect((await f.resolutions.read({ operation: 'list' })).items[0].status).toBe('requires-reconnection');
+  const reopened = f.open(); cleanup.push(() => reopened.close());
+  const rebound = (await reopened.write({ operation: 'reconnect', id: saved.id, claimIds: replacements })).items[0];
+  expect(rebound).toMatchObject({ id: saved.id, revision: 2, status: 'recorded-for-these-versions' });
+  expect((await reopened.read({ operation: 'inspect', id: saved.id, revision: 1 })).items[0].status).toBe('requires-reconnection');
+  writeFileSync(join(f.root, 'service.ts'), 'export const result = D.call();\n');
+  expect((await reopened.read({ operation: 'list', claimId: replacements[1] })).items[0].status).toBe('requires-reconsideration');
+  expect((await f.knowledge.retrieve({ operation: 'detail', id: replacements[0] })).items[0].conflicts[0].claim).toBe('The implementation calls C.');
+  const newer = await f.publish();
+  await reopened.write({ operation: 'reconnect', id: saved.id, claimIds: newer });
+  expect((await reopened.read({ operation: 'list', claimId: newer[0] })).items[0].revision).toBe(3);
+  expect((await reopened.read({ operation: 'list', claimId: replacements[0] })).items[0]).toMatchObject({ revision: 2, status: 'requires-reconsideration' });
+  expect(readFileSync(join(f.root, 'README.md'), 'utf8')).toBe('Use dependency B.\n');
+});
+
+test('source-change reconsideration is sticky, while model reads do not persist observations', async () => {
+  const f = await fixture(); const ids = await f.publish();
+  const annotation = (await f.resolutions.write({ operation: 'annotate', kind: 'note', text: 'No B path found in this bounded inspection; not proof of absence.', claimIds: ids })).items[0];
+  writeFileSync(join(f.root, 'service.ts'), 'export const result = D.call();\n');
+  const unobserved = await f.knowledge.retrieve({ operation: 'detail', id: ids[0] }, undefined, { persistInvalidations: false });
+  expect((await f.resolutions.attach(unobserved)).items[0].annotations?.[0].status).toBe('requires-reconsideration');
+  writeFileSync(join(f.root, 'service.ts'), 'export const result = C.call();\n');
+  expect((await f.resolutions.read({ operation: 'inspect', id: annotation.id })).items[0].status).toBe('recorded-for-these-versions');
+  writeFileSync(join(f.root, 'service.ts'), 'export const result = D.call();\n');
+  expect((await f.resolutions.read({ operation: 'list' })).items[0].status).toBe('requires-reconsideration');
+  writeFileSync(join(f.root, 'service.ts'), 'export const result = C.call();\n');
+  expect((await f.resolutions.read({ operation: 'list' })).items[0].status).toBe('requires-reconsideration');
+});
+
+test('only the authorized main-frame user gateway can write bounded annotations and failures roll back the revision', async () => {
+  const f = await fixture(); const ids = await f.publish();
+  const owner = { webContentsId: 1, url: 'file:///athena/index.html' };
+  const caller = { ...owner, isMainFrame: true };
+  const gateway = new ResolutionGateway(f.resolutions, owner);
+  const payload = { operation: 'annotate', kind: 'note', text: 'A user discrepancy note.', claimIds: ids };
+  for (const invalid of [{ ...caller, isMainFrame: false }, { ...caller, webContentsId: 2 }, { ...caller, url: 'https://other.test/' }]) expect(() => gateway.dispatch(invalid, 'write', payload)).toThrow();
+  await expect(gateway.dispatch(caller, 'write', { ...payload, environmentExposed: false })).rejects.toThrow();
+  const first = (await gateway.dispatch(caller, 'write', payload)).items[0];
+  const fault = new DatabaseSync(join(f.directory, 'resolutions.sqlite'));
+  try {
+    fault.exec("CREATE TRIGGER annotation_fault BEFORE INSERT ON revisions BEGIN SELECT RAISE(ABORT, 'fixture failure'); END");
+    await expect(gateway.dispatch(caller, 'write', { operation: 'reconnect', id: first.id, claimIds: ids })).rejects.toThrow();
+    expect((await f.resolutions.read({ operation: 'inspect', id: first.id })).items[0].revision).toBe(1);
+  } finally { fault.close(); }
+});
+
+test('annotations are assertions in bounded model retrieval, never source citations or semantic verification', async () => {
+  const f = await fixture(); const ids = await f.publish();
+  await f.resolutions.write({ operation: 'annotate', kind: 'intent', text: 'Eventually use B, but C is intentional today.', claimIds: ids });
+  const result = await f.resolutions.attach(await f.knowledge.retrieve({ operation: 'detail', id: ids[1] }));
+  expect(result.items[0]).toMatchObject({ provenance: 'statically-inferred', validation: 'conflicting', annotations: [{ author: 'user', kind: 'intent', text: 'Eventually use B, but C is intentional today.' }] });
+  expect(result.evidence).toBeUndefined();
+  expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24 * 1024);
+  const roots = f.snapshot.roots; f.snapshot.roots = [];
+  expect((await f.resolutions.read({ operation: 'list' })).items).toEqual([]);
+  f.snapshot.roots = roots;
+  expect((await f.resolutions.read({ operation: 'list' })).items).toHaveLength(1);
+});
+
+test('unknown or tainted material and non-idle contexts cannot create or reconnect annotations, including queued writes', async () => {
+  const f = await fixture(); const ids = await f.publish();
+  const canary = 'private-environment-canary-92846'; f.conversations.rememberEnvironment('PRIVATE_CONTEXT=' + canary);
+  for (const text of [canary, 'The intent was API_KEY=actual-private-value-92846']) {
+    await expect(f.resolutions.write({ operation: 'annotate', kind: 'note', text, claimIds: ids })).rejects.toThrow();
+  }
+  await expect(f.resolutions.write({ operation: 'annotate', kind: 'note', text: 'Safe assertion.', claimIds: ['K' + 'a'.repeat(64)] })).rejects.toThrow();
+  f.setWritable(false);
+  await expect(f.resolutions.write({ operation: 'annotate', kind: 'note', text: 'Safe assertion.', claimIds: ids })).rejects.toThrow('Clean idle');
+  f.setWritable(true);
+  const pending = f.resolutions.write({ operation: 'annotate', kind: 'note', text: 'Queued assertion.', claimIds: ids });
+  await Promise.resolve(); // Let validation start before authority is revoked during source IO.
+  f.setWritable(false);
+  await expect(pending).rejects.toThrow('Clean idle');
+  expect((await f.resolutions.read({ operation: 'list' })).items).toEqual([]);
+  for (const name of readdirSync(f.directory).filter(name => name.includes('resolutions.sqlite'))) expect(readFileSync(join(f.directory, name)).includes(Buffer.from(canary))).toBe(false);
+});

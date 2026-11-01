@@ -45,6 +45,56 @@ function resume() { if (pausedWorker) { try { process.kill(pausedWorker, 'SIGCON
 test.beforeEach(async () => { directory = realpathSync(mkdtempSync(join(tmpdir(), 'athena-desktop-'))); await launch(); });
 test.afterEach(async () => { resume(); await application?.close().catch(() => {}); rmSync(directory, { recursive: true, force: true }); });
 
+test('contradictions show both source trails in answers and details, with durable user resolutions and explicit rebuild reconnection', async () => {
+  const root = join(directory, 'repo'); mkdirSync(root);
+  writeFileSync(join(root, 'README.md'), 'Use dependency B.\n');
+  writeFileSync(join(root, 'answer.ts'), 'export const result = C.call();\n');
+  await installLiveFixture(application, directory, root, false, false, false, true);
+  await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] }); }, root);
+  await page.evaluate(() => window.athena.inventory.chooseFolder());
+  await page.getByRole('button', { name: 'Repositories', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'I understand the folder permission' }).check();
+  await page.getByRole('button', { name: 'Save consent and discover' }).click();
+  await expect.poll(() => page.evaluate(async () => (await window.athena.inventory.snapshot()).discovery.status)).not.toBe('running');
+  await newConversation(); await send('Explain the dependency discrepancy');
+  await expect.poll(() => page.evaluate(async () => (await window.athena.workspace()).activeConversationId)).toBeNull();
+  const answer = page.getByRole('region', { name: 'Contradictory claims' }).first();
+  await expect(answer).toContainText('Use dependency B.');
+  await expect(answer).toContainText('export const result = C.call();');
+  await expect(answer).toContainText('Sources current');
+  await page.getByRole('button', { name: 'Inspect retained knowledge', exact: true }).click();
+  await page.getByRole('button', { name: 'Knowledge details', exact: true }).first().click();
+  let resolutions = page.getByRole('region', { name: 'User resolutions' });
+  await resolutions.getByLabel('Resolution kind', { exact: true }).selectOption('obsolete-declaration');
+  await resolutions.getByLabel('Your resolution explanation').fill('B was the early plan; C is intentional.');
+  await resolutions.getByRole('button', { name: 'Save user annotation', exact: true }).click();
+  await expect(resolutions).toContainText('Recorded for these versions only — not verification');
+  await expect(page.getByRole('region', { name: 'Contradictory claims' }).first()).toContainText('Use dependency B.');
+  await application.close();
+  for (const suffix of ['', '-wal', '-shm']) rmSync(join(directory, 'state', 'knowledge.sqlite' + suffix), { force: true });
+  await launch();
+  await page.getByRole('button', { name: 'Knowledge', exact: true }).click();
+  resolutions = page.getByRole('region', { name: 'User resolutions' });
+  await expect(resolutions).toContainText('Requires explicit reconnection');
+  await installLiveFixture(application, directory, root, false, false, false, true);
+  await newConversation(); await send('Inspect the discrepancy again');
+  await page.getByRole('button', { name: 'Inspect retained knowledge', exact: true }).click();
+  await page.getByRole('button', { name: 'Knowledge details', exact: true }).first().click();
+  await resolutions.getByLabel('Show all retained annotations, including unconnected versions').check();
+  await expect(resolutions).toContainText('Requires explicit reconnection');
+  await resolutions.getByLabel('I reconsidered this assertion against the selected versions above').check();
+  await resolutions.getByRole('button', { name: 'Reconsider and reconnect annotation', exact: true }).click();
+  await expect(resolutions).toContainText('Revision 2');
+  await expect(resolutions).toContainText('Recorded for these versions only — not verification');
+  writeFileSync(join(root, 'answer.ts'), 'export const result = D.call();\n');
+  await resolutions.getByRole('button', { name: 'Reload annotations', exact: true }).click();
+  await expect(resolutions).toContainText('Requires reconsideration');
+  await resolutions.getByRole('button', { name: 'Inspect original binding', exact: true }).click();
+  await expect(resolutions).toContainText('Original revision:');
+  expect(readFileSync(join(root, 'README.md'), 'utf8')).toBe('Use dependency B.\n');
+  expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: { workers: number } }).liveFixture.workers)).toBe(1);
+});
+
 test('normalized knowledge opens from the answer, exposes evidence independently, survives restart and warns about staleness', async () => {
   const root = join(directory, 'repo'); mkdirSync(root); writeFileSync(join(root, 'answer.ts'), 'export const answer = 42;\n');
   await installLiveFixture(application, directory, root, false, true);
@@ -292,7 +342,7 @@ test('local preview can be revoked from the UI without external permission and e
 });
 
 test('renderer stays sandboxed with narrow bridge and rejects malformed retry requests', async () => {
-  expect(await page.evaluate(() => ({ node: typeof (globalThis as Record<string, unknown>).process, require: typeof (globalThis as Record<string, unknown>).require, bridge: Object.keys(window.athena).sort() }))).toEqual({ node: 'undefined', require: 'undefined', bridge: ['apiModels','cancel','chatgpt','environment','inventory','knowledge','models','onChange','retry','select','send','sources','workspace'] });
+  expect(await page.evaluate(() => ({ node: typeof (globalThis as Record<string, unknown>).process, require: typeof (globalThis as Record<string, unknown>).require, bridge: Object.keys(window.athena).sort() }))).toEqual({ node: 'undefined', require: 'undefined', bridge: ['apiModels','cancel','chatgpt','environment','inventory','knowledge','models','onChange','resolutions','retry','select','send','sources','workspace'] });
   expect(await application.evaluate(({ app, BrowserWindow }) => app.getAppMetrics().find(metric => metric.pid === BrowserWindow.getAllWindows()[0].webContents.getOSProcessId())?.sandboxed)).toBe(true);
   for (const url of ['https://example.com', 'file:///etc/hosts']) expect(await page.evaluate(async url => { try { await fetch(url); return 'accessible'; } catch { return 'denied'; } }, url)).toBe('denied');
   expect(await page.evaluate(async () => { try { await window.athena.retry('arbitrary-path'); return 'accepted'; } catch { return 'rejected'; } })).toBe('rejected');
@@ -307,7 +357,7 @@ test('another real renderer cannot use owner-only conversation, source, or crede
   });
   const outsider = await second;
   expect(await outsider.evaluate(async () => {
-    const results = await Promise.allSettled([window.athena.knowledge.retrieve({ operation: 'search', query: '' }), window.athena.workspace(), window.athena.send(null, 'attack'), window.athena.retry('00000000-0000-4000-8000-000000000000'), window.athena.chatgpt.snapshot(), window.athena.chatgpt.connect(), window.athena.inventory.chooseFolder(), window.athena.models.test(), window.athena.apiModels.snapshot(), window.athena.apiModels.credential('deepseek', 'fake-attack-key'), window.athena.apiModels.importModels(), window.athena.sources.run('read', { root: '/', path: 'etc/hosts' })]);
+    const results = await Promise.allSettled([window.athena.resolutions.read({ operation: 'list' }), window.athena.resolutions.write({ operation: 'annotate', kind: 'note', text: 'Outsider assertion', claimIds: ['K' + 'a'.repeat(64)] }), window.athena.knowledge.retrieve({ operation: 'search', query: '' }), window.athena.workspace(), window.athena.send(null, 'attack'), window.athena.retry('00000000-0000-4000-8000-000000000000'), window.athena.chatgpt.snapshot(), window.athena.chatgpt.connect(), window.athena.inventory.chooseFolder(), window.athena.models.test(), window.athena.apiModels.snapshot(), window.athena.apiModels.credential('deepseek', 'fake-attack-key'), window.athena.apiModels.importModels(), window.athena.sources.run('read', { root: '/', path: 'etc/hosts' })]);
     return results.every(result => result.status === 'rejected');
   })).toBe(true);
 });

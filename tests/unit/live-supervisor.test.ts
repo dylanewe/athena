@@ -10,6 +10,7 @@ import { ChatGPTStore } from '../../src/main/chatgpt-store';
 import { ISSUER, SCOPES, type OAuthProtocol, type Registration } from '../../src/main/chatgpt-protocol';
 import { Sources } from '../../src/main/sources';
 import { LiveSupervisor } from '../../src/main/live-supervisor';
+import { Resolutions } from '../../src/main/resolutions';
 import { Knowledge } from '../../src/main/knowledge';
 import { runLiveAgent } from '../../src/worker/live-agent';
 import { LIVE_LIMITS, type LiveParentMessage } from '../../src/shared/live';
@@ -51,6 +52,7 @@ function scripted(scripts: string[], before?: (request: number) => void) {
 let directory: string, root: string, db: Conversations, chatgpt: ChatGPTSettings, sources: Sources, jobs: LiveSupervisor;
 let snapshot: InventorySnapshot;
 let knowledge: Knowledge;
+let resolutions: Resolutions;
 let requests: Record<string, unknown>[], workers: Worker[], http: typeof fetch, oauth: OAuthProtocol, store: ChatGPTStore;
 class Worker extends EventEmitter {
   killed = false;
@@ -146,7 +148,9 @@ test('outbound approval reaches child and main contexts but echoes, titles and t
   expect(conversation.title.includes(canary)).toBe(false);
   expect(db.exploration(conversation.messages.at(-1)!.id)).toBeUndefined();
   expect(await knowledge.inspect()).toEqual([]);
-  expect(readdirSync(directory).filter(file => file.startsWith('knowledge.sqlite')).some(file => readFileSync(join(directory, file)).includes(canary))).toBe(false);
+  await expect(resolutions.write({ operation: 'annotate', kind: 'note', text: 'An apparently innocuous paraphrase from the sealed investigation.', claimIds: ['K' + 'a'.repeat(64)] })).rejects.toThrow('Idle unsealed');
+  expect((await resolutions.read({ operation: 'list' })).items).toEqual([]);
+  expect(readdirSync(directory).filter(file => /^(knowledge|resolutions)\.sqlite/.test(file)).some(file => readFileSync(join(directory, file)).includes(canary))).toBe(false);
   expect(db.liveContext(conversation.id)).toEqual({ history: [], evidence: [] });
   expect(() => jobs.start(conversation.id, 'Explain more')).toThrow('new conversation');
   expect(() => jobs.start(null, 'Echo ' + canary)).toThrow('secret checks');
@@ -246,9 +250,39 @@ beforeEach(async () => {
   requests = []; workers = [];
   http = async (_url, init) => { requests.push(JSON.parse(String(init?.body))); return new Response(new TextEncoder().encode(textResponse('Hello from ChatGPT'))); };
   knowledge = new Knowledge(join(directory, 'knowledge.sqlite'), sources, inventory, material => db.assertClean(material));
-  jobs = new LiveSupervisor(db, chatgpt, sources, inventory, () => { const worker = new Worker(); workers.push(worker); return worker; }, () => {}, undefined, knowledge);
+  resolutions = new Resolutions(join(directory, 'resolutions.sqlite'), knowledge, material => db.assertClean(material), () => {
+    if (db.workspace().activeConversationId || db.workspace().selected?.sealed) throw new Error('Idle unsealed context required.');
+  });
+  jobs = new LiveSupervisor(db, chatgpt, sources, inventory, () => { const worker = new Worker(); workers.push(worker); return worker; }, () => {}, undefined, knowledge, resolutions);
 });
-afterEach(async () => { vi.useRealTimers(); jobs.cancel(); await chatgpt.close(); knowledge.close(); sources.close(); db.close(); rmSync(directory, { recursive: true, force: true }); });
+afterEach(async () => { vi.useRealTimers(); jobs.cancel(); await chatgpt.close(); resolutions.close(); knowledge.close(); sources.close(); db.close(); rmSync(directory, { recursive: true, force: true }); });
+
+test('scripted Pi retrieval carries contradictory evidence and attributed user resolutions but exposes no annotation writer', async () => {
+  writeFileSync(join(root, 'README.md'), 'Use dependency B.\n');
+  writeFileSync(join(root, 'answer.ts'), 'export const result = C.call();\n');
+  const base = knowledgeCandidate();
+  scripted([
+    functionResponse('investigate', { question: 'Explain dependency discrepancy' }), toolResponse(root, true, 'README.md'), toolResponse(root),
+    functionResponse('finish_investigation', { findings: [], unresolvedQuestions: ['No path to B discovered, not proof of absence.'], candidateKnowledgeChanges: [], knowledgeCandidates: [
+      { ...base, topic: 'Dependency', claim: 'Use dependency B.', provenance: 'declared', perspective: 'intended', evidenceIds: ['E1'], relations: [{ kind: 'conflicts-with', target: 'C2' }] },
+      { ...base, id: 'C2', topic: 'Dependency', claim: 'Implementation calls C.', evidenceIds: ['E2'] },
+    ] }), textResponse('Docs name B [E1]; implementation calls C [E2]. Static interpretation only.'),
+  ]);
+  jobs.start(null, 'Explain dependency discrepancy'); await idle();
+  const ids = (await knowledge.inspect()).map(item => item.id);
+  await resolutions.write({ operation: 'annotate', kind: 'intent', text: 'B was an early plan; C is intentional.', claimIds: ids });
+  scripted([functionResponse('retrieve_knowledge', { operation: 'search', query: 'dependency' }),
+    functionResponse('save_resolution', { text: 'Model assertion must not become durable user state.' }), textResponse('User says C is intentional; this is not static verification.')]);
+  jobs.start(null, 'Explain the retained discrepancy'); await idle();
+  const context = JSON.stringify(requests.at(-1));
+  expect(context).toContain('export const result = C.call();');
+  expect(context).toContain('Use dependency B.');
+  expect(context).toContain('B was an early plan; C is intentional.');
+  expect(context).toContain('recorded-for-these-versions');
+  expect(context).toContain('User resolution annotations are attributed user assertions only');
+  expect((await resolutions.read({ operation: 'list' })).items).toHaveLength(1);
+  expect((await knowledge.inspect()).every(item => item.validation === 'conflicting')).toBe(true);
+});
 
 test('main delegates fresh exploration to one isolated investigator and receives only bounded findings', async () => {
   const scripts = [

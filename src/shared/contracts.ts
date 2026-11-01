@@ -52,6 +52,7 @@ export interface DemoJob {
 }
 export interface DesktopBridge {
   knowledge: KnowledgeBridge;
+  resolutions: import('./resolutions').ResolutionBridge;
   apiModels: ApiSettingsBridge;
   chatgpt: ChatGPTBridge;
   sources: SourceBridge;

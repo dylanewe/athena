@@ -93,7 +93,20 @@ export class KnowledgeRetrieval {
         validation: stale ? 'stale' : record.validation, validationNote: stale ? 'An inspected dependency changed or bounded freshness could not be established. Use only as an investigation lead.' : record.validationNote,
         freshness: stale ? 'stale' : 'current', evidence: record.evidence.map((item, index) => ({ index, citation: item.citation })),
         owners: record.owners.slice(0, 8), relations: record.relations.slice(0, 8).map(({ kind, target }) => ({ kind, target })),
-        truncated: record.owners.length > 8 || record.relations.length > 8 };
+        conflicts: [], truncated: record.owners.length > 8 || record.relations.length > 8 };
+      const conflicts = record.relations.filter(edge => edge.kind === 'conflicts-with');
+      const excerpts = (record: KnowledgeRecord) => record.evidence.map((item, index) => ({ index, citation: item.citation, ...(index < 2 ? { excerpt: item.text.slice(0, L.excerpt), truncated: item.text.length > L.excerpt } : {}) }));
+      if (conflicts.length || input.operation === 'detail') hit.evidence = excerpts(record);
+      for (const edge of conflicts.slice(0, 3)) {
+        const other = await this.checked(edge.target, signal, budget);
+        if (!other) { hit.truncated = true; continue; }
+        const r = other.record;
+        hit.conflicts.push({ id: r.id, scope: r.scope, topic: r.topic, summary: r.summary, claim: r.claim, kind: r.kind,
+          provenance: r.provenance, perspective: r.perspective, validation: other.stale ? 'stale' : r.validation,
+          validationNote: r.validationNote, freshness: other.stale ? 'stale' : 'current', evidence: excerpts(r) });
+        hit.truncated ||= r.evidence.length > 2;
+      }
+      hit.truncated ||= conflicts.length > 3 || (conflicts.length > 0 || input.operation === 'detail') && record.evidence.length > 2;
       if (input.operation === 'detail') {
         hit.detail = { dependencies: record.dependencies.slice(0, 8), scopes: record.scopes.slice(0, 8), dependencyCount: record.dependencies.length, scopeCount: record.scopes.length };
         hit.relations = record.relations.slice(0, 8).map(({ kind, target, owners }) => ({ kind, target, owners: owners.slice(0, 8) }));
@@ -119,6 +132,12 @@ export class KnowledgeRetrieval {
       result.evidence = evidence; result.derivation = derivation;
     }
     return result;
+  }
+  async inspectSnapshot(record: KnowledgeRecord, signal: AbortSignal) {
+    return this.checked(record.id, signal, { records: new Map([[record.id, record]]), sources: new Set(), checkouts: new Map(), canPersistInvalidations: () => false });
+  }
+  async annotationTarget(id: string, signal: AbortSignal) {
+    return this.checked(id, signal, { records: new Map(), sources: new Set(), checkouts: new Map(), canPersistInvalidations: () => false });
   }
   private async checked(id: string, signal: AbortSignal, budget: RetrievalBudget): Promise<{ record: KnowledgeRecord; stale: boolean; derivation: NonNullable<KnowledgeResult['derivation']> } | undefined> {
     const load = (key: string) => {

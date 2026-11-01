@@ -35,6 +35,26 @@ const candidate = () => ({ id: 'C1', scope: 'public-api', topic: 'Request servin
 async function publish(candidates: unknown = [candidate()], overrides = {}) {
   return knowledge.publish({ owner: { conversationId: 'conversation-1', messageId: 'message-1' }, candidates, evidence: await evidence(), completed: true, environmentExposed: false, signal: new AbortController().signal, ...overrides });
 }
+test('dependency discrepancies return both bounded evidence trails without certifying interpretation or absence', async () => {
+  writeFileSync(join(root, 'api', 'README.md'), 'Use dependency B.\n');
+  writeFileSync(join(root, 'api', 'service.ts'), 'export function serve() { return C.call(); }\n');
+  const [declared, implementation, negative] = await publish([
+    { ...candidate(), claim: 'Use dependency B.', topic: 'Dependency selection', relations: [{ kind: 'conflicts-with', target: 'C2' }] },
+    { ...candidate(), id: 'C2', topic: 'Dependency selection', claim: 'The implementation calls C.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'] },
+    { ...candidate(), id: 'C3', claim: 'No path to B was discovered in the inspected scope.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'] },
+  ]);
+  for (const request of [{ operation: 'detail', id: declared }, { operation: 'search', query: 'dependency' }] as const) {
+    const result = await knowledge.retrieve(request);
+    const doc = result.items.find(item => item.id === declared)!;
+    expect(doc.evidence[0].excerpt).toBe('Use dependency B.');
+    expect(doc.conflicts).toMatchObject([{ id: implementation, claim: 'The implementation calls C.', provenance: 'statically-inferred', perspective: 'current', freshness: 'current', evidence: [{ excerpt: 'export function serve() { return C.call(); }' }] }]);
+    expect(result.notice).toContain('No match is not proof of absence');
+  }
+  expect((await knowledge.retrieve({ operation: 'detail', id: negative })).items[0].validation).toBe('unchecked');
+  writeFileSync(join(root, 'api', 'service.ts'), 'export function serve() { return D.call(); }\n');
+  expect((await knowledge.retrieve({ operation: 'detail', id: declared })).items[0].conflicts[0].freshness).toBe('stale');
+});
+
 test('local checkout scans invalidate an unchanged citation when an uninspected caller changes, and persist invalidation across reverts', async () => {
   const [id] = await publish();
   await knowledge.scan();

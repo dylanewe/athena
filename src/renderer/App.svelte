@@ -3,6 +3,7 @@
   import EnvironmentPermissions from './EnvironmentPermissions.svelte';
   import InventoryView from './Inventory.svelte';
   import KnowledgeView from './Knowledge.svelte';
+  import AnswerContradictions from './AnswerContradictions.svelte';
   import type { KnowledgeHit } from '../shared/knowledge';
   let knowledgeMessage = $state('');
   let knowledgeRecord = $state('');
@@ -148,7 +149,7 @@
   {:else if section === 'sources'}
     <SourcesView />
   {:else if section === 'knowledge'}
-    <KnowledgeView messageId={knowledgeMessage} recordId={knowledgeRecord} openConversation={id => { void select(id); }} prepareRefresh={record => { void prepareRefresh(record); }} />
+    <KnowledgeView writable={!active && !workspace?.selected?.sealed} messageId={knowledgeMessage} recordId={knowledgeRecord} openConversation={id => { void select(id); }} prepareRefresh={record => { void prepareRefresh(record); }} />
   {:else if section === 'models'}
     <ModelSettingsView />
   {:else}
@@ -176,6 +177,7 @@
                   </details>
                 {/if}
                 {#if message.knowledgePublication === 'published'}
+                  <AnswerContradictions messageId={message.id} />
                   <button type="button" onclick={() => { knowledgeMessage = message.id; knowledgeRecord = ''; section = 'knowledge'; }}>Inspect retained knowledge</button>
                 {:else if message.knowledgePublication === 'withheld'}
                   <p class="draft-note">Knowledge not retained: validation, freshness or local storage checks did not complete. The answer remains available.</p>

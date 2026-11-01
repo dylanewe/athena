@@ -1,10 +1,11 @@
-import { createHash } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { SourceCheckouts } from './source-checkouts';
 import { KnowledgeRetrieval, knowledgeName as nameKey } from './knowledge-retrieval';
 import { relative, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Check } from 'typebox/value';
 import { knowledgeCandidatesSchema, type KnowledgeCandidate, type KnowledgeOwner, type KnowledgeRecord, type KnowledgeRequest, type KnowledgeResult } from '../shared/knowledge';
+import type { ResolutionTarget } from '../shared/resolutions';
 import type { Evidence } from '../shared/live';
 import type { SourceCheckout, SourceIdentity, SourceScope } from '../shared/sources';
 import type { Inventory } from './inventory';
@@ -68,6 +69,8 @@ export class Knowledge {
         this.db.exec('CREATE TABLE checkout_index_version (version INTEGER PRIMARY KEY); INSERT INTO checkout_index_version VALUES (1); COMMIT');
       } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     }
+    this.db.exec('CREATE TABLE IF NOT EXISTS knowledge_generation (id TEXT PRIMARY KEY)');
+    if (!this.db.prepare('SELECT id FROM knowledge_generation').get()) this.db.prepare('INSERT INTO knowledge_generation VALUES (?)').run(randomUUID());
     this.retrieval = new KnowledgeRetrieval(this.db, id => this.records(id)[0],
       (identity, signal) => this.permitted(identity, signal), (identities, signal) => this.fresh(identities, signal),
       (evidence, signal) => this.currentEvidence(evidence, signal),
@@ -131,7 +134,34 @@ export class Knowledge {
     await this.scan(signal);
     return this.serial(async () => { signal?.throwIfAborted(); return this.records(); });
   }
-  clear(): Promise<void> { return this.serial(async () => { this.db.exec('DELETE FROM claims'); }); }
+  generation(): string { return String(this.db.prepare('SELECT id FROM knowledge_generation').get()!.id); }
+  /** Main-only access-checked binding. Model-local C/E IDs never establish annotation identity. */
+  resolutionTarget(id: string, signal: AbortSignal): Promise<ResolutionTarget> {
+    return this.serial(async () => {
+      const checked = await this.retrieval.annotationTarget(id, signal);
+      if (!checked) throw new Error('Claim unavailable under current access and bounds.');
+      const { record, derivation, stale } = checked;
+      const snapshot: KnowledgeRecord = { ...record, owners: [], relations: [], dependencies: derivation.files,
+        scopes: derivation.scopes, checkouts: derivation.checkouts, validation: stale ? 'stale' : record.validation };
+      const version = digest({ id: record.id, evidence: record.evidence, dependencies: derivation.files, scopes: derivation.scopes, checkouts: derivation.checkouts });
+      // Only bounded excerpts are retained in durable annotation snapshots, never a second full source ledger.
+      snapshot.evidence = record.evidence.map(item => ({ ...item, text: item.text.slice(0, 1200) }));
+      this.assertClean(snapshot);
+      return { generation: this.generation(), version, record: snapshot };
+    });
+  }
+  checkResolutionTarget(target: ResolutionTarget, signal: AbortSignal) {
+    return this.serial(async () => {
+      const current = target.generation === this.generation() ? this.records(target.record.id)[0] : undefined;
+      const checked = await this.retrieval.inspectSnapshot({ ...target.record, ...(current?.validation === 'stale' ? { validation: 'stale' as const } : {}) }, signal);
+      return checked ? { connected: !!current, freshness: checked.stale ? 'stale' as const : 'current' as const } : undefined;
+    });
+  }
+  clear(): Promise<void> { return this.serial(async () => {
+    this.db.exec('BEGIN IMMEDIATE');
+    try { this.db.exec('DELETE FROM claims; DELETE FROM knowledge_generation'); this.db.prepare('INSERT INTO knowledge_generation VALUES (?)').run(randomUUID()); this.db.exec('COMMIT'); }
+    catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }); }
   close(): void { this.db.close(); }
 
   private serial<T>(action: () => Promise<T>): Promise<T> {

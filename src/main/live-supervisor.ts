@@ -12,6 +12,7 @@ import { ChatGPTError } from './chatgpt-protocol';
 import { CHATGPT_ERRORS, parseChatGPTUsage, type ChatGPTUsage } from '../shared/chatgpt';
 import type { Sources } from './sources';
 import type { Inventory } from './inventory';
+import type { Resolutions } from './resolutions';
 import type { Knowledge } from './knowledge';
 import { KNOWLEDGE_LIMITS, type KnowledgeRequest } from '../shared/knowledge';
 import type { SourceCheckout, SourceIdentity, SourceScope } from '../shared/sources';
@@ -45,7 +46,7 @@ export class LiveSupervisor {
   get saveError(): string | undefined { return this.unsaved ? 'The conversation stopped, but its result could not be saved. Check disk space and choose Retry saving.' : undefined; }
   constructor(private readonly conversations: Conversations, private readonly chatgpt: ChatGPTSettings,
     private readonly sources: Sources, private readonly inventory: Pick<Inventory, 'snapshot'>,
-    private readonly spawn: () => LiveWorker, private readonly changed: () => void, private readonly apiSettings?: ApiSettings, private readonly knowledge?: Knowledge) { this.checkouts = new SourceCheckouts(sources, inventory); }
+    private readonly spawn: () => LiveWorker, private readonly changed: () => void, private readonly apiSettings?: ApiSettings, private readonly knowledge?: Knowledge, private readonly resolutions?: Resolutions) { this.checkouts = new SourceCheckouts(sources, inventory); }
 
   start(id: string | null, prompt: string, retryId?: string): void {
     this.retrySaving();
@@ -246,7 +247,8 @@ export class LiveSupervisor {
                 } else if (message.type === 'knowledge') {
                   if (!active.requests || !this.knowledge || ++knowledgeCalls > KNOWLEDGE_LIMITS.calls) throw new Error('Knowledge request limit.');
                   this.conversations.assertClean(message.input);
-                  const result = await this.knowledge.retrieve(message.input as KnowledgeRequest, signal, { canPersistInvalidations: () => this.active === active && !active.environment.tainted && !this.conversations.isEphemeral(active.messageId) && !signal.aborted });
+                  const retrieved = await this.knowledge.retrieve(message.input as KnowledgeRequest, signal, { canPersistInvalidations: () => this.active === active && !active.environment.tainted && !this.conversations.isEphemeral(active.messageId) && !signal.aborted });
+                  const result = this.resolutions ? await this.resolutions.attach(retrieved, signal) : retrieved;
                   if (settled || this.active !== active || signal.aborted) return;
                   this.conversations.assertClean(result);
                   const { evidence: retained, derivation, ...bounded } = result;

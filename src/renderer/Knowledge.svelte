@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import Contradictions from './Contradictions.svelte';
+  import Resolutions from './Resolutions.svelte';
   import type { KnowledgeHit } from '../shared/knowledge';
-  let { messageId = '', recordId = '', openConversation, prepareRefresh }: { messageId?: string; recordId?: string; openConversation: (id: string) => void; prepareRefresh: (record: KnowledgeHit) => void } = $props();
+  let { messageId = '', recordId = '', writable, openConversation, prepareRefresh }: { messageId?: string; recordId?: string; writable: boolean; openConversation: (id: string) => void; prepareRefresh: (record: KnowledgeHit) => void } = $props();
   let records = $state<KnowledgeHit[]>([]);
   let error = $state('');
   let busy = $state(true);
@@ -81,6 +83,7 @@
         <blockquote>{record.claim}</blockquote>
         <p class="meta">{record.provenance === 'declared' ? 'Declared in source' : 'Statically inferred'} · {record.perspective === 'current' ? 'Current-source interpretation' : record.perspective === 'intended' ? 'Intended behavior, not implementation' : 'Historical decision, not current behavior'} · Sources {record.freshness}</p>
         <p class="meta">{record.validationNote}</p>
+        <Contradictions {record} />
         <button disabled={busy} onclick={() => showClaim(record.id)}>Knowledge details</button>
         {#if record.freshness === 'stale'}<button disabled={busy} onclick={() => prepareRefresh(record)}>Prepare refresh</button>{/if}
         {#if record.relations.length}<strong>Claim relationships</strong><ul>{#each record.relations as relation}<li>{relation.kind} · <a href={`#${relation.target}`} onclick={event => { event.preventDefault(); void showClaim(relation.target); }}>{relation.target}</a>{#each relation.owners ?? [] as owner}<button onclick={() => openConversation(owner.conversationId)}>Relationship source</button>{/each}</li>{/each}</ul>{/if}
@@ -89,6 +92,7 @@
             <div class="citation"><strong>{evidence.citation.path}:{evidence.citation.start}–{evidence.citation.end}</strong>
               <p class="meta">{evidence.citation.repository?.name ?? 'Non-Git document'} · {evidence.citation.folder}<br />{evidence.citation.revision ?? 'Revision unavailable'} · {evidence.citation.contentIdentity}</p>
               <button onclick={() => excerpt(record, evidence.index)}>Read retained excerpt</button>
+              {#if evidence.excerpt && !excerpts[`${record.id}:${evidence.index}`]}<pre>{evidence.excerpt}</pre>{/if}
               {#if excerpts[`${record.id}:${evidence.index}`]}<pre>{excerpts[`${record.id}:${evidence.index}`]}</pre>{/if}
               <button onclick={() => inspect(record, evidence.index)}>Inspect current file</button>
               {#if inspected[`${record.id}:${evidence.index}`]}<pre>{inspected[`${record.id}:${evidence.index}`]}</pre>{/if}
@@ -104,6 +108,7 @@
         <p class="identity">{record.id}</p>
       </article>
     {/each}
+    <Resolutions record={detailId ? records.find(record => record.id === detailId) : undefined} {writable} />
     <nav aria-label="Knowledge pages">
       <button disabled={busy || !pages.length} onclick={() => { const previous = pages.at(-1)!; pages = pages.slice(0, -1); void load(previous); }}>Previous page</button>
       <button disabled={busy || nextOffset === undefined} onclick={() => { pages = [...pages, offset]; void load(nextOffset); }}>Next page</button>
