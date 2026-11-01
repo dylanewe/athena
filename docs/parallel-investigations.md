@@ -1,0 +1,29 @@
+# Parallel investigations (#15)
+
+The main Pi agent can divide a broad question into one bounded `investigate` batch, with up to eight `{question, scope}` assignments. A legacy single-question call is still accepted. Scope guides relevance, preferably repository-local, and may include cross-repository handoff checks. It is **not** a permission boundary. Investigators receive only their assignment, global designated-folder metadata and query-selected untrusted knowledge leads, not the conversation or sibling transcripts. Only main owns delegation; child tools remain read-only list/search/read and structured finish.
+
+## User behavior and persistence
+
+Model settings exposes **Concurrent investigators (next job)**, default three, configurable from one to eight. SQLite retains the setting; each job freezes it at Send. Additional children queue in assignment order. There is still one active user job: Send rejects a second job rather than silently queuing future paid work.
+
+The conversation shows each task's question, relevance scope, queued/running/complete/failed/cancelled status, actual inspected scope, bounded findings and unresolved questions. Task results are provisional source interpretations, not runtime observations. Results stay in assignment order even when children finish out of order. Existing single-question detailed exploration remains separate from main history. Batch children return only bounded results (64 KiB each, existing finding/evidence/candidate bounds), not their full contexts. Main's combined context/history bound still applies.
+
+Task checkpoints/results live in the conversation database, separate from rebuildable knowledge. Restart cancels running/queued tasks; no generation resumes. Partial answers are explicitly labeled, exclude incomplete main history from future provider context, and preserve successful task results. Stop/window close/quit kills the utility and cancels the running and queued tail. Late checkpoints/results cannot revive a terminal job. Existing actual-environment exposure sealing still withholds derived content from durable storage.
+
+## Shared authority and limits
+
+Main freezes both configured role models using the existing conversation binding. Every provider request, including retries and final synthesis/naming, obtains current consent/credentials from main. Children never receive new allowances. Main serializes bounded RPC authority/source mutations with request-specific reply IDs; provider requests overlap after their grants. This also keeps environment-file decisions single-owned rather than racing permission waiters.
+
+The existing durable, non-refundable $1 **application** price gate covers API-key requests across roles/jobs; it is not reset or multiplied by child count and remains a conservative estimate rather than a provider billing guarantee. Cost reservation is synchronous and durable before credentials are released, including simultaneous grant completions. ChatGPT's existing Send consent and plan/enabled-credit accounting are unchanged. All roles and attempts share 50 model requests and the original 15-minute job deadline. Synchronous request-slot reservation precedes asynchronous authority resolution. Usage reports are correlated by request ID, accepted out of order exactly once, and aggregated without inventing missing usage.
+
+Only positively identified pre-content transient transport failures (network connection TypeErrors or HTTP 500/502/503/504) may retry, at most twice per request. Every attempt obtains another grant/reservation under the same limits. Authorization, credentials, quota/budget, malformed/incomplete streams, secret checks and cancellation do not automatically retry. SDK retries remain disabled. Already-streamed content is preserved on stop, not replayed into a retry. If all children fail, there is no paid synthesis call; with some successes main may synthesize an explicitly partial answer within the remaining shared limits.
+
+All children use the existing source/environment/secret boundary. No per-repository permission prompt or shell/write/execute/network capability is added. Environment/provider revocation stops the job, including queued work; later reapproval requires a new explicit job.
+
+## Publication
+
+Children stage candidates only. After final synthesis (or a partial outcome with successful children), main submits completed, unexposed task candidates through the existing serialized freshness/reference validator and transactional knowledge writer, in **assignment order**, never completion order. Candidate C IDs remain local to each task's publication; no guessed cross-child references or equivalence merging occur. Incomplete/truncated/unfresh candidates are withheld. Separate contradictory interpretations survive as separate records; only explicit conflict relationships certify a conflict label, not lexical guesses. A partial job can retain independently validated successful results; cancellation/revocation cannot start publication. Previously committed validated knowledge is not overwritten or rolled back by later child failure.
+
+## Deterministic coverage
+
+`api-conversations.test.ts` exercises real Pi agents and the supervisor with scripted HTTP: concurrency/queueing, frozen configuration, out-of-order completion/usage, shared request exhaustion including retries, isolation/no nesting, relevance versus access, conflicting candidates, partial success, bounded retries, stop/close/quit/revocation and late events. `api-settings.test.ts` races role grants through the real durable price gate. `live-supervisor.test.ts` checks the shared wall-clock deadline, source/secret/environment protections and bounded ChatGPT retries. `bridge.test.ts` checks settings validation/caller isolation. `workspace.spec.ts` uses the real Electron utility/preload/Svelte UI to verify task disclosures and concurrency/result persistence without restart generation. No live model calls are needed.

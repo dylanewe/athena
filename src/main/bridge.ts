@@ -52,6 +52,12 @@ export class DesktopGateway {
         this.jobs.environment(identifier(input.id), input.action as EnvironmentAction);
         break;
       }
+      case 'setMaxInvestigators': {
+        const input = object(payload, ['maximum']);
+        if (typeof input.maximum !== 'number') throw new Error('Invalid desktop request.');
+        this.conversations.setMaxInvestigators(input.maximum);
+        break;
+      }
       case 'cancel':
         noPayload(payload);
         this.jobs.cancel();

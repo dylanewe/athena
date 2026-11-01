@@ -23,6 +23,15 @@ export interface InvestigatorResult extends Findings {
   inspectedScope: string[];
   scopeTruncated: boolean;
 }
+export const INVESTIGATOR_DEFAULT = 3;
+export const INVESTIGATOR_MAX = 8;
+export interface InvestigatorTask {
+  id: string;
+  question: string;
+  scope: string;
+  status: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled';
+  result?: InvestigatorResult;
+}
 /** Local detailed exploration, never replayed into the conversational context or renderer. */
 export interface Exploration { history: Message[]; result: InvestigatorResult }
 export function validFindings(value: unknown, evidence: Evidence[]): value is Findings {

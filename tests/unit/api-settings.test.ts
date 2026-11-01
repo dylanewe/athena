@@ -25,6 +25,26 @@ const custom = (extra = {}) => JSON.stringify({ providers: { fake: { baseUrl: 'h
 function selectFake(service: ApiSettings) { service.select('api-key', 'fake/one', 'fake/one'); approve(service); return service.conversationConfig(); }
 
 describe('Athena API-key settings boundary', () => {
+  it('atomically reserves a shared durable price gate when concurrent role grants race after credential resolution', async () => {
+    const f = fixture();
+    const gatePath = join(f.directory, 'gate.sqlite');
+    const gate = new ModelSettings(gatePath, f.protection, { start: () => { throw new Error('No fixed test requested'); } }); settings.push(gate);
+    gate.reservePaidRequest(970_000_000);
+    let release!: () => void;
+    const resolved = new Promise<string>(resolve => { release = () => resolve('fake-parallel-key'); });
+    const service = new ApiSettings(join(f.directory, 'parallel.sqlite'), f.protection, async () => resolved, {}, amount => gate.reservePaidRequest(amount)); settings.push(service);
+    service.configure(custom().replace('$FAKE_KEY', '!shared-helper'));
+    const pinned = selectFake(service);
+    service.approveHelper(service.snapshot().helpers[0]!.id, true);
+    const pending = Promise.allSettled(['conversation', 'investigator', 'investigator'].map(role => service.grant(pinned, role as 'conversation' | 'investigator', 100, signal())));
+    release();
+    const outcomes = await pending;
+    expect(outcomes.map(outcome => outcome.status)).toEqual(['fulfilled', 'rejected', 'rejected']);
+    expect(gate.snapshot().gate.reservedUsd).toBe(0.989032);
+    gate.close();
+    const restarted = new ModelSettings(gatePath, f.protection, { start: () => { throw new Error('No fixed test requested'); } }); settings.push(restarted);
+    expect(restarted.snapshot().gate.reservedUsd).toBe(0.989032);
+  });
   it('defaults both role models to DeepSeek without selecting API-key billing or executing helpers', () => {
     const { service, helper } = fixture();
     expect(service.snapshot()).toMatchObject({ route: 'chatgpt', conversation: 'deepseek/deepseek-flash', investigator: 'deepseek/deepseek-flash', helpers: [] });

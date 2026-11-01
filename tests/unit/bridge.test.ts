@@ -32,6 +32,16 @@ test('the trusted desktop can start and select conversations through the narrow 
   expect(bridge.dispatch(trusted, 'workspace', undefined).conversations).toHaveLength(2);
 });
 
+test('only the trusted bridge changes bounded investigator concurrency without starting work', () => {
+  const { bridge, store } = setup();
+  expect(bridge.dispatch(trusted, 'workspace', undefined).maxInvestigators).toBe(3);
+  expect(bridge.dispatch(trusted, 'setMaxInvestigators', { maximum: 2 }).maxInvestigators).toBe(2);
+  for (const maximum of [0, 9, 1.5, '3', null]) expect(() => bridge.dispatch(trusted, 'setMaxInvestigators', { maximum })).toThrow();
+  expect(() => bridge.dispatch({ ...trusted, isMainFrame: false }, 'setMaxInvestigators', { maximum: 1 })).toThrow('Unauthorized');
+  expect(store.workspace().maxInvestigators).toBe(2);
+  expect(store.workspace().conversations).toEqual([]);
+});
+
 test.each([
   ['create', null],
   ['create', { title: '' }],

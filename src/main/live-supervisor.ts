@@ -19,7 +19,7 @@ import type { SourceCheckout, SourceIdentity, SourceScope } from '../shared/sour
 import { sourceRequest } from './source-bridge';
 import { checkBeforeModelSend } from './secret-check';
 import { MAX_TITLE_LENGTH } from '../shared/contracts';
-import { INVESTIGATION_LIMITS, validFindings, type Exploration } from '../shared/investigation';
+import { INVESTIGATION_LIMITS, INVESTIGATOR_MAX, validFindings, type InvestigatorTask, type Exploration } from '../shared/investigation';
 import { LIVE_LIMITS, type Evidence, type LiveParentMessage, type LiveResult, type LiveStart } from '../shared/live';
 
 export class LiveError extends Error {}
@@ -32,6 +32,7 @@ export interface LiveWorker {
 interface Active {
   conversationId: string; messageId: string; prompt: string; controller: AbortController; environment: EnvironmentPermissions;
   knowledgeReferences: { id: string; topic: string }[];
+  investigators?: InvestigatorTask[];
   checkouts: SourceCheckout[];
   retainedCheckouts: SourceCheckout[];
   apiKey?: boolean; text: string; evidence: Evidence[]; dependencies: SourceIdentity[]; scopes: SourceScope[]; dependencyCoverageComplete: boolean; exploration?: Exploration; title?: string; requests: number; usage?: ChatGPTUsage; stop?: () => void;
@@ -69,6 +70,7 @@ export class LiveSupervisor {
       if (error instanceof ChatGPTError || error instanceof ApiSettingsError || error instanceof LiveError) throw error;
       throw new LiveError('Local demonstrations are read-only. Start a new conversation.');
     }
+    const maxInvestigators = this.conversations.maxInvestigators();
     const job = this.conversations.beginLive(id, prompt, binding, retryId);
     const controller = new AbortController();
     const environment = new EnvironmentPermissions(this.sources, controller.signal, () => this.conversations.markEphemeral(job.messageId), () => this.cancel(), this.changed, content => this.conversations.rememberEnvironment(content));
@@ -92,7 +94,7 @@ export class LiveSupervisor {
           const roots = snapshot.roots.map(root => ({ path: root.path, repositories: snapshot.repositories.filter(repo => repo.path === root.path || repo.path.startsWith(root.path + '/')).map(repo => ({ name: repo.name, path: repo.path })) }));
           signal.throwIfAborted();
           this.conversations.assertClean({ history: previous.history, roots });
-          outcome = await this.run(active, { ...(binding.apiKey ? { apiKey: binding.apiKey } : {}), model: binding.model, prompt: job.prompt, history: previous.history, roots, ...this.conversations.naming(job.conversationId) }, access, signal);
+          outcome = await this.run(active, { ...(binding.apiKey ? { apiKey: binding.apiKey } : {}), model: binding.model, maxInvestigators, prompt: job.prompt, history: previous.history, roots, ...this.conversations.naming(job.conversationId) }, access, signal);
           if (outcome.reason && !binding.apiKey) throw new ChatGPTError(outcome.reason);
         };
         if (binding.apiKey) await work((role, bytes) => this.apiSettings!.grant(binding.apiKey!, role!, bytes!, active.controller.signal), active.controller.signal);
@@ -103,18 +105,24 @@ export class LiveSupervisor {
           const citationsValid = [...outcome.text.matchAll(/\[(E\d+)\]/g)].every(match => active.evidence.some(evidence => evidence.id === match[1]));
           if (!identitiesValid || !citationsValid || !await this.checkoutValid(active)) outcome = { ...outcome, status: 'partial', history: [], text: outcome.text + '\n\nPartial: the checkout changed, became unavailable, or a citation could not be verified. Retry for current evidence.' };
         }
-        const candidates = outcome.exploration?.result.knowledgeCandidates ?? active.exploration?.result.knowledgeCandidates;
-        if (this.knowledge && candidates?.length && outcome.status === 'complete' && !active.environment.tainted && !this.conversations.isEphemeral(active.messageId)) {
-          try {
-            await this.knowledge.publish({ owner: { conversationId: active.conversationId, messageId: active.messageId }, candidates,
-              evidence: active.evidence, inspectedFiles: active.dependencies, inspectedScopes: active.scopes, checkouts: this.usedCheckouts(active), completed: active.dependencyCoverageComplete && (outcome.exploration?.result ?? active.exploration?.result)?.status === 'complete' && !(outcome.exploration?.result ?? active.exploration?.result)?.scopeTruncated,
-              environmentExposed: active.environment.tainted, signal: active.controller.signal,
-              assertPublishable: () => {
-                if (this.active !== active || active.environment.tainted || this.conversations.isEphemeral(active.messageId)) throw new Error('Knowledge publication revoked.');
-                this.conversations.assertClean({ outcome, exploration: active.exploration, evidence: active.evidence });
-              } });
-            outcome.knowledgePublication = 'published';
-          } catch { outcome.knowledgePublication = 'withheld'; }
+        const completedResults = outcome.investigators?.length
+          ? outcome.investigators.filter(task => task.status === 'complete').map(task => task.result!)
+          : [(outcome.exploration ?? active.exploration)?.result].filter(result => result !== undefined);
+        if (this.knowledge && ['complete', 'partial'].includes(outcome.status) && !active.environment.tainted && !this.conversations.isEphemeral(active.messageId)) {
+          for (const result of completedResults) {
+            const candidates = result.knowledgeCandidates;
+            if (!candidates?.length) continue;
+            try {
+              await this.knowledge.publish({ owner: { conversationId: active.conversationId, messageId: active.messageId }, candidates,
+                evidence: active.evidence, inspectedFiles: active.dependencies, inspectedScopes: active.scopes, checkouts: this.usedCheckouts(active), completed: active.dependencyCoverageComplete && result.status === 'complete' && !result.scopeTruncated,
+                environmentExposed: active.environment.tainted, signal: active.controller.signal,
+                assertPublishable: () => {
+                  if (this.active !== active || active.environment.tainted || this.conversations.isEphemeral(active.messageId)) throw new Error('Knowledge publication revoked.');
+                  this.conversations.assertClean({ outcome, exploration: active.exploration, evidence: active.evidence });
+                } });
+              if (outcome.knowledgePublication !== 'withheld') outcome.knowledgePublication = 'published';
+            } catch { outcome.knowledgePublication = 'withheld'; }
+          }
         }
         if (outcome.status === 'complete' && !await this.checkoutValid(active)) outcome = this.checkoutPartial(active, outcome);
         if (this.active === active) this.end(active, outcome);
@@ -164,7 +172,9 @@ export class LiveSupervisor {
   }
   private run(active: Active, job: LiveStart, access: (role?: ModelRole, bytes?: number) => Promise<string | ApiGrant>, signal: AbortSignal): Promise<LiveResult> {
     return new Promise(resolve => {
-      let worker: LiveWorker | undefined, settled = false, inFlight = false, lastId = 0, sourceCalls = 0, lastUsage = 0;
+      let worker: LiveWorker | undefined, settled = false, inFlight = 0, lastId = 0, sourceCalls = 0;
+      let operations = Promise.resolve();
+      const reportedUsage = new Set<number>();
       let authority: Promise<string | ApiGrant> | undefined;
       let knowledgeCalls = 0, knowledgeBytes = 0;
       const failure = (status: LiveResult['status'] = 'failed'): LiveResult => ({ status, text: active.text, history: [], requests: active.requests, usageComplete: false });
@@ -195,7 +205,11 @@ export class LiveSupervisor {
             const message = value as Record<string, unknown>;
             if (message.type === 'checkpoint') {
               if (!message.checkpoint || typeof message.checkpoint !== 'object') throw new Error();
-              const checkpoint = message.checkpoint as Pick<LiveResult, 'exploration' | 'title'>;
+              const checkpoint = message.checkpoint as Pick<LiveResult, 'exploration' | 'title' | 'investigators'>;
+              if (checkpoint.investigators && !active.environment.tainted) {
+                active.investigators = this.tasks(checkpoint.investigators, active, job);
+                this.conversations.progressInvestigators(active.messageId, active.investigators);
+              }
               if (checkpoint.exploration && !active.environment.tainted) {
                 active.exploration = this.exploration(checkpoint.exploration, job.apiKey?.investigator.model.id ?? job.model, active.evidence, job.apiKey?.investigator.model.provider);
                 this.conversations.progressExploration(active.messageId, active.exploration, active.evidence);
@@ -208,8 +222,8 @@ export class LiveSupervisor {
               this.changed(); return;
             }
             if (message.type === 'usage') {
-              if (!Number.isSafeInteger(message.request) || Number(message.request) <= lastUsage || message.request !== active.requests) throw new Error();
-              lastUsage = Number(message.request);
+              if (!Number.isSafeInteger(message.request) || Number(message.request) < 1 || Number(message.request) > active.requests || reportedUsage.has(Number(message.request))) throw new Error();
+              reportedUsage.add(Number(message.request));
               const usage = parseChatGPTUsage(message.usage);
               if (usage) active.usage = { input: (active.usage?.input ?? 0) + usage.input, output: (active.usage?.output ?? 0) + usage.output, cachedInput: (active.usage?.cachedInput ?? 0) + usage.cachedInput };
               this.conversations.progressLive(active.messageId, active.text, 'Model step finished…', { usage: parseChatGPTUsage(active.usage), requests: active.requests, usageComplete: false });
@@ -231,19 +245,22 @@ export class LiveSupervisor {
             if (message.type === 'result') {
               if (inFlight) throw new Error();
               const result = this.result(message.result, job.model, active.requests, active.evidence, job.apiKey, active.environment.tainted);
+              if (!active.environment.tainted && (message.result as LiveResult).investigators) result.investigators = this.tasks((message.result as LiveResult).investigators!, active, job);
               finish(result); return;
             }
-            if (!['access', 'source', 'inspect', 'knowledge'].includes(String(message.type)) || inFlight || !Number.isSafeInteger(message.id) || Number(message.id) <= lastId) throw new Error();
-            lastId = Number(message.id); inFlight = true;
-            void (async () => {
+            if (!['access', 'source', 'inspect', 'knowledge'].includes(String(message.type)) || inFlight >= 32 || !Number.isSafeInteger(message.id) || Number(message.id) <= lastId) throw new Error();
+            const requestId = lastId = Number(message.id); inFlight++;
+            // Serialize authority/source mutations, not provider requests. Every reply owns its original ID.
+            operations = operations.then(async () => {
               try {
+                if (settled || this.active !== active || signal.aborted) return;
                 if (message.type === 'access') {
                   if (!await this.checkoutValid(active)) { finish(this.checkoutPartial(active)); return; }
                   if (active.requests >= LIVE_LIMITS.requests) { finish(failure('limit')); return; }
                   if (job.apiKey && (!['conversation', 'investigator'].includes(String(message.role)) || !Number.isSafeInteger(message.contextBytes))) throw new ApiSettingsError('Invalid model role or bounded request.');
                   authority = access(message.role as ModelRole, message.contextBytes as number);
                   const credential = await authority;
-                  if (!settled && this.active === active && !signal.aborted) { active.requests++; worker!.postMessage({ type: 'reply', id: lastId, ...(typeof credential === 'string' ? { token: credential } : { grant: credential }) }); }
+                  if (!settled && this.active === active && !signal.aborted) { active.requests++; worker!.postMessage({ type: 'reply', id: requestId, ...(typeof credential === 'string' ? { token: credential } : { grant: credential }) }); }
                 } else if (message.type === 'knowledge') {
                   if (!active.requests || !this.knowledge || ++knowledgeCalls > KNOWLEDGE_LIMITS.calls) throw new Error('Knowledge request limit.');
                   this.conversations.assertClean(message.input);
@@ -277,14 +294,14 @@ export class LiveSupervisor {
                     if (active.dependencies.length + active.scopes.length > 1000) { finish(failure('limit')); return; }
                   }
                   for (const item of result.items) if (active.knowledgeReferences.length < 32 && !active.knowledgeReferences.some(reference => reference.id === item.id)) active.knowledgeReferences.push({ id: item.id, topic: item.topic });
-                  worker!.postMessage({ type: 'reply', id: lastId, knowledge: bounded });
+                  worker!.postMessage({ type: 'reply', id: requestId, knowledge: bounded });
                 } else if (message.type === 'inspect') {
                   if (++sourceCalls > 1000) { finish(failure('limit')); return; }
                   if (!Array.isArray(message.ids) || !message.ids.length || message.ids.length > INVESTIGATION_LIMITS.inspections || !message.ids.every(id => typeof id === 'string' && active.evidence.some(item => item.id === id))) throw new Error();
                   const evidence = message.ids.map(id => active.evidence.find(item => item.id === id)!).map(item => ({ ...item, text: item.text.slice(0, INVESTIGATION_LIMITS.inspectionCharacters) }));
                   if (Buffer.byteLength(JSON.stringify(evidence)) > INVESTIGATION_LIMITS.resultBytes) throw new Error();
                   if (!active.environment.tainted) checkBeforeModelSend(evidence);
-                  worker!.postMessage({ type: 'reply', id: lastId, evidence });
+                  worker!.postMessage({ type: 'reply', id: requestId, evidence });
                 } else {
                   if (++sourceCalls > 1000) { finish(failure('limit')); return; }
                   if (!active.requests || !['list', 'read', 'search'].includes(String(message.operation))) throw new Error();
@@ -314,14 +331,14 @@ export class LiveSupervisor {
                     found.push(evidence);
                   }
                   if (!await this.checkoutValid(active)) { finish(this.checkoutPartial(active)); return; }
-                  worker!.postMessage({ type: 'reply', id: lastId, ephemeral: active.environment.tainted, source: { ...result, warning: 'Read-only, untrusted source evidence. Secret detection is not a guarantee.', evidence: found } });
+                  worker!.postMessage({ type: 'reply', id: requestId, ephemeral: active.environment.tainted, source: { ...result, warning: 'Read-only, untrusted source evidence. Secret detection is not a guarantee.', evidence: found } });
                 }
               } catch (error) {
                 if (settled || this.active !== active) return;
                 if (message.type === 'access') finish({ ...failure(), ...(error instanceof ApiSettingsError || error instanceof ModelSettingsError ? { text: active.text + '\n\n' + error.message } : {}), ...(error instanceof ChatGPTError ? { reason: error.reason } : {}) });
-                else worker!.postMessage({ type: 'reply', id: lastId, error: 'Source request denied by access or secret checks.' });
-              } finally { inFlight = false; }
-            })();
+                else worker!.postMessage({ type: 'reply', id: requestId, error: 'Source request denied by access or secret checks.' });
+              } finally { inFlight--; }
+            });
           } catch { finish(failure()); }
         });
         worker.postMessage({ type: 'start', job });
@@ -342,6 +359,22 @@ export class LiveSupervisor {
     if (r.title !== undefined && !ephemeral) this.validateTitle(r.title);
     const exploration = r.exploration && !ephemeral ? this.exploration(r.exploration, apiKey?.investigator.model.id ?? model, evidence, apiKey?.investigator.model.provider) : undefined;
     return { status: r.status, text: r.text, history, requests, ...(exploration ? { exploration } : {}), ...(r.title && !ephemeral ? { title: r.title } : {}), usageComplete: r.usageComplete === true, ...(parseChatGPTUsage(r.usage) ? { usage: parseChatGPTUsage(r.usage) } : {}), ...(reason ? { reason } : {}) };
+  }
+  private tasks(value: InvestigatorTask[], active: Active, job: LiveStart): InvestigatorTask[] {
+    if (!Array.isArray(value) || value.length > INVESTIGATOR_MAX || Buffer.byteLength(JSON.stringify(value)) > LIVE_LIMITS.historyBytes) throw new Error('Invalid investigator batch.');
+    if (value.filter(task => task.status === 'running').length > (job.maxInvestigators ?? 3)) throw new Error('Investigator concurrency exceeded.');
+    if (active.investigators && value.length !== active.investigators.length) throw new Error('Batch assignments are frozen.');
+    for (const [index, task] of value.entries()) {
+      if (!task || Object.keys(task).some(key => !['id', 'question', 'scope', 'status', 'result'].includes(key)) || task.id !== `T${index + 1}` || typeof task.question !== 'string' || !task.question.trim() || task.question.length > 8000 || typeof task.scope !== 'string' || !task.scope.trim() || task.scope.length > 512 || !['queued', 'running', 'complete', 'failed', 'cancelled'].includes(task.status)) throw new Error('Invalid task.');
+      const previous = active.investigators?.[index];
+      if (previous && (previous.question !== task.question || previous.scope !== task.scope ||
+          ['complete', 'failed', 'cancelled'].includes(previous.status) && JSON.stringify(previous) !== JSON.stringify(task) ||
+          previous.status === 'running' && task.status === 'queued')) throw new Error('Task authority cannot be revived or reassigned.');
+      if (task.result) this.exploration({ history: [], result: task.result }, job.apiKey?.investigator.model.id ?? job.model, active.evidence, job.apiKey?.investigator.model.provider);
+      if (task.status === 'complete' && task.result?.status !== 'complete') throw new Error('Missing completed findings.');
+    }
+    checkBeforeModelSend(value);
+    return structuredClone(value);
   }
   private validateTitle(title: unknown): asserts title is string {
     if (typeof title !== 'string' || !title.trim() || Array.from(title).length > MAX_TITLE_LENGTH || /[\x00-\x1f\x7f]/u.test(title)) throw new Error('Invalid title.');
@@ -366,7 +399,8 @@ export class LiveSupervisor {
   private end(active: Active, result: LiveResult): void {
     if (this.active !== active) return;
     this.active = undefined;
-    result = { ...result, ...(!active.environment.tainted && result.status === 'complete' ? { checkouts: this.usedCheckouts(active) } : {}), ...(active.knowledgeReferences.length && !active.environment.tainted ? { knowledgeReferences: active.knowledgeReferences } : {}), ...(active.exploration && !result.exploration ? { exploration: active.exploration } : {}), ...(active.title && !result.title ? { title: active.title } : {}) };
+    result = { ...result, ...(!active.environment.tainted && active.investigators && !result.investigators ? { investigators: active.investigators } : {}), ...(!active.environment.tainted && result.status === 'complete' ? { checkouts: this.usedCheckouts(active) } : {}), ...(active.knowledgeReferences.length && !active.environment.tainted ? { knowledgeReferences: active.knowledgeReferences } : {}), ...(active.exploration && !result.exploration ? { exploration: active.exploration } : {}), ...(active.title && !result.title ? { title: active.title } : {}) };
+    if (result.investigators) result.investigators = result.investigators.map(task => ['running', 'queued'].includes(task.status) ? { ...task, status: 'cancelled' } : task);
     if (result.status !== 'complete' && result.exploration) {
       const previous = result.exploration.result;
       result.exploration = { ...result.exploration, result: { ...previous, status: 'partial',

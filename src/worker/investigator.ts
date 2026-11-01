@@ -3,7 +3,7 @@ import type { Message } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import { sourceTools } from '../main/source-tools';
 import { LIVE_LIMITS, type Evidence, type LiveStart } from '../shared/live';
-import { findingsSchema, INVESTIGATION_LIMITS, validFindings, type Exploration, type InvestigatorResult } from '../shared/investigation';
+import { findingsSchema, INVESTIGATION_LIMITS, INVESTIGATOR_DEFAULT, INVESTIGATOR_MAX, validFindings, type InvestigatorTask, type Exploration, type InvestigatorResult } from '../shared/investigation';
 import type { LiveCapabilities } from './live-agent';
 import { retainedHistory, SOURCE_INSTRUCTIONS } from './agent-context';
 
@@ -16,18 +16,16 @@ interface InvestigatorRuntime {
   check(material: unknown): void;
   limit(notice: string): void;
   progress(activity: string): void;
+  tasks?(tasks: InvestigatorTask[]): void;
 }
 
-/** One isolated context per user job; only bounded findings cross back to main. */
-export function investigatorTool(roots: LiveStart['roots'], runtime: InvestigatorRuntime, signal: AbortSignal): AgentTool {
-  let delegated = false;
+/** Single isolated execution; only the main-owned batch scheduler can construct it. */
+function singleInvestigator(roots: LiveStart['roots'], runtime: InvestigatorRuntime, signal: AbortSignal): AgentTool {
   return {
     name: 'investigate', label: 'Delegate investigation',
     description: 'Delegate fresh source exploration to one isolated read-only investigator. Available once per user job; returns bounded findings and cited evidence, never its full transcript. Include likely repository names/paths and the precise question.',
     parameters: Type.Object({ question: Type.String({ minLength: 1, maxLength: 8000 }) }, { additionalProperties: false }),
     async execute(_id, params) {
-      if (delegated) throw new Error('Only one investigator is available per job. Use its findings or ask a follow-up question.');
-      delegated = true;
       const observed: Evidence[] = [], scope: string[] = [];
       let lastHistory: Message[] = [], exploration: Exploration | undefined;
       let summary: InvestigatorResult | undefined, scopeTruncated = false;
@@ -78,9 +76,57 @@ export function investigatorTool(roots: LiveStart['roots'], runtime: Investigato
       investigator.subscribe(event => { if (event.type === 'turn_end' && !signal.aborted) checkpoint(); });
       investigator.finishTurn = async () => summary ? { action: 'end' } : undefined;
       try { await investigator.prompt((params as { question: string }).question); }
-      finally { checkpoint(); }
+      finally { if (!signal.aborted) checkpoint(); }
       runtime.check(exploration!.result);
       return { content: [{ type: 'text', text: JSON.stringify(exploration!.result) }], details: {} };
+    },
+  };
+}
+
+/** One bounded batch per job. Scope guides relevance, never grants or restricts source authority. */
+export function investigatorTool(roots: LiveStart['roots'], runtime: InvestigatorRuntime, signal: AbortSignal, maximum = INVESTIGATOR_DEFAULT): AgentTool {
+  if (!Number.isInteger(maximum) || maximum < 1 || maximum > INVESTIGATOR_MAX) throw new Error('Invalid investigator concurrency.');
+  let delegated = false;
+  return {
+    name: 'investigate', label: 'Delegate investigations',
+    description: 'Delegate one batch of up to eight isolated investigators. Split broad questions into bounded questions and relevance scopes, preferably repository-local; cross-repository handoff verification is allowed. All children share designated-folder permissions and job limits. Additional tasks queue; no nested delegation. Returns bounded structured findings, never transcripts. Available once per job.',
+    parameters: Type.Union([
+      Type.Object({ question: Type.String({ minLength: 1, maxLength: 8000 }) }, { additionalProperties: false }),
+      Type.Object({ tasks: Type.Array(Type.Object({ question: Type.String({ minLength: 1, maxLength: 8000 }), scope: Type.String({ minLength: 1, maxLength: 512 }) }, { additionalProperties: false }), { minItems: 1, maxItems: INVESTIGATOR_MAX }) }, { additionalProperties: false }),
+    ]),
+    async execute(_id, params) {
+      if (delegated) throw new Error('Only one investigator batch is available per job. Use its findings or ask a follow-up question.');
+      signal.throwIfAborted(); delegated = true;
+      const input = params as { question?: string; tasks?: { question: string; scope: string }[] };
+      const tasks: InvestigatorTask[] = (input.tasks ?? [{ question: input.question!, scope: 'Question-selected eligible sources' }]).map((task, index) => ({ ...task, id: `T${index + 1}`, status: 'queued' }));
+      const notify = () => { if (!signal.aborted) runtime.tasks?.(structuredClone(tasks)); };
+      const cancel = () => { for (const task of tasks) if (task.status === 'queued' || task.status === 'running') task.status = 'cancelled'; };
+      signal.addEventListener('abort', cancel, { once: true });
+      notify();
+      let next = 0;
+      try {
+        await Promise.all(Array.from({ length: Math.min(maximum, tasks.length) }, async () => {
+          while (!signal.aborted && next < tasks.length) {
+            const task = tasks[next++]!;
+            task.status = 'running'; notify();
+            const child = singleInvestigator(roots, { ...runtime, checkpoint: exploration => {
+              if (signal.aborted) return;
+              task.result = exploration.result;
+              if (!input.tasks) runtime.checkpoint(exploration);
+              notify();
+            } }, signal);
+            try {
+              await child.execute(task.id, { question: `${task.question}\nRelevance scope (not an access restriction): ${task.scope}` }, signal);
+              task.status = signal.aborted ? 'cancelled' : task.result?.status === 'complete' ? 'complete' : 'failed';
+            } catch { task.status = signal.aborted ? 'cancelled' : 'failed'; }
+            notify();
+          }
+        }));
+      } finally { signal.removeEventListener('abort', cancel); }
+      signal.throwIfAborted();
+      const result = input.tasks ? { tasks } : tasks[0]!.result;
+      runtime.check(result);
+      return { content: [{ type: 'text', text: JSON.stringify(result) }], details: {} };
     },
   };
 }

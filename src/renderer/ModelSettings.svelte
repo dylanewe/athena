@@ -4,6 +4,7 @@
   import ApiModelSettings from './ApiModelSettings.svelte';
   import { CONNECTION_MAX_TOKENS, CONNECTION_PROMPT, CONNECTION_TIMEOUT_MS, PROVIDER_CONSENT, type ModelWorkspace } from '../shared/models';
 
+  let { maxInvestigators, concurrencyBusy, setConcurrency }: { maxInvestigators: number; concurrencyBusy: boolean; setConcurrency: (maximum: number) => void } = $props();
   let settings = $state<ModelWorkspace | null>(null);
   let error = $state('');
   let busy = $state(false);
@@ -52,6 +53,15 @@
     <span class="demo-badge">No automatic requests</span>
   </header>
   <div class="settings-content">
+    <section aria-label="Investigator concurrency">
+      <label>Concurrent investigators (next job)
+        <select aria-label="Concurrent investigators" value={maxInvestigators} disabled={concurrencyBusy}
+          onchange={event => setConcurrency(Number(event.currentTarget.value))}>
+          {#each [1, 2, 3, 4, 5, 6, 7, 8] as maximum}<option value={maximum}>{maximum}</option>{/each}
+        </select>
+      </label>
+      <p>Default three. Extra child tasks queue within the current job; future paid user jobs never queue. All tasks share permissions and cost, request and time limits.</p>
+    </section>
     <p class="intro">Choose when Athena contacts a model. Route and role selections for new conversations are independent of the fixed DeepSeek connection test below. Connection testing never includes repository material.</p>
     {#if error}<div class="settings-error" role="alert">{error}</div>{/if}
     {#if settings}

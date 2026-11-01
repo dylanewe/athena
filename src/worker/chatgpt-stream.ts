@@ -11,7 +11,7 @@ export function chatgptModel(id: string): Model<'openai-responses'> {
     reasoning: false, input: ['text'], contextWindow: 0, maxTokens: 0,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 }
-export interface StreamObservation { usage?: ChatGPTUsage; failure?: ChatGPTFailure }
+export interface StreamObservation { usage?: ChatGPTUsage; failure?: ChatGPTFailure; transient?: boolean }
 
 /** Direct Pi wire adapter only: no provider registry, ambient auth, or OAuth ownership. */
 export function chatgptStream(model: string, context: TranscriptContext, token: string, signal: AbortSignal,
@@ -39,8 +39,11 @@ export function chatgptStream(model: string, context: TranscriptContext, token: 
           if (Buffer.byteLength(options.body) > 2 * 1024 * 1024) return fail('context');
           check(options.body);
           sent = true;
-          const response = await http(url, { ...options, redirect: 'error' });
+          let response: Response;
+          try { response = await http(url, { ...options, redirect: 'error' }); }
+          catch (error) { observation.transient = error instanceof TypeError && !signal.aborted; throw error; }
           if (!response.ok) {
+            observation.transient = [500, 502, 503, 504].includes(response.status);
             let body = {};
             try { body = await readJSON(response); } catch { /* Only application-authored errors escape. */ }
             return fail(responseFailure(response.status, body));

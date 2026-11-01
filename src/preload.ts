@@ -111,6 +111,7 @@ const bridge: DesktopBridge = {
     documentation: (name, locations) => inventoryRequest('documentation', { name, locations }),
   },
   workspace: () => request('workspace'),
+  setMaxInvestigators: maximum => request('setMaxInvestigators', { maximum }),
   select: conversationId => request('select', { conversationId }),
   send: (conversationId, text) => request('send', { conversationId, text }),
   cancel: () => request('cancel'),

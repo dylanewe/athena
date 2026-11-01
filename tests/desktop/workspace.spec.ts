@@ -64,6 +64,33 @@ function resume() { if (pausedWorker) { try { process.kill(pausedWorker, 'SIGCON
 test.beforeEach(async () => { directory = realpathSync(mkdtempSync(join(tmpdir(), 'athena-desktop-'))); await launch(); });
 test.afterEach(async () => { resume(); await application?.close().catch(() => {}); rmSync(directory, { recursive: true, force: true }); });
 
+test('parallel investigator scope/status and configurable concurrency survive restart through the real utility and bridge', async () => {
+  await page.getByRole('button', { name: 'Model settings', exact: true }).click();
+  await expect(page.getByLabel('Concurrent investigators', { exact: true })).toHaveValue('3');
+  await page.getByLabel('Concurrent investigators', { exact: true }).selectOption('2');
+  await expect.poll(() => page.evaluate(async () => (await window.athena.workspace()).maxInvestigators)).toBe(2);
+  const root = join(directory, 'repo'); mkdirSync(root); writeFileSync(join(root, 'answer.ts'), 'export const answer = 42;\n');
+  await installLiveFixture(application, directory, root, { parallel: true });
+  await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] }); }, root);
+  await page.evaluate(() => window.athena.inventory.chooseFolder());
+  await page.getByRole('button', { name: 'Repositories', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'I understand the folder permission' }).check();
+  await page.getByRole('button', { name: 'Save consent and discover' }).click();
+  await expect.poll(() => page.evaluate(async () => (await window.athena.inventory.snapshot()).discovery.status)).not.toBe('running');
+  await newConversation(); await send('Investigate four boundaries in parallel');
+  await expect.poll(() => page.evaluate(async () => (await window.athena.workspace()).activeConversationId)).toBeNull();
+  await page.getByText('Investigator tasks (4)', { exact: true }).click();
+  for (const [index, scope] of ['API', 'Worker', 'Storage', 'Handoff'].entries()) await expect(page.getByText(`T${index + 1} · ${scope} · complete`, { exact: true })).toBeVisible();
+  await page.getByText('T4 · Handoff · complete', { exact: true }).click();
+  await expect(page.getByText('Find the exported answer for Handoff', { exact: true })).toBeVisible();
+  await expect(page.getByRole('log')).toContainText('The value is 42');
+  await application.close(); await launch();
+  expect(await page.evaluate(async () => (await window.athena.workspace()).maxInvestigators)).toBe(2);
+  const tasks = await page.evaluate(async () => (await window.athena.workspace()).selected!.messages.at(-1)!.investigators);
+  expect(tasks?.map(task => [task.scope, task.status])).toEqual(['API', 'Worker', 'Storage', 'Handoff'].map(scope => [scope, 'complete']));
+  expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: { workers: number } }).liveFixture.workers)).toBe(0);
+});
+
 test('dependency explorer groups progressive services, inspects connection evidence, expands neighbors and prepares unpaid follow-up drafts', async () => {
   const root = join(directory, 'repo'); mkdirSync(join(root, '.git'), { recursive: true });
   const implementation = 'export const API = serve(); export const Worker = consume("orders"); Worker.store("postgres://orders"); // Intended: GET /planned. Historically API deployed with Worker.\n';
@@ -417,7 +444,7 @@ test('local preview can be revoked from the UI without external permission and e
 });
 
 test('renderer stays sandboxed with narrow bridge and rejects malformed retry requests', async () => {
-  expect(await page.evaluate(() => ({ node: typeof (globalThis as Record<string, unknown>).process, require: typeof (globalThis as Record<string, unknown>).require, bridge: Object.keys(window.athena).sort() }))).toEqual({ node: 'undefined', require: 'undefined', bridge: ['apiModels','cancel','chatgpt','environment','inventory','knowledge','models','onChange','resolutions','retry','select','send','sources','workspace'] });
+  expect(await page.evaluate(() => ({ node: typeof (globalThis as Record<string, unknown>).process, require: typeof (globalThis as Record<string, unknown>).require, bridge: Object.keys(window.athena).sort() }))).toEqual({ node: 'undefined', require: 'undefined', bridge: ['apiModels','cancel','chatgpt','environment','inventory','knowledge','models','onChange','resolutions','retry','select','send','setMaxInvestigators','sources','workspace'] });
   expect(await application.evaluate(({ app, BrowserWindow }) => app.getAppMetrics().find(metric => metric.pid === BrowserWindow.getAllWindows()[0].webContents.getOSProcessId())?.sandboxed)).toBe(true);
   for (const url of ['https://example.com', 'file:///etc/hosts']) expect(await page.evaluate(async url => { try { await fetch(url); return 'accessible'; } catch { return 'denied'; } }, url)).toBe('denied');
   expect(await page.evaluate(async () => { try { await window.athena.retry('arbitrary-path'); return 'accepted'; } catch { return 'rejected'; } })).toBe('rejected');

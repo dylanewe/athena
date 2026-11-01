@@ -484,15 +484,15 @@ test.each(['.env', '../outside.ts'])('tool calls cannot bypass source policy for
   expect(db.workspace().selected!.messages.at(-1)?.evidence).toEqual([]);
 });
 
-test('an investigator provider failure preserves evidence without automatically retrying either role', async () => {
+test('an investigator transient failure preserves evidence and retries at most twice within the shared job', async () => {
   const scripts = [functionResponse('investigate', { question: 'Find the answer' }), toolResponse(root)];
   http = async (_url, init) => {
     requests.push(JSON.parse(String(init?.body)));
     return scripts.length ? new Response(new TextEncoder().encode(scripts.shift())) : new Response('', { status: 503 });
   };
   jobs.start(null, 'Find the answer'); await idle();
-  expect(requests).toHaveLength(3);
-  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'failed', investigation: { status: 'partial' }, evidence: [{ id: 'E1' }], requests: 3, usageComplete: false });
+  expect(requests).toHaveLength(5);
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'failed', investigation: { status: 'partial' }, evidence: [{ id: 'E1' }], requests: 5, usageComplete: false });
 });
 
 test('suspected credentials in the user prompt are withheld before persistence or transport', () => {
@@ -552,6 +552,20 @@ test('streamed partial text is retained on Stop but never becomes future model c
   const conversation = db.workspace().selected!;
   expect(conversation.messages.at(-1)).toMatchObject({ status: 'cancelled', text: expect.stringContaining('Useful partial answer') });
   expect(db.liveContext(conversation.id).history).toEqual([]);
+});
+
+test('all parallel children and the queued tail share the original job wall-clock deadline', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  http = async (_url, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    if (requests.length === 1) return new Response(new TextEncoder().encode(functionResponse('investigate', { tasks: ['one', 'two', 'three', 'queued'].map(scope => ({ scope, question: `Inspect ${scope}` })) })));
+    return new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
+  };
+  jobs.start(null, 'A bounded parallel job');
+  await vi.waitFor(() => expect(requests).toHaveLength(4));
+  await vi.advanceTimersByTimeAsync(LIVE_LIMITS.milliseconds);
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'limit', requests: 4, investigators: Array.from({ length: 4 }, () => ({ status: 'cancelled' })) });
+  expect(workers[0].killed).toBe(true); expect(requests).toHaveLength(4);
 });
 
 test('wall-clock limit cancels a stalled provider without any automatic continuation', async () => {

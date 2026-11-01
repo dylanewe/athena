@@ -172,7 +172,7 @@
   {:else if section === 'flows'}
     {#key flowNavigation}<FlowsView {...flowOrigin} {openKnowledge} openExplorer={id => openExplorer(id)} openConversation={id => { void select(id); }} remember={id => flowOrigin = { ...flowOrigin, recordId: id }} />{/key}
   {:else if section === 'models'}
-    <ModelSettingsView />
+    <ModelSettingsView maxInvestigators={workspace?.maxInvestigators ?? 3} concurrencyBusy={busy} setConcurrency={maximum => { void change(() => window.athena.setMaxInvestigators(maximum)); }} />
   {:else}
     <main>
       {#if workspace?.environment?.length}
@@ -206,6 +206,22 @@
                   <button type="button" onclick={() => openFlows({ messageId: message.id })}>Open investigation flows</button>
                 {:else if message.knowledgePublication === 'withheld'}
                   <p class="draft-note">Knowledge not retained: validation, freshness or local storage checks did not complete. The answer remains available.</p>
+                {/if}
+                {#if message.investigators?.length}
+                  <details class="evidence" open={message.status === 'running'}><summary>Investigator tasks ({message.investigators.length})</summary>
+                    <p class="draft-note">Shared permissions and job limits. Scopes guide relevance, not access. Static inspection, not runtime tracing.</p>
+                    {#each message.investigators as task (task.id)}
+                      <details><summary>{task.id} · {task.scope} · {task.status}</summary>
+                        <p>{task.question}</p>
+                        {#if task.result}
+                          <ul>{#each task.result.inspectedScope as location}<li>{location}</li>{/each}</ul>
+                          {#each task.result.findings as finding}<p>{finding.claim} · {finding.support} {finding.evidenceIds.map(id => `[${id}]`).join(' ')}</p>{/each}
+                          {#each task.result.unresolvedQuestions as question}<p class="draft-note">{question}</p>{/each}
+                          {#if task.result.scopeTruncated}<p class="draft-note">Scope truncated.</p>{/if}
+                        {/if}
+                      </details>
+                    {/each}
+                  </details>
                 {/if}
                 {#if message.investigation}
                   <details class="evidence"><summary>Investigation · {message.status === 'running' ? 'in progress' : message.investigation.status}</summary>

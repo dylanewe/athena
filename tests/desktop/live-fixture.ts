@@ -5,9 +5,10 @@ import { pathToFileURL } from 'node:url';
 
 interface ScriptedInvestigation { question: string; paths: string[]; candidates: unknown[]; text: string }
 /** Isolated fake saved registration; OAuth itself is exercised in chatgpt.spec.ts. */
-export async function installLiveFixture(application: ElectronApplication, directory: string, root?: string, options: boolean | { investigation: ScriptedInvestigation } = false, knowledge = false, reuse = false, discrepancy = false, architecture = false) {
+export async function installLiveFixture(application: ElectronApplication, directory: string, root?: string, options: boolean | { investigation?: ScriptedInvestigation; parallel?: boolean } = false, knowledge = false, reuse = false, discrepancy = false, architecture = false) {
   const environment = typeof options === 'boolean' ? options : false;
   const investigation = typeof options === 'object' ? options.investigation : undefined;
+  const parallel = typeof options === 'object' && options.parallel === true;
   const fixture = join(directory, 'live-worker-fixture.mjs');
   writeFileSync(fixture, `
     const frame = value => 'data: ' + JSON.stringify(value) + '\\n\\n';
@@ -43,7 +44,7 @@ export async function installLiveFixture(application: ElectronApplication, direc
         }
       }
       if (${JSON.stringify(root ?? '')} && !${JSON.stringify(reuse)}) {
-        if (hasTool('investigate') && !called('investigate')) return call('investigate', {question:${JSON.stringify(investigation?.question ?? 'Find the exported answer')}});
+        if (hasTool('investigate') && !called('investigate')) return call('investigate', ${parallel ? JSON.stringify({ tasks: ['API', 'Worker', 'Storage', 'Handoff'].map(scope => ({ scope, question: 'Find the exported answer for ' + scope })) }) : JSON.stringify({ question: investigation?.question ?? 'Find the exported answer' })});
         if (hasTool('sources_read')) {
           if (${JSON.stringify(!!investigation)}) {
             const paths = ${JSON.stringify(investigation?.paths ?? [])};

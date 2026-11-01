@@ -18,7 +18,10 @@ export function apiStream(model: Model<Api>, context: TranscriptContext, grant: 
     const prefix = base.pathname.replace(/\/$/u, '');
     if (url.origin !== base.origin || !url.pathname.startsWith(prefix + '/') || (url.search && !(model.api === 'anthropic-messages' && url.search === '?beta=true')) || url.hash) throw new Error('Endpoint changed.');
     const requestSignal = AbortSignal.any([deadline, ...(init?.signal ? [init.signal] : [])]);
-    const response = await http(input, { ...init, redirect: 'error', signal: requestSignal });
+    let response: Response;
+    try { response = await http(input, { ...init, redirect: 'error', signal: requestSignal }); }
+    catch (error) { observation.transient = error instanceof TypeError && !requestSignal.aborted; throw error; }
+    observation.transient = [500, 502, 503, 504].includes(response.status);
     if (!response.body) return response;
     let size = 0;
     let abort: (() => void) | undefined;

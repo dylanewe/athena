@@ -89,6 +89,183 @@ test('real Pi agents use separate pinned API-key providers, preserve source boun
   expect(binding.apiKey?.investigator.model.id).toBe('investigator-one');
 });
 
+test('a main-assigned batch runs three investigators concurrently, queues the fourth, and retains assignment order', async () => {
+  const releases = new Map<string, () => void>();
+  let running = 0, peak = 0;
+  http = async (url, init) => {
+    const body = JSON.parse(String(init?.body));
+    requests.push({ url: String(url), body, headers: new Headers(init?.headers) });
+    if (body.model === 'main-one') return new Response(response(requests.length === 1 ? undefined : 'All tasks answered.', requests.length === 1 ? 'investigate' : undefined,
+      { tasks: ['A', 'B', 'C', 'D'].map(scope => ({ scope, question: `Inspect ${scope}` })) }));
+    const question = JSON.stringify(body.messages);
+    const name = ['A', 'B', 'C', 'D'].find(name => question.includes(`Inspect ${name}`))!;
+    running++; peak = Math.max(peak, running);
+    await new Promise<void>(resolve => releases.set(name, resolve)); running--;
+    return new Response(response(undefined, 'finish_investigation', { findings: [{ claim: `Finding ${name}`, support: 'interpretation', evidenceIds: [] }], unresolvedQuestions: [], candidateKnowledgeChanges: [] }));
+  };
+  supervisor.start(null, 'Compare four boundaries');
+  await expect.poll(() => releases.size).toBe(3);
+  expect(conversations.workspace().selected?.messages.at(-1)?.investigators?.map(task => task.status)).toEqual(['running', 'running', 'running', 'queued']);
+  releases.get('C')!();
+  await expect.poll(() => releases.has('D')).toBe(true);
+  releases.get('D')!(); releases.get('B')!(); releases.get('A')!();
+  await idle();
+  const answer = conversations.workspace().selected!.messages.at(-1)!;
+  expect(peak).toBe(3);
+  expect(answer).toMatchObject({ status: 'complete', requests: 6, usage: { input: 120, output: 30 } });
+  expect(answer.investigators?.map(task => [task.scope, task.status, task.result?.findings[0]?.claim])).toEqual(['A', 'B', 'C', 'D'].map(name => [name, 'complete', `Finding ${name}`]));
+  expect(reservations).toHaveLength(6);
+  expect(JSON.stringify(requests.at(-1)?.body)).not.toContain('sources_read\\\"');
+});
+
+test.each([1, 2])('configured concurrency %i is frozen for the job and survives restart', async maximum => {
+  conversations.setMaxInvestigators(maximum);
+  const releases: (() => void)[] = [];
+  let started = 0;
+  http = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.model === 'main-one') return new Response(response(undefined, 'investigate', { tasks: ['api', 'worker', 'handoff'].map(scope => ({ scope, question: `Inspect ${scope}` })) }));
+    started++;
+    await new Promise<void>(resolve => releases.push(resolve));
+    return new Response(response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: [], candidateKnowledgeChanges: [] }));
+  };
+  supervisor.start(null, 'Investigate');
+  await expect.poll(() => started).toBe(maximum);
+  conversations.setMaxInvestigators(8);
+  releases.shift()!();
+  await expect.poll(() => started).toBe(maximum + 1);
+  expect(conversations.workspace().selected!.messages.at(-1)!.investigators?.filter(task => task.status === 'running')).toHaveLength(maximum);
+  supervisor.cancel();
+  conversations.close(); conversations = new Conversations(join(directory, 'conversations.sqlite'));
+  expect(conversations.maxInvestigators()).toBe(8);
+  expect(conversations.workspace().selected!.messages.at(-1)!.investigators?.every(task => !['queued', 'running'].includes(task.status))).toBe(true);
+  releases.splice(0).forEach(release => release());
+});
+
+test('a failed child leaves an explicit partial answer and publishes successful conflicting candidates without completion-order overwrite', async () => {
+  let mainCalls = 0;
+  const stages = new Map<string, number>();
+  http = async (url, init) => {
+    const body = JSON.parse(String(init?.body));
+    requests.push({ url: String(url), body, headers: new Headers(init?.headers) });
+    if (body.model === 'main-one') return new Response(++mainCalls === 1
+      ? response(undefined, 'investigate', { tasks: ['first', 'second', 'denied'].map(scope => ({ scope, question: `Inspect ${scope}` })) })
+      : response('Two source-backed interpretations remain in conflict.'));
+    const name = ['first', 'second', 'denied'].find(name => JSON.stringify(body.messages).includes(`Inspect ${name}`))!;
+    if (name === 'denied') return new Response('{}', { status: 401 });
+    const stage = stages.get(name) ?? 0; stages.set(name, stage + 1);
+    if (!stage) return new Response(response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }));
+    if (name === 'first') await new Promise(resolve => setTimeout(resolve, 30));
+    return new Response(response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: [], candidateKnowledgeChanges: [], knowledgeCandidates: [knowledgeCandidate(name === 'first' ? 'The module owns synchronous answers.' : 'The module owns asynchronous answers.')] }));
+  };
+  supervisor.start(null, 'Compare interpretations'); await idle();
+  const answer = conversations.workspace().selected!.messages.at(-1)!;
+  expect(answer).toMatchObject({ status: 'partial', text: expect.stringContaining('Partial: some investigators did not complete'), knowledgePublication: 'published' });
+  expect(answer.investigators?.map(task => task.status)).toEqual(['complete', 'complete', 'failed']);
+  expect(requests.filter(request => request.body.model === 'investigator-one' && JSON.stringify(request.body).includes('Inspect denied'))).toHaveLength(1);
+  const retained = await knowledge.inspect();
+  expect(retained).toHaveLength(2);
+  expect(retained.map(record => record.claim).sort()).toEqual(['The module owns asynchronous answers.', 'The module owns synchronous answers.']);
+  // Semantic conflicts require explicit links; schema validation alone cannot certify them.
+  expect(retained.every(record => record.validation === 'unchecked')).toBe(true);
+  expect(conversations.liveContext(conversations.workspace().selected!.id).history).toEqual([]);
+});
+
+test.each(['stop', 'window-close', 'quit', 'revocation'] as const)('%s cancels running and queued tasks, rejects late events and never revives work', async action => {
+  const releases: (() => void)[] = [];
+  http = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    requests.push({ url: '', body, headers: new Headers() });
+    if (body.model === 'main-one') return new Response(response(undefined, 'investigate', { tasks: ['one', 'two', 'three', 'four', 'five'].map(scope => ({ scope, question: `Inspect ${scope}` })) }));
+    await new Promise<void>(resolve => releases.push(resolve));
+    return new Response(response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: [], candidateKnowledgeChanges: [] }));
+  };
+  supervisor.start(null, 'Inspect in parallel');
+  await expect.poll(() => releases.length).toBe(3);
+  expect(() => supervisor.start(null, 'Do not queue another paid job')).toThrow('already running');
+  if (action === 'stop') supervisor.cancel();
+  else if (action === 'revocation') { settings.revokeCredential('investigator'); supervisor.revokeApiAuthority(); }
+  else supervisor.lifecycle(action);
+  await idle();
+  const saved = conversations.workspace();
+  expect(saved.selected!.messages.at(-1)!.investigators?.map(task => task.status)).toEqual(Array(5).fill('cancelled'));
+  releases.splice(0).forEach(release => release());
+  workers[0]!.emit('message', { type: 'checkpoint', checkpoint: { investigators: [{ id: 'T1', question: 'late', scope: 'late', status: 'running' }] } });
+  workers[0]!.emit('message', { type: 'result', result: { status: 'complete', text: 'late', history: [], requests: 0, usageComplete: true } });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  expect(conversations.workspace()).toEqual(saved);
+  expect(requests).toHaveLength(4);
+  expect(await knowledge.inspect()).toEqual([]);
+});
+
+test('parallel children and retries cannot race past the shared fifty-request limit', async () => {
+  http = async (_url, init) => {
+    const body = JSON.parse(String(init?.body)); requests.push({ url: '', body, headers: new Headers() });
+    if (body.model === 'main-one') return new Response(response(undefined, 'investigate', { tasks: ['one', 'two', 'three', 'four'].map(scope => ({ scope, question: 'Continue bounded reads' })) }));
+    if (requests.length % 7 === 0) return new Response('{}', { status: 503 });
+    return new Response(response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }));
+  };
+  supervisor.start(null, 'Investigate until the shared limit'); await idle();
+  expect(requests).toHaveLength(50); expect(reservations).toHaveLength(50);
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'limit', requests: 50 });
+  expect(conversations.workspace().selected!.messages.at(-1)!.investigators?.every(task => !['running', 'queued'].includes(task.status))).toBe(true);
+});
+
+test('assignments guide relevance without repository permission barriers, private contexts, or nested delegation', async () => {
+  writeFileSync(join(root, 'handoff.ts'), 'export const target = "worker";\n');
+  let mainCalls = 0;
+  const childBodies: string[] = [];
+  http = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.model === 'main-one') return new Response(++mainCalls === 1 ? response(undefined, 'investigate', { tasks: [{ scope: 'API-local relevance', question: 'Verify the worker handoff' }] }) : response('Handoff inspected [E1].'));
+    childBodies.push(JSON.stringify(body));
+    const tools = body.tools.map((tool: { function: { name: string } }) => tool.function.name);
+    expect(tools).not.toContain('investigate'); expect(tools).not.toContain('set_conversation_title');
+    expect(JSON.stringify(body.messages)).not.toContain('PRIVATE_ORIGINAL_QUESTION');
+    const stage = childBodies.length;
+    return new Response(stage === 1 ? response(undefined, 'investigate', { question: 'Forbidden nested spawn' })
+      : stage === 2 ? response(undefined, 'sources_read', { root, path: 'handoff.ts', start: 1, end: 1 })
+      : response(undefined, 'finish_investigation', { findings: [{ claim: 'Handoff names worker', support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: [], candidateKnowledgeChanges: [] }));
+  };
+  supervisor.start(null, 'PRIVATE_ORIGINAL_QUESTION'); await idle();
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', evidence: [{ citation: { path: 'handoff.ts' } }], investigators: [{ scope: 'API-local relevance', status: 'complete' }] });
+  expect(childBodies).toHaveLength(3);
+});
+
+test('stopping after one successful task preserves its bounded findings while queued children remain cancelled', async () => {
+  conversations.setMaxInvestigators(1);
+  let mainCalls = 0, children = 0, release!: () => void;
+  http = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.model === 'main-one') return new Response(++mainCalls === 1 ? response(undefined, 'investigate', { tasks: ['success', 'running', 'queued'].map(scope => ({ scope, question: `Inspect ${scope}` })) }) : response('Unexpected'));
+    if (++children > 1) await new Promise<void>(resolve => { release = resolve; });
+    return new Response(response(undefined, 'finish_investigation', { findings: [{ claim: 'Retained useful finding', support: 'interpretation', evidenceIds: [] }], unresolvedQuestions: [], candidateKnowledgeChanges: [] }));
+  };
+  supervisor.start(null, 'Inspect');
+  await expect.poll(() => children).toBe(2);
+  supervisor.cancel(); await idle();
+  expect(conversations.workspace().selected!.messages.at(-1)!.investigators).toMatchObject([
+    { status: 'complete', result: { findings: [{ claim: 'Retained useful finding' }] } }, { status: 'cancelled' }, { status: 'cancelled' },
+  ]);
+  release();
+});
+
+test.each([401, 403, 429, 503])('HTTP %i retries only transient requests, at most twice, with a reservation for every attempt', async status => {
+  http = async (_url, init) => { requests.push({ url: '', body: JSON.parse(String(init?.body)), headers: new Headers() }); return new Response('{}', { status }); };
+  supervisor.start(null, 'A bounded request'); await idle();
+  expect(requests).toHaveLength(status === 503 ? 3 : 1);
+  expect(reservations).toHaveLength(requests.length);
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'failed', requests: requests.length });
+});
+
+test('a transient retry can succeed without duplicating tool calls and counts all attempt usage', async () => {
+  let calls = 0;
+  http = async (_url, init) => { requests.push({ url: '', body: JSON.parse(String(init?.body)), headers: new Headers() }); return ++calls < 3 ? new Response('{}', { status: 503 }) : new Response(response('Recovered')); };
+  supervisor.start(null, 'Recover from temporary outage'); await idle();
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', text: 'Recovered', requests: 3, usageComplete: false, usage: { input: 20, output: 5 } });
+  expect(reservations).toHaveLength(3);
+});
+
 test('indexed reuse stays on the pinned API-key conversation role and reserves each request without an investigator', async () => {
   const result = await sources.run('read', { root, path: 'answer.ts', start: 1, end: 1 });
   const entry = result.entries[0];

@@ -6,7 +6,7 @@ import type { SourceBridge } from './sources';
 import type { ChatGPTBridge, ChatGPTUsage } from './chatgpt';
 import type { Evidence } from './live';
 import type { KnowledgeBridge } from './knowledge';
-import type { InvestigatorResult } from './investigation';
+import type { InvestigatorResult, InvestigatorTask } from './investigation';
 
 export const MAX_TITLE_LENGTH = 100;
 export const MAX_MESSAGE_LENGTH = 8_000;
@@ -21,6 +21,7 @@ export interface Message {
   status: MessageStatus;
   evidence?: Evidence[];
   investigation?: InvestigatorResult;
+  investigators?: InvestigatorTask[];
   usage?: ChatGPTUsage;
   usageComplete?: boolean;
   requests?: number;
@@ -45,6 +46,7 @@ export interface Workspace {
   activeConversationId: string | null;
   saveError?: string;
   environment?: EnvironmentPermission[];
+  maxInvestigators?: number;
 }
 export interface DemoJob {
   messageId: string;
@@ -62,6 +64,7 @@ export interface DesktopBridge {
   select(conversationId: string): Promise<Workspace>;
   send(conversationId: string | null, text: string): Promise<Workspace>;
   cancel(): Promise<Workspace>;
+  setMaxInvestigators(maximum: number): Promise<Workspace>;
   retry(messageId: string): Promise<Workspace>;
   environment(id: string, action: EnvironmentAction): Promise<Workspace>;
   onChange(listener: () => void): () => void;

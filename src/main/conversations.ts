@@ -3,7 +3,7 @@ import { checkBeforeModelSend, environmentValues } from './secret-check';
 import { EPHEMERAL_NOTICE } from '../shared/environment';
 import type { Message as PiMessage } from '@earendil-works/pi-ai';
 import type { SourceCheckout } from '../shared/sources';
-import type { Exploration } from '../shared/investigation';
+import { INVESTIGATOR_DEFAULT, INVESTIGATOR_MAX, type InvestigatorTask, type Exploration } from '../shared/investigation';
 import { LIVE_LIMITS, type ConversationBinding, type Evidence, type LiveResult } from '../shared/live';
 import { DatabaseSync } from 'node:sqlite';
 import { MAX_MESSAGE_LENGTH, MAX_TITLE_LENGTH, type ConversationSummary, type DemoJob, type Message, type MessageStatus, type Workspace } from '../shared/contracts';
@@ -73,6 +73,14 @@ export class Conversations {
     const attempts = this.db.prepare('PRAGMA table_info(live_attempts)').all().map(row => row.name);
     if (!attempts.includes('ephemeral')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN ephemeral INTEGER NOT NULL DEFAULT 0');
     if (!attempts.includes('exploration')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN exploration TEXT');
+    // Interrupted child work is terminal, never resumed on restart.
+    for (const row of this.db.prepare('SELECT message_id, result FROM live_attempts WHERE result IS NOT NULL').all()) {
+      const result = JSON.parse(String(row.result));
+      if (result.investigators?.some((task: InvestigatorTask) => ['running', 'queued'].includes(task.status))) {
+        for (const task of result.investigators as InvestigatorTask[]) if (['running', 'queued'].includes(task.status)) task.status = 'cancelled';
+        this.db.prepare('UPDATE live_attempts SET result = ? WHERE message_id = ?').run(JSON.stringify(result), String(row.message_id));
+      }
+    }
     this.db.exec(`UPDATE live_attempts SET result = json_set(result, '$.investigation.status', 'partial'),
       exploration = json_set(exploration, '$.result.status', 'partial')
       WHERE json_extract(result, '$.status') = 'cancelled' AND json_extract(result, '$.investigation.status') = 'complete';`);
@@ -100,7 +108,21 @@ export class Conversations {
       conversations,
       selected: summary ? { ...summary, messages } : null,
       activeConversationId: active ? String(active.conversation_id) : null,
+      maxInvestigators: this.maxInvestigators(),
     };
+  }
+
+  maxInvestigators(): number {
+    return Number(this.db.prepare("SELECT value FROM settings WHERE key = 'maxInvestigators'").get()?.value ?? INVESTIGATOR_DEFAULT);
+  }
+  setMaxInvestigators(maximum: number): void {
+    if (!Number.isInteger(maximum) || maximum < 1 || maximum > INVESTIGATOR_MAX) throw new Error('Choose one to eight concurrent investigators.');
+    this.db.prepare("INSERT OR REPLACE INTO settings VALUES ('maxInvestigators', ?)").run(String(maximum));
+  }
+  progressInvestigators(messageId: string, investigators: InvestigatorTask[]): void {
+    if (this.protect(messageId, investigators)) return;
+    this.db.prepare("UPDATE live_attempts SET result = json_patch(COALESCE(result, '{}'), ?) WHERE message_id = ?")
+      .run(JSON.stringify({ investigators }), messageId);
   }
 
   select(id: string): void {
