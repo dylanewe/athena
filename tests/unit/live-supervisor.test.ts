@@ -596,6 +596,28 @@ test('citation-free source investigations retain checkout provenance and cannot 
   expect(requests).toHaveLength(count);
 });
 
+test.each(['conflict', 'annotation'] as const)('neighborhood %s attachments join runtime and saved-follow-up checkout coverage', async attachment => {
+  for (const name of ['a', 'c']) {
+    mkdirSync(join(root, name, '.git'), { recursive: true }); writeFileSync(join(root, name, 'source.ts'), 'export const service = serve();\n');
+    snapshot.repositories.push({ name, path: join(root, name), presence: 'present', documentationRoots: [], boundaries: [], fileCount: 1, examined: false });
+  }
+  const publishEntity = async (scope: string, relations: { kind: string; target: string }[] = []) => {
+    const read = await sources.run('read', { root, path: `${scope}/source.ts`, start: 1, end: 1 });
+    return knowledge.publish({ owner: { conversationId: 'prior', messageId: scope }, candidates: [{ ...knowledgeCandidate(), scope, kind: 'entity', architecture: { type: 'service' }, relations }], evidence: [{ id: 'E1', citation: read.entries[0].citation!, text: read.entries[0].text! }], completed: true, environmentExposed: false, signal: new AbortController().signal });
+  };
+  const [c] = await publishEntity('c');
+  const [a] = await publishEntity('a', attachment === 'conflict' ? [{ kind: 'conflicts-with', target: c }] : []);
+  if (attachment === 'annotation') await resolutions.write({ operation: 'annotate', kind: 'note', text: 'Consider both service versions.', claimIds: [a, c] });
+  const inspected = await resolutions.attach(await knowledge.retrieve({ operation: 'neighborhood', id: a, depth: 0 }));
+  expect(inspected.derivation?.checkouts.map(item => item.repository?.name).sort()).toEqual(['a', 'c']);
+  scripted([functionResponse('retrieve_knowledge', { operation: 'neighborhood', id: a, depth: 0 }), textResponse('These are explicitly unverified architectural leads.')]);
+  jobs.start(null, 'Inspect attached service context'); await idle();
+  const id = db.workspace().selected!.id, count = requests.length;
+  expect(db.liveContext(id).checkouts?.map(item => item.repository?.name).sort()).toEqual(['a', 'c']);
+  writeFileSync(join(root, 'c', 'caller.ts'), 'changed();'); jobs.start(id, 'Explain more'); await idle();
+  expect(db.workspace().selected!.messages.at(-1)?.status).toBe('failed'); expect(requests).toHaveLength(count);
+});
+
 test.each(['during', 'follow-up'] as const)('typed neighborhood lookup without E citations retains transitive checkout scope for %s edits', async when => {
   for (const name of ['a', 'b']) {
     mkdirSync(join(root, name, '.git'), { recursive: true });

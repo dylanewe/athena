@@ -5,11 +5,11 @@ import type { KnowledgeRequest, KnowledgeResult } from '../shared/knowledge';
 
 /** Read-only inspection. Publication is never a renderer/model command. */
 export class KnowledgeGateway {
-  constructor(private readonly knowledge: Knowledge, private readonly owner: { webContentsId: number; url: string }, private readonly resolutions?: Resolutions) {}
+  constructor(private readonly knowledge: Knowledge, private readonly owner: { webContentsId: number; url: string }, private readonly resolutions?: Resolutions, private readonly canPersistInvalidations: () => boolean = () => false) {}
   async dispatch(caller: Caller, operation: unknown, payload: unknown): Promise<KnowledgeResult> {
     authorize(caller, this.owner);
     if (operation === 'retrieve') {
-      const retrieved = await this.knowledge.retrieve(payload as KnowledgeRequest);
+      const retrieved = await this.knowledge.retrieve(payload as KnowledgeRequest, undefined, { canPersistInvalidations: this.canPersistInvalidations });
       const { evidence, derivation: _derivation, ...result } = this.resolutions ? await this.resolutions.attach(retrieved) : retrieved;
       // Full retained text is a main-private verification envelope, not a UI excerpt.
       return { ...result, ...(evidence ? { currentCitation: evidence.citation } : {}) };

@@ -5,7 +5,7 @@ import type { SourceCheckout, SourceIdentity, SourceScope } from './sources';
 const bounded = (maxLength: number) => Type.String({ minLength: 1, maxLength, pattern: '^(?=.*\\S)[^\\x00-\\x1f\\x7f]+$' });
 const reference = bounded(80);
 export const CONNECTION_TYPES = ['api-call', 'event', 'shared-library', 'data-store', 'deployment'] as const;
-const connectionType = Type.Union([Type.Literal('api-call'), Type.Literal('event'), Type.Literal('shared-library'), Type.Literal('data-store'), Type.Literal('deployment')]);
+const connectionType = Type.Enum(CONNECTION_TYPES);
 const architectureSchema = Type.Union([
   Type.Object({ type: Type.Union([Type.Literal('service'), Type.Literal('interface')]) }, { additionalProperties: false }),
   Type.Object({ type: Type.Union([Type.Literal('external'), Type.Literal('unresolved')]), resource: Type.Union([Type.Literal('service'), Type.Literal('api'), Type.Literal('datastore'), Type.Literal('library'), Type.Literal('deployment')]), address: Type.Optional(bounded(300)) }, { additionalProperties: false }),

@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Knowledge } from '../../src/main/knowledge';
+import { KnowledgeGateway } from '../../src/main/knowledge-bridge';
 import { Sources } from '../../src/main/sources';
 import { FOLDER_CONSENT, type InventorySnapshot } from '../../src/shared/inventory';
 import type { Evidence } from '../../src/shared/live';
@@ -94,6 +95,38 @@ test.each([
 test.each([{ depth: 4 }, { depth: -1 }, { depth: 1, limit: 21 }, { depth: 1, kinds: ['similarity'] }, { depth: 1, query: 'SQL' }])('rejects unbounded or untyped traversal: %j', async request => {
   const f = await fixture();
   await expect(f.knowledge.retrieve({ operation: 'neighborhood', ...request } as never)).rejects.toThrow('Invalid bounded');
+});
+
+test('bounded scope seeds reserve room for concrete connections instead of filling every result slot with entities', async () => {
+  const f = await fixture();
+  await f.publish([f.entity('C1', 'API'), f.entity('C2', 'Worker'), f.entity('C3', 'Scheduler'), f.entity('C4', 'Router'), f.connection('C5', 'C1', 'C2'), f.connection('C6', 'C2', 'C3'), f.connection('C7', 'C3', 'C4')]);
+  const result = await f.knowledge.retrieve({ operation: 'neighborhood', scope: 'shop', depth: 1, limit: 4 });
+  expect(result.items.some(item => item.kind === 'relationship')).toBe(true);
+  expect(result.items.length).toBeLessThanOrEqual(4);
+});
+
+test('explorer invalidation authority is rechecked dynamically at write time and fails closed when not supplied', async () => {
+  const f = await fixture();
+  const [id] = await f.publish([f.entity('C1', 'API')], [f.evidence[0]]);
+  const owner = { webContentsId: 1, url: 'file:///athena/index.html' }, caller = { ...owner, isMainFrame: true };
+  const changed = join(f.directory, 'shop', 'caller.ts');
+  let permitted = true;
+  const gateway = new KnowledgeGateway(f.knowledge, owner, undefined, () => permitted);
+  writeFileSync(changed, 'changed();');
+  const lookup = gateway.dispatch(caller, 'retrieve', { operation: 'neighborhood', id, depth: 0 });
+  permitted = false; // A pending UI read must not write after an exposure/sealing transition.
+  expect((await lookup).items[0].freshness).toBe('stale');
+  rmSync(changed);
+  expect((await f.knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('current');
+  writeFileSync(changed, 'changed();');
+  await new KnowledgeGateway(f.knowledge, owner).dispatch(caller, 'retrieve', { operation: 'neighborhood', id, depth: 0 });
+  rmSync(changed);
+  expect((await f.knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('current');
+  permitted = true; writeFileSync(changed, 'changed();');
+  const result = await gateway.dispatch(caller, 'retrieve', { operation: 'neighborhood', id, depth: 0 });
+  expect(result).not.toHaveProperty('derivation');
+  rmSync(changed);
+  expect((await f.knowledge.retrieve({ operation: 'detail', id })).items[0].freshness).toBe('stale');
 });
 
 test('publication resolves explicit endpoints independently of candidate order, never interpreting a colliding name as an ID', async () => {

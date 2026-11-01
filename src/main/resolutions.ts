@@ -99,7 +99,7 @@ export class Resolutions {
         item.annotations = annotations;
       }
     }
-    return result;
+    return this.knowledge.completeRetrieval(result);
   }
   private stored(row: Record<string, unknown>): Stored {
     return { id: String(row.id), kind: String(row.kind) as Stored['kind'], text: String(row.text), createdAt: String(row.created_at) };

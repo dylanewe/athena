@@ -79,6 +79,7 @@ export class Knowledge {
   retrieve(request: KnowledgeRequest, signal?: AbortSignal, options: { persistInvalidations?: boolean; canPersistInvalidations?: () => boolean } = {}): Promise<KnowledgeResult> {
     return this.serial(() => this.retrieval.retrieve(request, signal, () => options.persistInvalidations !== false && (options.canPersistInvalidations?.() ?? true)));
   }
+  completeRetrieval(result: KnowledgeResult): KnowledgeResult { return this.retrieval.completeResult(result); }
   private indexCheckout(id: string, snapshot: SourceCheckout): void {
     this.db.prepare('INSERT OR IGNORE INTO checkout_dependencies VALUES (?, ?, ?)').run(id, this.scope(snapshot), snapshot.contentIdentity);
   }

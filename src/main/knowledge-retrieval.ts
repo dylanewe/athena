@@ -21,6 +21,8 @@ interface RetrievalBudget {
   checkouts: Map<string, boolean>;
   canPersistInvalidations: () => boolean;
   signal: AbortSignal;
+  neighborhood: boolean;
+  coverage: NonNullable<KnowledgeResult['derivation']>;
 }
 
 /** Local, rebuildable FTS index and bounded one-hop retrieval. Never model-generated SQL. */
@@ -28,7 +30,7 @@ export class KnowledgeRetrieval {
   /** Main-private response capabilities: never serialized into renderer/model results or persistence. */
   private readonly contexts = new WeakMap<object, RetrievalBudget>();
   private budget(signal: AbortSignal, canPersistInvalidations = () => false): RetrievalBudget {
-    return { records: new Map(), sources: new Set(), checkouts: new Map(), canPersistInvalidations, signal };
+    return { records: new Map(), sources: new Set(), checkouts: new Map(), canPersistInvalidations, signal, neighborhood: false, coverage: { files: [], scopes: [], checkouts: [] } };
   }
   inspectionContext(signal: AbortSignal): object {
     const context = {};
@@ -83,6 +85,7 @@ export class KnowledgeRetrieval {
     const offset = 'offset' in input ? input.offset ?? 0 : 0;
     const limit = input.operation === 'search' || input.operation === 'expand' || input.operation === 'neighborhood' ? input.limit ?? L.defaultResults : 1;
     const budget = this.budget(signal, canPersistInvalidations);
+    budget.neighborhood = input.operation === 'neighborhood';
     let ids: string[];
     let edges: NonNullable<KnowledgeResult['edges']> = [];
     if (input.operation === 'neighborhood') {
@@ -113,7 +116,6 @@ export class KnowledgeRetrieval {
     const items: KnowledgeHit[] = [];
     let evidence: Evidence | undefined;
     let derivation: KnowledgeResult['derivation'];
-    const neighborhoodDerivations: NonNullable<KnowledgeResult['derivation']>[] = [];
     let consumed = 0;
     for (const id of ids.slice(0, limit)) {
       external?.throwIfAborted();
@@ -153,7 +155,6 @@ export class KnowledgeRetrieval {
       const visibleEdges = edges.filter(edge => [...items, hit].some(item => item.id === edge.target));
       if (Buffer.byteLength(JSON.stringify({ items: [...items, hit], edges: visibleEdges, notice: NOTICE })) > L.bytes - 128) { consumed--; break; }
       items.push(hit);
-      if (input.operation === 'neighborhood') neighborhoodDerivations.push(checked.derivation);
     }
     const next = offset + consumed;
     const result: KnowledgeResult = { items, ...(ids.length > consumed && next <= L.offset && consumed > 0 ? { nextOffset: next } : {}), notice: NOTICE };
@@ -161,14 +162,18 @@ export class KnowledgeRetrieval {
     if (evidence && derivation?.checkouts.length && Buffer.byteLength(JSON.stringify({ ...result, evidence, derivation })) <= L.bytes) {
       result.evidence = evidence; result.derivation = derivation;
     }
-    if (input.operation === 'neighborhood') {
-      const unique = <T>(values: T[]) => [...new Map(values.map(value => [JSON.stringify(value), value])).values()];
-      const coverage = { files: unique(neighborhoodDerivations.flatMap(item => item.files)), scopes: unique(neighborhoodDerivations.flatMap(item => item.scopes)), checkouts: unique(neighborhoodDerivations.flatMap(item => item.checkouts)) };
-      // A graph response cannot omit the transitive provenance its runtime consumer needs.
-      if (Buffer.byteLength(JSON.stringify({ ...result, derivation: coverage })) > L.bytes) result.items = [];
-      else result.derivation = coverage;
-    }
     this.contexts.set(result, budget);
+    return this.completeResult(result);
+  }
+  /** Finalize again after annotation attachment under the same opaque read context. */
+  completeResult(result: KnowledgeResult): KnowledgeResult {
+    const budget = this.contexts.get(result);
+    if (!budget?.neighborhood) return result;
+    result.derivation = budget.coverage;
+    if (Buffer.byteLength(JSON.stringify(result)) > L.bytes) {
+      result.items = []; delete result.edges; delete result.derivation; delete result.evidence; delete result.evidenceId;
+      result.notice = NOTICE + ' Neighborhood withheld because complete attachment provenance exceeds response bounds.';
+    }
     return result;
   }
   /** Bounded static adjacency, indexed only by the central claim publisher. No inference or independent source authority. */
@@ -188,7 +193,9 @@ export class KnowledgeRetrieval {
       if (!isConnection(item.record.architecture)) queue.push({ id, depth });
       return true;
     };
-    for (const id of seeds) {
+    // Reserve room for connection claims and opposite endpoints before filling with extra seeds.
+    const seedLimit = input.id || input.depth === 0 ? limit : Math.max(1, Math.floor(limit / 3));
+    for (const id of seeds.slice(0, seedLimit)) {
       const origin = await this.checked(id, signal, budget);
       const a = origin?.record.architecture;
       if (a && isConnection(a)) {
@@ -206,6 +213,10 @@ export class KnowledgeRetrieval {
         if (!await add(String(row.id), node.depth + 1)) continue;
         await add(String(row.source), node.depth + 1); await add(String(row.target), node.depth + 1);
       }
+    }
+    for (const id of input.id ? [] : seeds) {
+      if (ids.size >= limit) break;
+      await add(id, 0);
     }
     return [...ids];
   }
@@ -294,9 +305,16 @@ export class KnowledgeRetrieval {
         ...checkouts.filter(snapshot => budget.checkouts.get(JSON.stringify(snapshot)) === false), ...(filesChanged ? unique : []),
       ]);
     }
-    return { record, stale, derivation: {
+    const derivation = {
       files: unique.filter(item => !('operation' in item)), scopes: unique.filter((item): item is SourceScope => 'operation' in item),
       checkouts: [...new Map(checkouts.map(snapshot => [JSON.stringify(snapshot), snapshot])).values()],
-    } };
+    };
+    if (budget.neighborhood) {
+      const merge = <T>(left: T[], right: T[]) => [...new Map([...left, ...right].map(item => [JSON.stringify(item), item])).values()];
+      budget.coverage.files = merge(budget.coverage.files, derivation.files);
+      budget.coverage.scopes = merge(budget.coverage.scopes, derivation.scopes);
+      budget.coverage.checkouts = merge(budget.coverage.checkouts, derivation.checkouts);
+    }
+    return { record, stale, derivation };
   }
 }

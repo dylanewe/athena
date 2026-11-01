@@ -47,7 +47,7 @@ test.afterEach(async () => { resume(); await application?.close().catch(() => {}
 
 test('dependency explorer groups progressive services, inspects connection evidence, expands neighbors and prepares unpaid follow-up drafts', async () => {
   const root = join(directory, 'repo'); mkdirSync(join(root, '.git'), { recursive: true });
-  const implementation = 'export const API = serve(); export const Worker = consume("orders"); Worker.store("postgres://orders");\n';
+  const implementation = 'export const API = serve(); export const Worker = consume("orders"); Worker.store("postgres://orders"); // Intended: GET /planned. Historically API deployed with Worker.\n';
   writeFileSync(join(root, 'answer.ts'), implementation);
   await installLiveFixture(application, directory, root, false, false, false, false, true);
   await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] }); }, root);
@@ -63,6 +63,8 @@ test('dependency explorer groups progressive services, inspects connection evide
   await expect(map.getByRole('region', { name: 'repo', exact: true })).toContainText('API');
   await expect(map.getByRole('region', { name: 'repo', exact: true })).toContainText('Worker');
   await expect(map.getByRole('region', { name: 'External / unresolved' })).toContainText('Orders database');
+  await expect(map).toContainText('Intended — not implementation');
+  await expect(page.getByRole('region', { name: 'Concrete connections' })).toContainText('Historical — not current behavior');
   await page.getByRole('button', { name: 'Reverse visual group order' }).click();
   const connection = page.getByRole('button', { name: 'data-store · Worker.store("postgres://orders")', exact: true });
   await expect(connection).toBeVisible(); await connection.click();

@@ -97,7 +97,10 @@ function createWindow() {
     const result = await dialog.showOpenDialog(window, { title: 'Import a trusted Pi models.json only (no auth, settings, or extensions)', properties: ['openFile'], filters: [{ name: 'Pi models configuration', extensions: ['json'] }] });
     return result.canceled ? undefined : result.filePaths[0];
   }, () => jobs?.revokeApiAuthority(), () => inventory!.snapshot().roots.map(root => root.path));
-  knowledgeGateway = new KnowledgeGateway(knowledge!, { webContentsId: window.webContents.id, url: documentURL }, resolutions);
+  knowledgeGateway = new KnowledgeGateway(knowledge!, { webContentsId: window.webContents.id, url: documentURL }, resolutions, () => {
+    const workspace = conversations!.workspace();
+    return !quitting && !workspace.activeConversationId && !workspace.selected?.sealed;
+  });
   resolutionGateway = new ResolutionGateway(resolutions!, { webContentsId: window.webContents.id, url: documentURL });
   sourceGateway = new SourceGateway(sources!, { webContentsId: window.webContents.id, url: documentURL });
   chatgptGateway = new ChatGPTGateway(chatgpt!, { webContentsId: window.webContents.id, url: documentURL }, url => shell.openExternal(url), () => jobs?.cancel());

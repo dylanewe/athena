@@ -13,9 +13,11 @@
   let busy = $state(false);
   let error = $state('');
   const entities = $derived(records.filter(record => record.architecture && !isConnection(record.architecture)));
-  const groups = $derived([...new Set(entities.map(record => ['external', 'unresolved'].includes(record.architecture!.type) ? 'External / unresolved' : record.scope))].sort((a, b) => reverse ? b.localeCompare(a) : a.localeCompare(b)));
+  const groups = $derived([...new Set(entities.map(groupOf))].sort((a, b) => reverse ? b.localeCompare(a) : a.localeCompare(b)));
   const connections = $derived(records.filter(record => record.architecture && isConnection(record.architecture)));
   const outside = $derived(repositories.filter(name => !entities.some(record => record.scope === name && ['service', 'interface'].includes(record.architecture!.type))));
+  function groupOf(record: KnowledgeHit) { return record.architecture && ['external', 'unresolved'].includes(record.architecture.type) ? 'External / unresolved' : record.scope; }
+  function perspective(record: KnowledgeHit) { return record.perspective === 'current' ? 'Current-source interpretation' : record.perspective === 'intended' ? 'Intended — not implementation' : 'Historical — not current behavior'; }
   async function load(id = focus) {
     busy = true; error = '';
     try {
@@ -49,11 +51,11 @@
       {#each groups as group}
         <section class="repository" aria-label={group}>
           <h2>{group}</h2>
-          {#each entities.filter(record => (['external', 'unresolved'].includes(record.architecture!.type) ? 'External / unresolved' : record.scope) === group) as record (record.id)}
+          {#each entities.filter(record => groupOf(record) === group) as record (record.id)}
             <div class="entity" class:stale={record.freshness === 'stale'}>
               <span class="eyebrow">{record.architecture!.type}</span>
               <button class="node" onclick={() => openKnowledge(record.id)}>{record.topic}</button>
-              <p class="meta">Sources {record.freshness} · {record.validation} · {record.provenance}</p>
+              <p class="meta">Sources {record.freshness} · {record.validation} · {record.provenance} · {perspective(record)}</p>
               {#if record.evidence[0]}<p class="location">{record.evidence[0].citation.path}:{record.evidence[0].citation.start}</p>{/if}
               <button disabled={busy} onclick={() => { currentAnswer = false; void load(record.id); }}>Expand neighbors</button>
               <button onclick={() => ask(record)}>Ask about entity</button>
@@ -70,7 +72,7 @@
           <article class:stale={record.freshness === 'stale'}>
             <div class="connection"><span>{label(a.from)}</span><span aria-hidden="true">→</span><span>{label(a.to)}</span></div>
             <button class="edge" onclick={() => openKnowledge(record.id)}>{a.type} · {a.mechanism}</button>
-            <p class="meta">Sources {record.freshness} · {record.validation} · {record.provenance} · Not runtime-observed</p>
+            <p class="meta">Sources {record.freshness} · {record.validation} · {record.provenance} · {perspective(record)} · Not runtime-observed</p>
             <button onclick={() => ask(record)}>Ask about connection</button>
           </article>
         {/if}
