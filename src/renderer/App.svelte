@@ -5,9 +5,8 @@
   import KnowledgeView from './Knowledge.svelte';
   import ExplorerView from './Explorer.svelte';
   import FlowsView from './Flows.svelte';
-  let flowMessage = $state('');
-  let flowService = $state('');
-  let flowRecord = $state('');
+  type FlowOrigin = { recordId?: string; messageId?: string; serviceId?: string };
+  let flowOrigin = $state<FlowOrigin>({});
   let flowNavigation = $state(0);
   let explorerMessage = $state('');
   let explorerRecord = $state('');
@@ -90,7 +89,7 @@
     await newConversation();
   }
   function openKnowledge(id: string) { knowledgeMessage = ''; knowledgeRecord = id; section = 'knowledge'; }
-  function openFlows(id = '', message = '', service = '') { flowNavigation++; flowRecord = id; flowMessage = message; flowService = service; section = 'flows'; }
+  function openFlows(origin: FlowOrigin = {}) { flowNavigation++; flowOrigin = origin; section = 'flows'; }
   function openExplorer(id = '', message = '') { explorerRecord = id; explorerMessage = message; section = 'explorer'; }
   async function askAbout(record: KnowledgeHit) {
     if (active) { error = 'Finish or stop the current job before asking a follow-up.'; return; }
@@ -167,11 +166,11 @@
   {:else if section === 'sources'}
     <SourcesView />
   {:else if section === 'knowledge'}
-    <KnowledgeView openFlow={id => openFlows(id)} returnToFlow={flowRecord ? () => openFlows(flowRecord, flowMessage, flowService) : undefined} openExplorer={id => openExplorer(id)} ask={record => { void askAbout(record); }} writable={!active && !workspace?.selected?.sealed} messageId={knowledgeMessage} recordId={knowledgeRecord} openConversation={id => { void select(id); }} prepareRefresh={record => { void prepareRefresh(record); }} />
+    <KnowledgeView openFlow={id => openFlows({ recordId: id })} returnToFlow={flowOrigin.recordId ? () => openFlows(flowOrigin) : undefined} openExplorer={id => openExplorer(id)} ask={record => { void askAbout(record); }} writable={!active && !workspace?.selected?.sealed} messageId={knowledgeMessage} recordId={knowledgeRecord} openConversation={id => { void select(id); }} prepareRefresh={record => { void prepareRefresh(record); }} />
   {:else if section === 'explorer'}
-    <ExplorerView openFlows={service => openFlows('', explorerMessage, service)} returnToFlow={flowRecord ? () => openFlows(flowRecord, flowMessage, flowService) : undefined} messageId={explorerMessage} recordId={explorerRecord} {openKnowledge} ask={record => { void askAbout(record); }} />
+    <ExplorerView openFlows={service => openFlows({ messageId: explorerMessage, serviceId: service })} returnToFlow={flowOrigin.recordId ? () => openFlows(flowOrigin) : undefined} messageId={explorerMessage} recordId={explorerRecord} {openKnowledge} ask={record => { void askAbout(record); }} />
   {:else if section === 'flows'}
-    {#key flowNavigation}<FlowsView messageId={flowMessage} serviceId={flowService} recordId={flowRecord} {openKnowledge} openExplorer={id => openExplorer(id)} openConversation={id => { void select(id); }} remember={id => flowRecord = id} />{/key}
+    {#key flowNavigation}<FlowsView {...flowOrigin} {openKnowledge} openExplorer={id => openExplorer(id)} openConversation={id => { void select(id); }} remember={id => flowOrigin = { ...flowOrigin, recordId: id }} />{/key}
   {:else if section === 'models'}
     <ModelSettingsView />
   {:else}
@@ -204,7 +203,7 @@
                 {#if message.knowledgePublication === 'published'}
                   <button type="button" onclick={() => { knowledgeMessage = message.id; knowledgeRecord = ''; section = 'knowledge'; }}>Inspect retained knowledge</button>
                   <button type="button" onclick={() => openExplorer('', message.id)}>Explore investigation map</button>
-                  <button type="button" onclick={() => openFlows('', message.id)}>Open investigation flows</button>
+                  <button type="button" onclick={() => openFlows({ messageId: message.id })}>Open investigation flows</button>
                 {:else if message.knowledgePublication === 'withheld'}
                   <p class="draft-note">Knowledge not retained: validation, freshness or local storage checks did not complete. The answer remains available.</p>
                 {/if}
