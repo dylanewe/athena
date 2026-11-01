@@ -319,6 +319,18 @@ test.each(['invalid_api_key', 'authentication_error', 'permission_error', 'insuf
   expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'failed', requests: 1 });
 });
 
+test.each([false, true])('API-key pre-response network failures retry at most twice with shared reservations and may recover: %s', async recover => {
+  http = async (_url, init) => {
+    requests.push({ url: '', body: JSON.parse(String(init?.body)), headers: new Headers() });
+    if (!recover || requests.length < 3) throw new TypeError('fetch failed');
+    return new Response(response('Network recovered'));
+  };
+  supervisor.start(null, 'A bounded network request'); await idle();
+  expect(requests).toHaveLength(3); expect(reservations).toHaveLength(3);
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: recover ? 'complete' : 'failed', requests: 3, usageComplete: false });
+  if (recover) expect(conversations.workspace().selected!.messages.at(-1)!.text).toBe('Network recovered');
+});
+
 test('a transient retry can succeed without duplicating tool calls and counts all attempt usage', async () => {
   let calls = 0;
   http = async (_url, init) => { requests.push({ url: '', body: JSON.parse(String(init?.body)), headers: new Headers() }); return ++calls < 3 ? Response.json({ error: { code: 'server_error' } }, { status: 503 }) : new Response(response('Recovered')); };

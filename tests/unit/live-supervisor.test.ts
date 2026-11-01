@@ -494,6 +494,18 @@ test.each([
   expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'failed', requests: 1 });
 });
 
+test.each([false, true])('ChatGPT pre-response network failures retry at most twice and may recover: %s', async recover => {
+  http = async (_url, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    if (!recover || requests.length < 3) throw new TypeError('fetch failed');
+    return new Response(new TextEncoder().encode(textResponse('Network recovered')));
+  };
+  jobs.start(null, 'A bounded network request'); await idle();
+  expect(requests).toHaveLength(3);
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: recover ? 'complete' : 'failed', requests: 3, usageComplete: false });
+  if (recover) expect(db.workspace().selected!.messages.at(-1)!.text).toBe('Network recovered');
+});
+
 test('explicit temporary ChatGPT unavailability may retry within the same request allowance', async () => {
   http = async (_url, init) => {
     requests.push(JSON.parse(String(init?.body)));

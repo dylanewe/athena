@@ -44,7 +44,11 @@ export function chatgptStream(model: string, context: TranscriptContext, token: 
           sent = true;
           let response: Response;
           try { response = await http(url, { ...options, redirect: 'error' }); }
-          catch (error) { observation.transient = error instanceof TypeError && !signal.aborted; throw error; }
+          catch (error) {
+            observation.transient = error instanceof TypeError && !signal.aborted;
+            if (observation.transient) observation.failure = 'unavailable';
+            throw error;
+          }
           if (!response.ok) {
             let body = {};
             try { body = await readJSON(response); } catch { /* Only application-authored errors escape. */ }
