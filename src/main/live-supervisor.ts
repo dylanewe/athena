@@ -132,7 +132,7 @@ export class LiveSupervisor {
             }
             if (this.active !== active) return;
             outcome.knowledgePublication = active.knowledgePublication = published && withheld ? 'partial' : published ? 'published' : 'withheld';
-            if (active.investigators) this.conversations.progressInvestigators(active.messageId, active.investigators, active.knowledgePublication);
+            if (active.investigators) this.conversations.progressInvestigators(active.messageId, active.investigators, active.evidence, active.knowledgePublication);
             this.changed();
           }
         }
@@ -220,7 +220,7 @@ export class LiveSupervisor {
               const checkpoint = message.checkpoint as Pick<LiveResult, 'exploration' | 'title' | 'investigators'>;
               if (checkpoint.investigators && !active.environment.tainted) {
                 active.investigators = this.tasks(checkpoint.investigators, active, job);
-                this.conversations.progressInvestigators(active.messageId, active.investigators);
+                this.conversations.progressInvestigators(active.messageId, active.investigators, active.evidence);
               }
               if (checkpoint.exploration && !active.environment.tainted) {
                 active.exploration = this.exploration(checkpoint.exploration, job.apiKey?.investigator.model.id ?? job.model, active.evidence, job.apiKey?.investigator.model.provider);

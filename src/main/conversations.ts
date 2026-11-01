@@ -119,10 +119,11 @@ export class Conversations {
     if (!Number.isInteger(maximum) || maximum < 1 || maximum > INVESTIGATOR_MAX) throw new Error('Choose one to eight concurrent investigators.');
     this.db.prepare("INSERT OR REPLACE INTO settings VALUES ('maxInvestigators', ?)").run(String(maximum));
   }
-  progressInvestigators(messageId: string, investigators: InvestigatorTask[], knowledgePublication?: LiveResult['knowledgePublication']): void {
-    if (this.protect(messageId, investigators)) return;
-    this.db.prepare("UPDATE live_attempts SET result = json_patch(COALESCE(result, '{}'), ?) WHERE message_id = ?")
-      .run(JSON.stringify({ investigators, ...(knowledgePublication ? { knowledgePublication } : {}) }), messageId);
+  progressInvestigators(messageId: string, investigators: InvestigatorTask[], evidence: Evidence[], knowledgePublication?: LiveResult['knowledgePublication']): void {
+    if (this.protect(messageId, { investigators, evidence })) return;
+    // A task checkpoint and its main-owned citation ledger survive or fail together.
+    this.db.prepare("UPDATE live_attempts SET result = json_patch(COALESCE(result, '{}'), ?), evidence = ? WHERE message_id = ?")
+      .run(JSON.stringify({ investigators, ...(knowledgePublication ? { knowledgePublication } : {}) }), JSON.stringify(evidence), messageId);
   }
 
   select(id: string): void {

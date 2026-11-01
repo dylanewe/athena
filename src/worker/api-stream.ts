@@ -5,6 +5,9 @@ import { streamSimple as anthropic } from '@earendil-works/pi-ai/api/anthropic-m
 import { API_OUTPUT_TOKENS, type ApiGrant } from '../shared/api-models';
 import type { StreamObservation } from './chatgpt-stream';
 import { checkBeforeModelSend } from '../main/secret-check';
+import { transientHttpFailure } from './request-failures';
+
+const TRANSIENT_API_ERRORS = new Set(['internal_error', 'server_error', 'api_error', 'overloaded_error', 'service_unavailable', 'temporarily_unavailable', 'timeout_error']);
 
 /** API-key transport only. Never chooses credentials, endpoint, route, or another model. */
 export function apiStream(model: Model<Api>, context: TranscriptContext, grant: ApiGrant, signal: AbortSignal, allowance: number, observation: StreamObservation, http: typeof fetch = fetch, check: (material: unknown) => void = checkBeforeModelSend): AssistantMessageEventStream {
@@ -21,7 +24,7 @@ export function apiStream(model: Model<Api>, context: TranscriptContext, grant: 
     let response: Response;
     try { response = await http(input, { ...init, redirect: 'error', signal: requestSignal }); }
     catch (error) { observation.transient = error instanceof TypeError && !requestSignal.aborted; throw error; }
-    observation.transient = [500, 502, 503, 504].includes(response.status);
+    observation.transient = transientHttpFailure(response.status, undefined, TRANSIENT_API_ERRORS);
     if (!response.body) return response;
     let size = 0;
     let abort: (() => void) | undefined;
@@ -38,7 +41,18 @@ export function apiStream(model: Model<Api>, context: TranscriptContext, grant: 
       },
       flush() { if (abort) requestSignal.removeEventListener('abort', abort); },
     }));
-    return new Response(bounded, { status: response.status, statusText: response.statusText, headers: response.headers });
+    const metadata = { status: response.status, statusText: response.statusText, headers: response.headers };
+    const result = new Response(bounded, metadata);
+    if (observation.transient) {
+      let text: string;
+      try { text = await result.text(); }
+      catch (error) { observation.transient = false; throw error; }
+      let body: unknown;
+      try { body = JSON.parse(text); } catch { /* An unclassified gateway failure may still be transient. */ }
+      observation.transient = transientHttpFailure(response.status, body, TRANSIENT_API_ERRORS);
+      return new Response(text, metadata);
+    }
+    return result;
   };
   let terminal = false, anthropicStop = false;
   const raw = stream(model as never, context, {

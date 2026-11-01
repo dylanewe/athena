@@ -3,6 +3,9 @@ import { stream } from '@earendil-works/pi-ai/api/openai-responses';
 import { bearer, readJSON, RESOURCE, responseFailure } from '../main/chatgpt-protocol';
 import { CHATGPT_ERRORS, parseChatGPTUsage, type ChatGPTFailure, type ChatGPTUsage } from '../shared/chatgpt';
 import { checkBeforeModelSend } from '../main/secret-check';
+import { transientHttpFailure } from './request-failures';
+
+const TRANSIENT_CHATGPT_ERRORS = new Set(['subscription_sharing_usage_unavailable', 'subscription_sharing_user_unavailable']);
 
 // Catalog supplies identity, not trustworthy limits/prices. Zero metadata here is
 // an adapter placeholder, never a displayed price, usage count, or token limit.
@@ -43,10 +46,11 @@ export function chatgptStream(model: string, context: TranscriptContext, token: 
           try { response = await http(url, { ...options, redirect: 'error' }); }
           catch (error) { observation.transient = error instanceof TypeError && !signal.aborted; throw error; }
           if (!response.ok) {
-            observation.transient = [500, 502, 503, 504].includes(response.status);
             let body = {};
             try { body = await readJSON(response); } catch { /* Only application-authored errors escape. */ }
-            return fail(responseFailure(response.status, body));
+            const reason = responseFailure(response.status, body);
+            observation.transient = reason === 'unavailable' && transientHttpFailure(response.status, body, TRANSIENT_CHATGPT_ERRORS);
+            return fail(reason);
           }
           const mediaType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
           if ((mediaType && mediaType !== 'text/event-stream') || !response.body) {

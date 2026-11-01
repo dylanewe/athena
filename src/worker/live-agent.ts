@@ -87,7 +87,7 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
           }
           capabilities.reportUsage?.(request, observation.usage);
           const result = await raw.result();
-          if (!['stop', 'toolUse'].includes(result.stopReason) && observation.transient && !deliveredContent && attempt < 2 && !requestSignal.aborted) continue;
+          if (!['stop', 'toolUse'].includes(result.stopReason) && observation.transient && observation.failure === 'unavailable' && !deliveredContent && attempt < 2 && !requestSignal.aborted) continue;
           for (const event of events) output.push(event);
           output.end(); return;
         }

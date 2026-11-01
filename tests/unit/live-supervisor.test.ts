@@ -484,6 +484,26 @@ test.each(['.env', '../outside.ts'])('tool calls cannot bypass source policy for
   expect(db.workspace().selected!.messages.at(-1)?.evidence).toEqual([]);
 });
 
+test.each([
+  'subscription_sharing_usage_limit_exceeded', 'subscription_sharing_invalid_user', 'chatpass_v2_scope_not_authorized',
+  'subscription_sharing_user_not_eligible', 'model_not_found', 'context_length_exceeded', 'unrecognized_provider_code',
+])('a transient-looking 503 never retries explicit non-transient ChatGPT error %s', async code => {
+  http = async (_url, init) => { requests.push(JSON.parse(String(init?.body))); return Response.json({ error: { code } }, { status: 503 }); };
+  jobs.start(null, 'A bounded request'); await idle();
+  expect(requests).toHaveLength(1);
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'failed', requests: 1 });
+});
+
+test('explicit temporary ChatGPT unavailability may retry within the same request allowance', async () => {
+  http = async (_url, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    return requests.length < 3 ? Response.json({ error: { code: 'subscription_sharing_user_unavailable' } }, { status: 503 }) : new Response(new TextEncoder().encode(textResponse('Recovered')));
+  };
+  jobs.start(null, 'Recover a temporary outage'); await idle();
+  expect(requests).toHaveLength(3);
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', text: 'Recovered', requests: 3, usageComplete: false });
+});
+
 test('an investigator transient failure preserves evidence and retries at most twice within the shared job', async () => {
   const scripts = [functionResponse('investigate', { question: 'Find the answer' }), toolResponse(root)];
   http = async (_url, init) => {

@@ -312,9 +312,16 @@ test.each([401, 403, 429, 503])('HTTP %i retries only transient requests, at mos
   expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'failed', requests: requests.length });
 });
 
+test.each(['invalid_api_key', 'authentication_error', 'permission_error', 'insufficient_quota', 'rate_limit_exceeded', 'unrecognized_provider_code'])('a transient-looking 503 never retries explicit API-key error %s', async code => {
+  http = async (_url, init) => { requests.push({ url: '', body: JSON.parse(String(init?.body)), headers: new Headers() }); return Response.json({ error: { code } }, { status: 503 }); };
+  supervisor.start(null, 'A bounded request'); await idle();
+  expect(requests).toHaveLength(1); expect(reservations).toHaveLength(1);
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'failed', requests: 1 });
+});
+
 test('a transient retry can succeed without duplicating tool calls and counts all attempt usage', async () => {
   let calls = 0;
-  http = async (_url, init) => { requests.push({ url: '', body: JSON.parse(String(init?.body)), headers: new Headers() }); return ++calls < 3 ? new Response('{}', { status: 503 }) : new Response(response('Recovered')); };
+  http = async (_url, init) => { requests.push({ url: '', body: JSON.parse(String(init?.body)), headers: new Headers() }); return ++calls < 3 ? Response.json({ error: { code: 'server_error' } }, { status: 503 }) : new Response(response('Recovered')); };
   supervisor.start(null, 'Recover from temporary outage'); await idle();
   expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', text: 'Recovered', requests: 3, usageComplete: false, usage: { input: 20, output: 5 } });
   expect(reservations).toHaveLength(3);

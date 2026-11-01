@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Conversations } from '../../src/main/conversations';
-import type { LiveResult } from '../../src/shared/live';
+import type { Evidence, LiveResult } from '../../src/shared/live';
 
 test('restart retains interrupted streamed text without replaying its unfinished context', () => {
   const directory = mkdtempSync(join(tmpdir(), 'athena-live-history-'));
@@ -39,6 +39,35 @@ test('restart marks checkpointed findings provisional and retains detailed explo
     expect(JSON.stringify(db.workspace())).not.toContain('PRIVATE_EXPLORATION');
     expect(db.liveContext(job.conversationId).history).toEqual([]);
   } finally { db.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('batch checkpoints retain main-owned evidence for navigation before completion and after abrupt restart', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'athena-task-evidence-'));
+  let db = new Conversations(join(directory, 'conversations.sqlite'));
+  try {
+    const job = db.beginLive(null, 'Investigate', binding);
+    const evidence: Evidence = { id: 'E1', text: 'export const answer = 42;', citation: { folder: '/approved', repository: null, path: 'answer.ts', start: 1, end: 1, revision: null, contentIdentity: 'sha256:observed' } };
+    db.progressLive(job.messageId, '', 'Investigators running');
+    db.progressInvestigators(job.messageId, [{ id: 'T1', question: 'Find the answer', scope: 'API', status: 'running', result: {
+      status: 'partial', findings: [{ claim: 'The value is 42', support: 'source', evidenceIds: ['E1'] }], evidence: [{ ...evidence, text: 'export const answer' }], inspectedScope: ['/approved/answer.ts'], scopeTruncated: false, unresolvedQuestions: [], candidateKnowledgeChanges: [],
+    } }], [evidence]);
+    expect(db.workspace().selected!.messages.at(-1)!.evidence).toEqual([evidence]);
+    db.close(); db = new Conversations(join(directory, 'conversations.sqlite'));
+    expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'cancelled', investigators: [{ status: 'cancelled' }], evidence: [evidence] });
+    expect(db.liveContext(job.conversationId).history).toEqual([]);
+  } finally { db.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('sealed conversations cannot persist batch checkpoint evidence or findings', () => {
+  const db = new Conversations(':memory:');
+  try {
+    const job = db.beginLive(null, 'Investigate', binding);
+    db.markEphemeral(job.messageId);
+    db.progressInvestigators(job.messageId, [{ id: 'T1', scope: 'API', question: 'Inspect', status: 'running' }], [{ id: 'E1', text: 'synthetic-environment-canary', citation: { folder: '/approved', repository: null, path: '.env', start: 1, end: 1, revision: null, contentIdentity: 'sha256:observed' } }]);
+    expect(db.workspace().selected!.messages.at(-1)!.evidence).toEqual([]);
+    expect(db.workspace().selected!.messages.at(-1)!.investigators).toBeUndefined();
+    expect(JSON.stringify(db.workspace())).not.toContain('synthetic-environment-canary');
+  } finally { db.close(); }
 });
 
 test('new live conversations pin identity and retain completed context; demonstrations cannot acquire live authority', () => {
