@@ -1,8 +1,20 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { BUILD_CONSENT } from '../shared/build';
+  let { build, buildDisabled = false }: { build: (repositories: string[]) => Promise<void>; buildDisabled?: boolean } = $props();
+  let buildSelected = $state<string[]>([]);
+  let paidAccepted = $state(false);
+  async function startBuild() {
+    if (!paidAccepted || !selectedRepositories.length || buildDisabled) return;
+    paidAccepted = false; busy = true; error = '';
+    try { await build(selectedRepositories.map(repo => repo.name)); }
+    catch (failure) { error = failure instanceof Error ? failure.message : 'Build could not start. Review model settings and retry explicitly.'; }
+    finally { busy = false; }
+  }
   import { FOLDER_CONSENT, type InventoryWorkspace } from '../shared/inventory';
 
   let inventory = $state<InventoryWorkspace | null>(null);
+  const selectedRepositories = $derived(inventory?.repositories.filter(repo => repo.presence === 'present' && buildSelected.includes(repo.name)) ?? []);
   let error = $state('');
   let busy = $state(false);
   let accepted = $state(false);
@@ -70,6 +82,16 @@
       </section>
     {/if}
     {#if inventory}
+      <section class="consent" aria-label="Build or refresh knowledge">
+        <h2>Build or refresh knowledge</h2>
+        <p>Select up to eight repositories below for a broader architectural overview, separate from local discovery or a conversation question. Current knowledge is reused; stale and uncovered material is investigated within shared job limits.</p>
+        <p>{BUILD_CONSENT}</p>
+        {#each selectedRepositories as repository}<p class="path">{repository.name} · {repository.path}</p>{/each}
+        {#if !selectedRepositories.length}<p class="meta">Select repositories in the inventory below. No build runs on launch, discovery, registration or hint edits.</p>{/if}
+        <label class="check"><input type="checkbox" bind:checked={paidAccepted} disabled={busy || buildDisabled} /> I authorize paid model processing for this build</label>
+        <button class="primary" disabled={busy || scanning || buildDisabled || !paidAccepted || !selectedRepositories.length || selectedRepositories.length > 8} onclick={startBuild}>Build/refresh knowledge</button>
+        {#if buildDisabled}<p class="meta">Finish or stop the current job before starting a build.</p>{/if}
+      </section>
       <section class="discovery" aria-label="Discovery">
         <div class="actions">
           <strong role="status" aria-live="polite">{scanning ? 'Discovering locally…' : inventory.discovery.status === 'complete' ? 'Discovery complete' : inventory.discovery.status === 'cancelled' ? 'Discovery cancelled — results are partial' : inventory.discovery.status === 'failed' ? 'Discovery failed — rescan to retry' : 'Ready to discover'}</strong>
@@ -146,6 +168,7 @@
         {#each inventory.repositories as repository (repository.name)}
           <article class="repository">
             <div class="repository-heading"><h3>{repository.name}</h3><span class="demo-badge">Unexamined</span></div>
+            <label class="check"><input type="checkbox" aria-label={`Select ${repository.name} for knowledge build`} value={repository.name} bind:group={buildSelected} onchange={() => paidAccepted = false} disabled={busy || scanning || buildDisabled || repository.presence !== 'present'} /> Include in knowledge build</label>
             <p class="path">{repository.path}</p>
             <p class="meta">{repository.presence === 'missing' ? 'Missing — rescan its new location, then explicitly reconnect above.' : repository.presence === 'unknown' ? 'Location not checked — rescan to verify.' : `${repository.fileCount} discovered files · ${repository.boundaries.length} nested repository boundaries`}</p>
             {#if repository.boundaries.length}<p class="meta">Separate contents: {repository.boundaries.join(', ')}</p>{/if}

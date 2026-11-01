@@ -2,6 +2,7 @@ import type { EnvironmentAction, EnvironmentPermission } from '../shared/environ
 import type { Conversations } from './conversations';
 interface JobControls {
   start(id: string | null, text: string): void;
+  build?(repositories: string[], consent: string): void;
   cancel(): void;
   retry?(messageId: string): void;
   environment?(id: string, action: EnvironmentAction): void;
@@ -38,6 +39,12 @@ export class DesktopGateway {
       case 'send': {
         const input = object(payload, ['conversationId', 'text']);
         this.jobs.start(input.conversationId === null ? null : identifier(input.conversationId), text(input.text, MAX_MESSAGE_LENGTH));
+        break;
+      }
+      case 'build': {
+        const input = object(payload, ['repositories', 'consent']);
+        if (!this.jobs.build || !Array.isArray(input.repositories) || input.repositories.length < 1 || input.repositories.length > 8 || !input.repositories.every(name => typeof name === 'string' && name.length <= 100) || typeof input.consent !== 'string') throw new Error('Invalid desktop request.');
+        this.jobs.build(input.repositories, input.consent);
         break;
       }
       case 'retry': {

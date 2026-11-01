@@ -58,6 +58,11 @@ test.each([
   ['workspace', { unexpected: true }],
   ['environment', { id: '../../.env', action: 'external' }],
   ['environment', { id: '00000000-0000-4000-8000-000000000000', action: 'external', path: '.env' }],
+  ['build', { repositories: ['repo'], consent: 'yes', paid: true }],
+  ['build', { repositories: [], consent: 'yes' }],
+  ['build', { repositories: Array(9).fill('repo'), consent: 'yes' }],
+  ['build', { repositories: [42], consent: 'yes' }],
+  ['build', { repositories: ['repo'], consent: false }],
   ['cancel', []],
   ['exec', { command: 'whoami' }],
 ])('rejects invalid bridge requests without changing state (case %#)', (operation, payload) => {
@@ -83,6 +88,7 @@ test.each([
 ])('rejects an unauthorized window, frame, or document (case %#)', caller => {
   const { bridge, store } = setup();
   expect(() => bridge.dispatch(caller, 'send', { conversationId: null, text: 'Untrusted' })).toThrow('Unauthorized');
+  expect(() => bridge.dispatch(caller, 'build', { repositories: ['repo'], consent: 'yes' })).toThrow('Unauthorized');
   expect(() => bridge.dispatch(caller, 'environment', { id: '00000000-0000-4000-8000-000000000000', action: 'external' })).toThrow('Unauthorized');
   expect(store.workspace().conversations).toEqual([]);
 });

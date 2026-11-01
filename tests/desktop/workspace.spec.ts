@@ -64,6 +64,35 @@ function resume() { if (pausedWorker) { try { process.kill(pausedWorker, 'SIGCON
 test.beforeEach(async () => { directory = realpathSync(mkdtempSync(join(tmpdir(), 'athena-desktop-'))); await launch(); });
 test.afterEach(async () => { resume(); await application?.close().catch(() => {}); rmSync(directory, { recursive: true, force: true }); });
 
+test('repository build is an explicit paid action, persists source coverage and opens existing knowledge search', async () => {
+  const root = join(directory, 'repo'); mkdirSync(join(root, '.git'), { recursive: true });
+  writeFileSync(join(root, 'answer.ts'), 'export const answer = 42;\n');
+  await installLiveFixture(application, directory, root, { investigation: { question: 'Build overview', paths: ['answer.ts'], candidates: [{ id: 'C1', scope: 'repo', topic: 'Answer ownership', summary: 'Answer boundary.', kind: 'responsibility', claim: 'The module owns the answer.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [] }], text: 'Built overview [E1].' } });
+  await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] }); }, root);
+  await page.evaluate(() => window.athena.inventory.chooseFolder());
+  await page.getByRole('button', { name: 'Repositories', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'I understand the folder permission' }).check();
+  await page.getByRole('button', { name: 'Save consent and discover' }).click();
+  await expect.poll(() => page.evaluate(async () => (await window.athena.inventory.snapshot()).discovery.status)).not.toBe('running');
+  expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: { workers: number } }).liveFixture.workers)).toBe(0);
+  await page.getByLabel('Documentation starting directories for repo', { exact: true }).fill('notes');
+  await page.getByRole('button', { name: 'Save documentation hints for repo', exact: true }).click();
+  expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: { workers: number } }).liveFixture.workers)).toBe(0);
+  await page.getByLabel('Select repo for knowledge build', { exact: true }).check();
+  await expect(page.getByRole('region', { name: 'Build or refresh knowledge' })).toContainText(root);
+  await expect(page.getByRole('button', { name: 'Build/refresh knowledge', exact: true })).toBeDisabled();
+  await page.getByRole('checkbox', { name: 'I authorize paid model processing for this build' }).check();
+  await page.getByRole('button', { name: 'Build/refresh knowledge', exact: true }).click();
+  await expect.poll(() => page.evaluate(async () => (await window.athena.workspace()).activeConversationId)).toBeNull();
+  await expect(page.getByRole('region', { name: 'Knowledge build coverage' })).toContainText('repo');
+  await expect(page.getByRole('region', { name: 'Knowledge build coverage' })).toContainText('answer.ts');
+  await page.getByRole('button', { name: 'Inspect retained knowledge', exact: true }).click();
+  await expect(page.getByText('Answer ownership', { exact: true }).first()).toBeVisible();
+  await application.close(); await launch();
+  expect(await page.evaluate(async () => (await window.athena.workspace()).selected!.messages.at(-1)!.build?.repositories)).toEqual(['repo']);
+  expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: { workers: number } }).liveFixture.workers)).toBe(0);
+});
+
 test('parallel investigator scope/status and configurable concurrency survive restart through the real utility and bridge', async () => {
   await page.getByRole('button', { name: 'Model settings', exact: true }).click();
   await expect(page.getByLabel('Concurrent investigators', { exact: true })).toHaveValue('3');
@@ -456,7 +485,7 @@ test('local preview can be revoked from the UI without external permission and e
 });
 
 test('renderer stays sandboxed with narrow bridge and rejects malformed retry requests', async () => {
-  expect(await page.evaluate(() => ({ node: typeof (globalThis as Record<string, unknown>).process, require: typeof (globalThis as Record<string, unknown>).require, bridge: Object.keys(window.athena).sort() }))).toEqual({ node: 'undefined', require: 'undefined', bridge: ['apiModels','cancel','chatgpt','environment','inventory','knowledge','models','onChange','resolutions','retry','select','send','setMaxInvestigators','sources','workspace'] });
+  expect(await page.evaluate(() => ({ node: typeof (globalThis as Record<string, unknown>).process, require: typeof (globalThis as Record<string, unknown>).require, bridge: Object.keys(window.athena).sort() }))).toEqual({ node: 'undefined', require: 'undefined', bridge: ['apiModels','build','cancel','chatgpt','environment','inventory','knowledge','models','onChange','resolutions','retry','select','send','setMaxInvestigators','sources','workspace'] });
   expect(await application.evaluate(({ app, BrowserWindow }) => app.getAppMetrics().find(metric => metric.pid === BrowserWindow.getAllWindows()[0].webContents.getOSProcessId())?.sandboxed)).toBe(true);
   for (const url of ['https://example.com', 'file:///etc/hosts']) expect(await page.evaluate(async url => { try { await fetch(url); return 'accessible'; } catch { return 'denied'; } }, url)).toBe('denied');
   expect(await page.evaluate(async () => { try { await window.athena.retry('arbitrary-path'); return 'accepted'; } catch { return 'rejected'; } })).toBe('rejected');

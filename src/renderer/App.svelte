@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { BUILD_CONSENT } from '../shared/build';
+  import BuildCoverageView from './BuildCoverage.svelte';
   import EnvironmentPermissions from './EnvironmentPermissions.svelte';
   import InvestigationResult from './InvestigationResult.svelte';
   import InventoryView from './Inventory.svelte';
@@ -167,7 +169,10 @@
   </aside>
 
   {#if section === 'inventory'}
-    <InventoryView />
+    <InventoryView buildDisabled={!!active || busy} build={async repositories => {
+      if (await change(() => window.athena.build(repositories, BUILD_CONSENT))) { section = 'conversation'; composingNew = false; }
+      else throw new Error(error);
+    }} />
   {:else if section === 'sources'}
     <SourcesView />
   {:else if section === 'knowledge'}
@@ -197,6 +202,7 @@
                 {#if message.ephemeral}<p class="draft-note">Ephemeral · Not saved · May contain sensitive values</p>{/if}
                 <p>{message.text}</p>
                 {#if message.status === 'running' && message.activity}<p class="draft-note">{message.activity}</p>{/if}
+                {#if message.build}<BuildCoverageView coverage={message.build} status={message.status} openConversation={id => { void select(id); }} />{/if}
                 {#if message.knowledgeReferences?.length}
                   <details><summary>Retrieved knowledge ({message.knowledgeReferences.length})</summary>
                     {#each message.knowledgeReferences as reference}<button type="button" onclick={() => { knowledgeMessage = ''; knowledgeRecord = reference.id; section = 'knowledge'; }}>Inspect knowledge: {reference.topic}</button>{/each}

@@ -1,3 +1,4 @@
+import type { BuildCoverage, BuildScope } from '../shared/build';
 import { randomUUID } from 'node:crypto';
 import { checkBeforeModelSend, environmentValues } from './secret-check';
 import { EPHEMERAL_NOTICE } from '../shared/environment';
@@ -72,6 +73,7 @@ export class Conversations {
       WHERE json_extract(result, '$.status') = 'running';`);
     const attempts = this.db.prepare('PRAGMA table_info(live_attempts)').all().map(row => row.name);
     if (!attempts.includes('ephemeral')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN ephemeral INTEGER NOT NULL DEFAULT 0');
+    if (!attempts.includes('build_scope')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN build_scope TEXT');
     if (!attempts.includes('exploration')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN exploration TEXT');
     // Interrupted child work is terminal, never resumed on restart.
     for (const row of this.db.prepare('SELECT message_id, result FROM live_attempts WHERE result IS NOT NULL').all()) {
@@ -118,6 +120,11 @@ export class Conversations {
   setMaxInvestigators(maximum: number): void {
     if (!Number.isInteger(maximum) || maximum < 1 || maximum > INVESTIGATOR_MAX) throw new Error('Choose one to eight concurrent investigators.');
     this.db.prepare("INSERT OR REPLACE INTO settings VALUES ('maxInvestigators', ?)").run(String(maximum));
+  }
+  progressBuild(messageId: string, build: BuildCoverage): void {
+    if (this.protect(messageId, { build })) return;
+    this.db.prepare("UPDATE live_attempts SET result = json_patch(COALESCE(result, '{}'), ?) WHERE message_id = ?")
+      .run(JSON.stringify({ build }), messageId);
   }
   progressInvestigators(messageId: string, investigators: InvestigatorTask[], evidence: Evidence[], knowledgePublication?: LiveResult['knowledgePublication']): void {
     if (this.protect(messageId, { investigators, evidence })) return;
@@ -183,7 +190,7 @@ export class Conversations {
       ...(result.checkouts ? { checkouts: result.checkouts } : {}), ...(result.investigation?.inspectedScope?.length ? { sourceBacked: true } : {}) };
   }
 
-  beginLive(id: string | null, prompt: string, binding: ConversationBinding, retryId?: string): { conversationId: string; messageId: string; prompt: string } {
+  beginLive(id: string | null, prompt: string, binding: ConversationBinding, retryId?: string, build?: BuildScope): { conversationId: string; messageId: string; prompt: string } {
     if (this.workspace().activeConversationId) throw new Error('A conversation is already running.');
     let userId: string = randomUUID();
     if (retryId) {
@@ -209,15 +216,21 @@ export class Conversations {
       const insert = this.db.prepare('INSERT INTO messages(id, conversation_id, role, text, status) VALUES (?, ?, ?, ?, ?)');
       if (!retryId) insert.run(userId, id, 'user', prompt.trim(), 'complete');
       insert.run(messageId, id, 'assistant', '', 'running');
-      this.db.prepare('INSERT INTO live_attempts(message_id, user_id, prompt) VALUES (?, ?, ?)').run(messageId, userId, prompt.trim());
+      this.db.prepare('INSERT INTO live_attempts(message_id, user_id, prompt, build_scope) VALUES (?, ?, ?, ?)').run(messageId, userId, prompt.trim(), build ? JSON.stringify(build) : null);
     });
     return { conversationId: id!, messageId, prompt: prompt.trim() };
   }
 
-  retryTarget(messageId: string): { conversationId: string; prompt: string } {
-    const row = this.db.prepare('SELECT m.conversation_id, a.prompt FROM live_attempts a JOIN messages m ON m.id = a.message_id WHERE m.id = ?').get(messageId);
+  retryTarget(messageId: string): { conversationId: string; prompt: string; build?: BuildScope } {
+    const row = this.db.prepare('SELECT m.conversation_id, a.prompt, a.build_scope FROM live_attempts a JOIN messages m ON m.id = a.message_id WHERE m.id = ?').get(messageId);
     if (!row) throw new Error('Attempt not found.');
-    return { conversationId: String(row.conversation_id), prompt: String(row.prompt) };
+    return { conversationId: String(row.conversation_id), prompt: String(row.prompt), ...(row.build_scope ? { build: JSON.parse(String(row.build_scope)) as BuildScope } : {}) };
+  }
+
+  /** A receipt is only a reuse hint; caller must also check current knowledge and checkout identities. */
+  buildReceipts(generation: string): (LiveResult & { scope: BuildScope; owner: { conversationId: string; messageId: string } })[] {
+    return this.db.prepare("SELECT a.result, a.build_scope, a.message_id, m.conversation_id FROM live_attempts a JOIN messages m ON m.id = a.message_id WHERE json_extract(a.result, '$.status') = 'complete' AND json_extract(a.result, '$.buildGeneration') = ? AND a.build_scope IS NOT NULL ORDER BY a.rowid DESC LIMIT 100").all(generation)
+      .map(row => ({ ...JSON.parse(String(row.result)) as LiveResult, scope: JSON.parse(String(row.build_scope)) as BuildScope, owner: { conversationId: String(row.conversation_id), messageId: String(row.message_id) } }));
   }
 
   /** Commit the safe marker BEFORE releasing any actual environment contents. */

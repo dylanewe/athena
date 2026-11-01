@@ -19,6 +19,7 @@ export interface Message {
   role: 'user' | 'assistant';
   text: string;
   status: MessageStatus;
+  build?: import('./build').BuildCoverage;
   evidence?: Evidence[];
   investigation?: InvestigatorResult;
   investigators?: InvestigatorTask[];
@@ -63,6 +64,7 @@ export interface DesktopBridge {
   workspace(): Promise<Workspace>;
   select(conversationId: string): Promise<Workspace>;
   send(conversationId: string | null, text: string): Promise<Workspace>;
+  build(repositories: string[], consent: string): Promise<Workspace>;
   cancel(): Promise<Workspace>;
   setMaxInvestigators(maximum: number): Promise<Workspace>;
   retry(messageId: string): Promise<Workspace>;

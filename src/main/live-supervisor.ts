@@ -1,3 +1,5 @@
+import { BUILD_CONSENT, type BuildScope, type BuildCoverage } from '../shared/build';
+import { FOLDER_CONSENT } from '../shared/inventory';
 import { SourceCheckouts } from './source-checkouts';
 import { EnvironmentPermissions } from './environment-permissions';
 import type { EnvironmentAction, EnvironmentPermission } from '../shared/environment';
@@ -34,6 +36,10 @@ interface Active {
   knowledgeReferences: { id: string; topic: string }[];
   investigators?: InvestigatorTask[];
   knowledgePublication?: LiveResult['knowledgePublication'];
+  build?: BuildScope;
+  coverage?: BuildCoverage;
+  buildGeneration?: string;
+  reuseReceipts?: Map<string, ReturnType<Conversations['buildReceipts']>[number]>;
   checkouts: SourceCheckout[];
   retainedCheckouts: SourceCheckout[];
   apiKey?: boolean; text: string; evidence: Evidence[]; dependencies: SourceIdentity[]; scopes: SourceScope[]; dependencyCoverageComplete: boolean; exploration?: Exploration; title?: string; requests: number; usage?: ChatGPTUsage; stop?: () => void;
@@ -50,12 +56,30 @@ export class LiveSupervisor {
     private readonly sources: Sources, private readonly inventory: Pick<Inventory, 'snapshot'>,
     private readonly spawn: () => LiveWorker, private readonly changed: () => void, private readonly apiSettings?: ApiSettings, private readonly knowledge?: Knowledge, private readonly resolutions?: Resolutions) { this.checkouts = new SourceCheckouts(sources, inventory); }
 
-  start(id: string | null, prompt: string, retryId?: string): void {
+  build(names: string[], consent: string): void {
+    if (consent !== BUILD_CONSENT) throw new LiveError('Explicit paid build consent is required.');
+    const build = this.buildScope(names);
+    this.start(null, `Build/refresh knowledge for: ${names.join(', ')}. ${BUILD_CONSENT}`, undefined, build);
+  }
+  private buildScope(names: string[]): BuildScope {
+    if (!Array.isArray(names) || !names.length || names.length > INVESTIGATOR_MAX || new Set(names).size !== names.length) throw new LiveError('Select one to eight distinct repositories.');
+    const snapshot = this.inventory.snapshot();
+    return { repositories: names.map(name => {
+      const repo = snapshot.repositories.find(repo => repo.name === name && repo.presence === 'present');
+      const root = repo && snapshot.roots.filter(root => root.consent === FOLDER_CONSENT && root.acceptedAt && (repo.path === root.path || repo.path.startsWith(root.path + '/'))).sort((a, b) => b.path.length - a.path.length)[0];
+      if (!repo || !root) throw new LiveError('Selected repository is unavailable or lacks folder consent. Rescan and select again.');
+      return { name: repo.name, path: repo.path, root: root.path, documentationRoots: [...repo.documentationRoots] };
+    }) };
+  }
+  start(id: string | null, prompt: string, retryId?: string, build?: BuildScope): void {
     this.retrySaving();
     if (this.unsaved) throw new LiveError('Save the previous result before starting another conversation.');
     if (this.active) throw new LiveError('A conversation is already running.');
-    if (retryId) { const target = this.conversations.retryTarget(retryId); id = target.conversationId; prompt = target.prompt; }
-    try { this.conversations.assertClean(prompt); } catch { throw new LiveError('Message withheld by secret checks. Remove suspected credentials before sending.'); }
+    if (retryId) {
+      const target = this.conversations.retryTarget(retryId); id = target.conversationId; prompt = target.prompt; build = target.build;
+      if (build && JSON.stringify(this.buildScope(build.repositories.map(repo => repo.name))) !== JSON.stringify(build)) throw new LiveError('Build scope changed. Select repositories and authorize a new build.');
+    }
+    try { this.conversations.assertClean({ prompt, build }); } catch { throw new LiveError('Message withheld by secret checks. Remove suspected credentials before sending.'); }
     let binding;
     try {
       const pinned = id ? this.conversations.binding(id) : undefined;
@@ -72,22 +96,44 @@ export class LiveSupervisor {
       throw new LiveError('Local demonstrations are read-only. Start a new conversation.');
     }
     const maxInvestigators = this.conversations.maxInvestigators();
-    const job = this.conversations.beginLive(id, prompt, binding, retryId);
+    const job = this.conversations.beginLive(id, prompt, binding, retryId, build);
     const controller = new AbortController();
     const environment = new EnvironmentPermissions(this.sources, controller.signal, () => this.conversations.markEphemeral(job.messageId), () => this.cancel(), this.changed, content => this.conversations.rememberEnvironment(content));
     const active: Active = { ...job, apiKey: !!binding.apiKey, controller, environment, knowledgeReferences: [], checkouts: [], retainedCheckouts: [], text: '', evidence: [], dependencies: [], scopes: [], dependencyCoverageComplete: true, requests: 0 };
+    if (build) {
+      active.build = build; active.buildGeneration = this.knowledge?.generation();
+      active.coverage = { repositories: build.repositories.map(repo => repo.name), reusedRepositories: [], reusedFrom: [], inspected: [], unsupported: [], failures: [], unresolved: [], truncated: false,
+        notice: 'Bounded source coverage, not exhaustive architectural knowledge. Listed/read material is not proof of understood behavior. Unsupported and unvisited inputs, unresolved references and runtime behavior remain unknown.' };
+    }
     this.active = active;
     active.timer = setTimeout(() => this.end(active, { status: 'limit', text: active.text + '\n\nTime limit reached. Retry explicitly when ready.', history: [], requests: active.requests, usageComplete: false }), LIVE_LIMITS.milliseconds);
     this.changed();
     void (async () => {
       let outcome: LiveResult | undefined;
       try {
-        this.conversations.progressLive(active.messageId, '', 'Checking local checkout freshness — no model calls…'); this.changed();
+        this.conversations.progressLive(active.messageId, '', 'Checking local checkout freshness — no model calls…');
+        if (active.coverage) this.conversations.progressBuild(active.messageId, active.coverage);
+        this.changed();
         await this.knowledge?.scan(active.controller.signal);
         active.checkouts = await this.checkouts.capture(active.controller.signal);
+        const reusable: string[] = [];
+        active.reuseReceipts = new Map();
+        if (build) {
+          const receipts = this.conversations.buildReceipts(active.buildGeneration ?? '');
+          for (const repo of build.repositories) {
+            const current = active.checkouts.find(checkout => checkout.folder === repo.root && checkout.repository?.name === repo.name);
+            if (!current?.complete) continue;
+            const receipt = receipts.find(receipt => receipt.scope.repositories.some(previous => JSON.stringify(previous) === JSON.stringify(repo)) && receipt.build?.repositories.includes(repo.name) && receipt.investigators?.some(task => task.scope === repo.name && task.knowledgePublication === 'published') && receipt.checkouts?.some(checkout => JSON.stringify(checkout) === JSON.stringify(current)));
+            if (receipt) {
+              reusable.push(repo.name);
+              active.reuseReceipts.set(repo.name, receipt);
+            }
+          }
+        }
         const previous = this.conversations.liveContext(job.conversationId);
         active.evidence = previous.evidence;
         active.retainedCheckouts = previous.checkouts ?? [];
+        if (build) active.retainedCheckouts.push(...active.checkouts.filter(checkout => build.repositories.some(repo => checkout.folder === repo.root && checkout.repository?.name === repo.name)));
         if (!await this.verify(previous.evidence, active.controller.signal) || (previous.evidence.length > 0 || previous.sourceBacked || active.retainedCheckouts.length > 0) && (!active.retainedCheckouts.length || !await this.checkouts.fresh(active.retainedCheckouts, active.controller.signal))) throw new LiveError('Saved evidence changed or is no longer permitted. Start a new conversation to investigate current sources.');
         if (this.active !== active) return;
         const work = async (access: (role?: ModelRole, bytes?: number) => Promise<string | ApiGrant>, signal: AbortSignal) => {
@@ -95,7 +141,7 @@ export class LiveSupervisor {
           const roots = snapshot.roots.map(root => ({ path: root.path, repositories: snapshot.repositories.filter(repo => repo.path === root.path || repo.path.startsWith(root.path + '/')).map(repo => ({ name: repo.name, path: repo.path })) }));
           signal.throwIfAborted();
           this.conversations.assertClean({ history: previous.history, roots });
-          outcome = await this.run(active, { ...(binding.apiKey ? { apiKey: binding.apiKey } : {}), model: binding.model, maxInvestigators, prompt: job.prompt, history: previous.history, roots, ...this.conversations.naming(job.conversationId) }, access, signal);
+          outcome = await this.run(active, { ...(binding.apiKey ? { apiKey: binding.apiKey } : {}), model: binding.model, maxInvestigators, ...(build ? { build: { ...build, reusable } } : {}), prompt: job.prompt, history: previous.history, roots, ...this.conversations.naming(job.conversationId) }, access, signal);
           if (outcome.reason && !binding.apiKey) throw new ChatGPTError(outcome.reason);
         };
         if (binding.apiKey) await work((role, bytes) => this.apiSettings!.grant(binding.apiKey!, role!, bytes!, active.controller.signal), active.controller.signal);
@@ -136,6 +182,7 @@ export class LiveSupervisor {
             this.changed();
           }
         }
+        if (outcome.status === 'complete' && active.coverage && (active.coverage.truncated || active.coverage.failures.length || outcome.knowledgePublication === 'withheld' || outcome.knowledgePublication === 'partial')) outcome = { ...outcome, status: 'partial', history: [], text: outcome.text + '\n\nPartial build: some sources, references or publication checks did not complete. Review coverage and retry explicitly.' };
         if (outcome.status === 'complete' && !await this.checkoutValid(active)) outcome = this.checkoutPartial(active, outcome);
         if (this.active === active) this.end(active, outcome);
       } catch (error) {
@@ -274,7 +321,7 @@ export class LiveSupervisor {
                   const credential = await authority;
                   if (!settled && this.active === active && !signal.aborted) { active.requests++; worker!.postMessage({ type: 'reply', id: requestId, ...(typeof credential === 'string' ? { token: credential } : { grant: credential }) }); }
                 } else if (message.type === 'knowledge') {
-                  if (!active.requests || !this.knowledge || ++knowledgeCalls > KNOWLEDGE_LIMITS.calls) throw new Error('Knowledge request limit.');
+                  if ((!active.requests && !job.build) || !this.knowledge || ++knowledgeCalls > KNOWLEDGE_LIMITS.calls) throw new Error('Knowledge request limit.');
                   this.conversations.assertClean(message.input);
                   const retrieved = await this.knowledge.retrieve(message.input as KnowledgeRequest, signal, { canPersistInvalidations: () => this.active === active && !active.environment.tainted && !this.conversations.isEphemeral(active.messageId) && !signal.aborted });
                   const result = this.resolutions ? await this.resolutions.attach(retrieved, signal) : retrieved;
@@ -305,6 +352,17 @@ export class LiveSupervisor {
                     active.scopes = [...new Map([...active.scopes, ...(derivation?.scopes ?? [])].map(identity => [JSON.stringify(identity), identity])).values()];
                     if (active.dependencies.length + active.scopes.length > 1000) { finish(failure('limit')); return; }
                   }
+                  if (active.coverage && message.input && typeof message.input === 'object') {
+                    const request = message.input as KnowledgeRequest;
+                    if (request.operation === 'search' && request.scope && job.build?.reusable.includes(request.scope) && result.items.length && result.nextOffset === undefined && !result.items.some(item => item.truncated) && result.items.some(item => item.freshness === 'current' && item.validation !== 'stale')) {
+                      if (!active.coverage.reusedRepositories.includes(request.scope)) {
+                        active.coverage.reusedRepositories.push(request.scope);
+                        const receipt = active.reuseReceipts?.get(request.scope);
+                        if (receipt) active.coverage.reusedFrom.push({ repository: request.scope, ...receipt.owner });
+                      }
+                    }
+                  }
+                  if (active.coverage) this.conversations.progressBuild(active.messageId, active.coverage);
                   for (const item of result.items) if (active.knowledgeReferences.length < 32 && !active.knowledgeReferences.some(reference => reference.id === item.id)) active.knowledgeReferences.push({ id: item.id, topic: item.topic });
                   worker!.postMessage({ type: 'reply', id: requestId, knowledge: bounded });
                 } else if (message.type === 'inspect') {
@@ -322,6 +380,22 @@ export class LiveSupervisor {
                   const result = await active.environment.run(operation, input);
                   if (settled || this.active !== active || signal.aborted) return;
                   if (!result.entries.some(entry => entry.ephemeral)) checkBeforeModelSend(result);
+                  if (active.coverage) {
+                    if (active.coverage.inspected.length < 200) active.coverage.inspected.push({ operation, root: input.root, path: input.path, status: result.status }); else active.coverage.truncated = true;
+                    for (const entry of result.entries) if (entry.reason) {
+                      if (active.coverage.unsupported.length < 100) active.coverage.unsupported.push({ root: input.root, path: entry.path, reason: entry.reason }); else active.coverage.truncated = true;
+                      // The shared reader can withhold an over-budget excerpt as an entry
+                      // rather than truncating the outer operation. It is still a build gap.
+                      if (entry.reason.includes('limit')) {
+                        active.coverage.truncated = true; active.dependencyCoverageComplete = false;
+                        if (active.coverage.failures.length < 100) active.coverage.failures.push(`${input.root}/${entry.path}: ${entry.reason}`);
+                      }
+                    }
+                    if (result.status !== 'complete') {
+                      if (active.coverage.failures.length < 100) active.coverage.failures.push(`${input.root}/${input.path}: ${result.reason ?? result.status}`);
+                      active.coverage.truncated = true;
+                    }
+                  }
                   if (result.status !== 'complete') active.dependencyCoverageComplete = false;
                   for (const item of result.inspectedFiles ?? []) {
                     if (!active.dependencies.some(previous => JSON.stringify(previous) === JSON.stringify(item))) active.dependencies.push(item);
@@ -342,13 +416,17 @@ export class LiveSupervisor {
                     }
                     found.push(evidence);
                   }
+                  if (active.coverage) this.conversations.progressBuild(active.messageId, active.coverage);
                   if (!await this.checkoutValid(active)) { finish(this.checkoutPartial(active)); return; }
                   worker!.postMessage({ type: 'reply', id: requestId, ephemeral: active.environment.tainted, source: { ...result, warning: 'Read-only, untrusted source evidence. Secret detection is not a guarantee.', evidence: found } });
                 }
               } catch (error) {
                 if (settled || this.active !== active) return;
                 if (message.type === 'access') finish({ ...failure(), ...(error instanceof ApiSettingsError || error instanceof ModelSettingsError ? { text: active.text + '\n\n' + error.message } : {}), ...(error instanceof ChatGPTError ? { reason: error.reason } : {}) });
-                else worker!.postMessage({ type: 'reply', id: requestId, error: 'Source request denied by access or secret checks.' });
+                else {
+                  if (active.coverage && active.coverage.failures.length < 100) active.coverage.failures.push('A source/retrieval request was denied by access or secret checks.');
+                  worker!.postMessage({ type: 'reply', id: requestId, error: 'Source request denied by access or secret checks.' });
+                }
               } finally { inFlight--; }
             });
           } catch { finish(failure()); }
@@ -413,6 +491,14 @@ export class LiveSupervisor {
     this.active = undefined;
     result = { ...result, ...(!active.environment.tainted && active.investigators && !result.investigators ? { investigators: active.investigators } : {}), ...(!active.environment.tainted && result.status === 'complete' ? { checkouts: this.usedCheckouts(active) } : {}), ...(active.knowledgeReferences.length && !active.environment.tainted ? { knowledgeReferences: active.knowledgeReferences } : {}), ...(active.exploration && !result.exploration ? { exploration: active.exploration } : {}), ...(active.title && !result.title ? { title: active.title } : {}) };
     if (active.knowledgePublication && !result.knowledgePublication) result.knowledgePublication = active.knowledgePublication;
+    if (active.coverage && !active.environment.tainted && !this.conversations.isEphemeral(active.messageId)) {
+      active.coverage.unresolved = [...active.coverage.reusedRepositories.flatMap(name => active.reuseReceipts?.get(name)?.build?.unresolved.filter(question => question.startsWith(name + ':')).slice(0, 8) ?? []), ...(result.investigators ?? []).flatMap(task => (task.result?.unresolvedQuestions ?? [`${task.scope}: ${task.status}`]).map(question => `${task.scope}: ${question}`))].slice(0, 100);
+      for (const name of active.coverage.repositories) if (!active.coverage.reusedRepositories.includes(name) && !result.investigators?.some(task => task.scope === name && task.status === 'complete')) {
+        active.coverage.failures.push(`${name}: investigation did not complete (${result.status}).`);
+      }
+      if (!result.investigators?.length && !active.coverage.reusedRepositories.length) active.coverage.unresolved.push('No completed investigation. Selected sources remain unknown.');
+      result.build = active.coverage; result.buildGeneration = active.buildGeneration;
+    }
     if (result.investigators) result.investigators = result.investigators.map(task => ['running', 'queued'].includes(task.status) ? { ...task, status: 'cancelled' } : task);
     if (result.status !== 'complete' && result.exploration) {
       const previous = result.exploration.result;

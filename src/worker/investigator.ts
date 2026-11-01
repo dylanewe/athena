@@ -8,7 +8,7 @@ import type { LiveCapabilities } from './live-agent';
 import { retainedHistory, SOURCE_INSTRUCTIONS } from './agent-context';
 
 interface InvestigatorRuntime {
-  knowledge?: () => import('../shared/knowledge').KnowledgeContext[];
+  knowledge?: (scope?: string) => import('../shared/knowledge').KnowledgeContext[];
   // Factory supplies the job's frozen model, shared request gate and cancellation.
   createAgent(tools: AgentTool[], systemPrompt: string): Agent;
   source: LiveCapabilities['source'];
@@ -112,7 +112,7 @@ export function investigatorTool(roots: LiveStart['roots'], runtime: Investigato
           while (!signal.aborted && next < tasks.length) {
             const task = tasks[next++]!;
             task.status = 'running'; notify();
-            const child = singleInvestigator(roots, { ...runtime, checkpoint: exploration => {
+            const child = singleInvestigator(roots, { ...runtime, knowledge: () => runtime.knowledge?.(task.scope) ?? [], checkpoint: exploration => {
               if (signal.aborted) return;
               task.result = exploration.result;
               if (!input.tasks) runtime.checkpoint(exploration);

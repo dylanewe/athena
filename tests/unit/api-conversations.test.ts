@@ -11,12 +11,14 @@ import { Knowledge } from '../../src/main/knowledge';
 import type { ChatGPTSettings } from '../../src/main/chatgpt-settings';
 import { runLiveAgent } from '../../src/worker/live-agent';
 import type { LiveParentMessage, LiveStart } from '../../src/shared/live';
-import { FOLDER_CONSENT } from '../../src/shared/inventory';
+import { FOLDER_CONSENT, type InventorySnapshot } from '../../src/shared/inventory';
+import { BUILD_CONSENT } from '../../src/shared/build';
 
 let directory: string, root: string, settings: ApiSettings, conversations: Conversations, sources: Sources, supervisor: LiveSupervisor;
 let http: typeof fetch, requests: { url: string; body: Record<string, unknown>; headers: Headers }[], workers: Worker[], reservations: number[];
 let scripts: string[];
 let knowledge: Knowledge;
+let snapshot: InventorySnapshot;
 let changed: () => void;
 function knowledgeCandidate(claim = 'The answer boundary owns the application answer value.') {
   return { id: 'C1', scope: `folder:${root}`, topic: 'Answer boundary', summary: 'A synchronous answer boundary.', kind: 'responsibility', claim, provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [] };
@@ -56,7 +58,8 @@ beforeEach(() => {
   changed = () => {};
   directory = realpathSync(mkdtempSync(join(tmpdir(), 'athena-api-live-'))); root = join(directory, 'repo'); mkdirSync(root); writeFileSync(join(root, 'answer.ts'), 'export const answer = 42;\n');
   conversations = new Conversations(join(directory, 'conversations.sqlite'));
-  const inventory = { snapshot: () => ({ roots: [{ path: root, consent: FOLDER_CONSENT, acceptedAt: 'now', includedLocations: [] }], repositories: [], candidates: [], discovery: { status: 'complete' as const, visited: 0, current: '', nonGitFiles: 1, failures: [] } }) };
+  snapshot = { roots: [{ path: root, consent: FOLDER_CONSENT, acceptedAt: 'now', includedLocations: [] }], repositories: [], candidates: [], discovery: { status: 'complete', visited: 0, current: '', nonGitFiles: 1, failures: [] } };
+  const inventory = { snapshot: () => snapshot };
   sources = new Sources(':memory:', inventory);
   reservations = [];
   settings = new ApiSettings(join(directory, 'api.sqlite'), { available: () => true, encrypt: value => Buffer.from(value), decrypt: value => Buffer.from(value).toString() }, async () => 'fake-helper', {}, n => reservations.push(n));
@@ -74,6 +77,112 @@ beforeEach(() => {
 });
 afterEach(() => { supervisor.cancel(); knowledge.close(); sources.close(); conversations.close(); settings.close(); rmSync(directory, { recursive: true, force: true }); });
 async function idle() { await expect.poll(() => conversations.workspace().activeConversationId).toBeNull(); }
+
+function registerBuildRepository() {
+  mkdirSync(join(root, '.git'));
+  snapshot.repositories.push({ name: 'repo', path: root, presence: 'present', documentationRoots: ['notes'], boundaries: [], fileCount: 1, examined: false });
+}
+
+test('explicit builds investigate undocumented code with the shared scheduler and expose persisted coverage and searchable knowledge', async () => {
+  registerBuildRepository();
+  scripts = [response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }),
+    response(undefined, 'finish_investigation', { findings: [{ claim: 'Value is 42', support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: ['External callers unknown'], candidateKnowledgeChanges: [], knowledgeCandidates: [{ ...knowledgeCandidate(), scope: 'repo' }] }), response('Architectural overview [E1].')];
+  expect(() => supervisor.build(['repo'], 'not consent')).toThrow();
+  expect(() => supervisor.build(['missing'], BUILD_CONSENT)).toThrow();
+  expect(() => supervisor.build(['repo', 'repo'], BUILD_CONSENT)).toThrow();
+  expect(() => supervisor.build(Array(9).fill('repo'), BUILD_CONSENT)).toThrow();
+  expect(workers).toHaveLength(0);
+  supervisor.build(['repo'], BUILD_CONSENT); await idle();
+  const answer = conversations.workspace().selected!.messages.at(-1)!;
+  expect(answer).toMatchObject({ status: 'complete', knowledgePublication: 'published', build: { repositories: ['repo'], inspected: [{ operation: 'read', path: 'answer.ts', status: 'complete' }], reusedRepositories: [] }, investigators: [{ scope: 'repo', status: 'complete' }] });
+  expect(requests.map(r => r.body.model)).toEqual(['investigator-one', 'investigator-one', 'main-one']);
+  expect(JSON.stringify(requests[0].body)).toContain('notes');
+  expect((await knowledge.retrieve({ operation: 'search', query: 'Answer boundary', scope: 'repo' })).items).toHaveLength(1);
+  conversations.close(); conversations = new Conversations(join(directory, 'conversations.sqlite'));
+  expect(conversations.workspace().selected!.messages.at(-1)!.build?.repositories).toEqual(['repo']);
+});
+
+test('unchanged builds reuse retained knowledge without paid calls, but edited callers trigger scoped revalidation', async () => {
+  registerBuildRepository();
+  const finish = response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: ['External callers unknown'], candidateKnowledgeChanges: [], knowledgeCandidates: [{ ...knowledgeCandidate(), scope: 'repo' }] });
+  scripts = [response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }), finish, response('Overview [E1].')];
+  supervisor.build(['repo'], BUILD_CONSENT); await idle();
+  expect(requests).toHaveLength(3);
+  supervisor.build(['repo'], BUILD_CONSENT); await idle();
+  expect(requests).toHaveLength(3);
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', requests: 0, build: { reusedRepositories: ['repo'], unresolved: ['repo: External callers unknown'] } });
+  writeFileSync(join(root, 'caller.ts'), 'import { answer } from "./answer"; console.log(answer);');
+  scripts = [response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }), finish, response('Revalidated overview [E1].')];
+  supervisor.build(['repo'], BUILD_CONSENT); await idle();
+  expect(requests).toHaveLength(6);
+  expect(JSON.stringify(requests[3].body)).toContain('stale');
+  expect(conversations.workspace().selected!.messages.at(-1)?.build?.reusedRepositories).toEqual([]);
+  const retained = await knowledge.retrieve({ operation: 'search', query: 'Answer', scope: 'repo' });
+  expect(retained.items.some(item => item.freshness === 'current')).toBe(true);
+  expect(retained.items.some(item => item.freshness === 'stale')).toBe(true);
+});
+
+test('mixed documentation layouts report unsupported inputs and unresolved references without requiring a manifest', async () => {
+  registerBuildRepository(); mkdirSync(join(root, 'notes')); mkdirSync(join(root, 'odd'));
+  writeFileSync(join(root, 'README.md'), 'Start with the notes; old architecture is only intent.');
+  writeFileSync(join(root, 'notes', 'architecture.txt'), 'The answer module defines the boundary.');
+  writeFileSync(join(root, 'odd', 'decision.rst'), 'An external caller is not available.');
+  writeFileSync(join(root, 'diagram.pdf'), '%PDF unsupported');
+  const paths = ['README.md', 'notes/architecture.txt', 'odd/decision.rst', 'answer.ts', 'diagram.pdf'];
+  scripts = [...paths.map(path => response(undefined, 'sources_read', { root, path, start: 1, end: 1 })),
+    response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: ['Missing external caller'], candidateKnowledgeChanges: [], knowledgeCandidates: [{ ...knowledgeCandidate(), scope: 'repo' }] }), response('Mixed layout overview [E1].')];
+  supervisor.build(['repo'], BUILD_CONSENT); await idle();
+  const report = conversations.workspace().selected!.messages.at(-1)!.build!;
+  expect(report.inspected.map(item => item.path)).toEqual(paths);
+  expect(report.unsupported).toEqual([expect.objectContaining({ path: 'diagram.pdf', reason: expect.stringMatching(/binary/i) })]);
+  expect(report.unresolved).toEqual(['repo: Missing external caller']);
+  expect(report.notice).toContain('not exhaustive');
+});
+
+test('a truncated build reports partial coverage and withholds candidates rather than extending source limits', async () => {
+  registerBuildRepository();
+  writeFileSync(join(root, 'many.txt'), 'entry\n'.repeat(201));
+  // The first search match reuses E1, keeping this at the existing 200-evidence bound.
+  scripts = [response(undefined, 'sources_read', { root, path: 'many.txt', start: 1, end: 1 }), response(undefined, 'sources_search', { root, path: 'many.txt', query: 'entry' }),
+    response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: ['Source list truncated'], candidateKnowledgeChanges: [], knowledgeCandidates: [{ ...knowledgeCandidate(), scope: 'repo' }] }), response('Bounded overview [E1].')];
+  supervisor.build(['repo'], BUILD_CONSENT); await idle();
+  expect(conversations.workspace().selected!.messages.at(-1)!.build?.unsupported).toEqual([expect.objectContaining({ path: 'many.txt', reason: expect.stringContaining('limit') })]);
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'partial', knowledgePublication: 'withheld', build: { truncated: true, failures: [expect.stringContaining('limit')] } });
+  expect(requests).toHaveLength(4);
+  expect(await knowledge.inspect()).toEqual([]);
+});
+
+test('build cancellation stops queued tasks, persists gaps and retry preserves explicit build scope', async () => {
+  registerBuildRepository(); conversations.setMaxInvestigators(1);
+  const second = join(root, 'second'); mkdirSync(join(second, '.git'), { recursive: true }); writeFileSync(join(second, 'main.ts'), 'export const other = 2;');
+  snapshot.repositories.push({ ...snapshot.repositories[0], name: 'second', path: second });
+  http = async (_url, init) => {
+    requests.push({ url: '', body: JSON.parse(String(init?.body)), headers: new Headers() });
+    return await new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+  };
+  supervisor.build(['repo', 'second'], BUILD_CONSENT);
+  await expect.poll(() => requests.length).toBe(1);
+  supervisor.cancel(); await idle();
+  const stopped = conversations.workspace().selected!.messages.at(-1)!;
+  expect(stopped).toMatchObject({ status: 'cancelled', build: { repositories: ['repo', 'second'] }, investigators: [{ status: 'cancelled' }, { status: 'cancelled' }] });
+  scripts = [response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: ['Uncovered source'], candidateKnowledgeChanges: [] }), response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: ['Uncovered source'], candidateKnowledgeChanges: [] }), response('Partial architectural coverage.')];
+  http = async (_url, init) => { requests.push({ url: '', body: JSON.parse(String(init?.body)), headers: new Headers() }); return new Response(scripts.shift()); };
+  supervisor.retry(stopped.id); await idle();
+  expect(conversations.workspace().selected!.messages.at(-1)!.build?.repositories).toEqual(['repo', 'second']);
+  expect(workers.at(-1)?.job?.build?.repositories.map(repo => repo.name)).toEqual(['repo', 'second']);
+});
+
+test('builds share the existing fifty-request limit and do not synthesize or publish incomplete work', async () => {
+  registerBuildRepository();
+  http = async (_url, init) => {
+    requests.push({ url: '', body: JSON.parse(String(init?.body)), headers: new Headers() });
+    return new Response(response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }));
+  };
+  supervisor.build(['repo'], BUILD_CONSENT); await idle();
+  expect(requests).toHaveLength(50); expect(reservations).toHaveLength(50);
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'limit', requests: 50, build: { repositories: ['repo'] } });
+  expect(await knowledge.inspect()).toEqual([]);
+});
 
 test('real Pi agents use separate pinned API-key providers, preserve source boundaries and reserve each request', async () => {
   scripts = [response(undefined, 'investigate', { question: 'Find the answer' }), response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }),

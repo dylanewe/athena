@@ -114,6 +114,7 @@ const bridge: DesktopBridge = {
   setMaxInvestigators: maximum => request('setMaxInvestigators', { maximum }),
   select: conversationId => request('select', { conversationId }),
   send: (conversationId, text) => request('send', { conversationId, text }),
+  build: (repositories, consent) => request('build', { repositories, consent }),
   cancel: () => request('cancel'),
   retry: messageId => request('retry', { messageId }),
   environment: (id, action) => request('environment', { id, action }),
