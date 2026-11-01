@@ -11,16 +11,27 @@ const architectureSchema = Type.Union([
   Type.Object({ type: Type.Union([Type.Literal('external'), Type.Literal('unresolved')]), resource: Type.Union([Type.Literal('service'), Type.Literal('api'), Type.Literal('datastore'), Type.Literal('library'), Type.Literal('deployment')]), address: Type.Optional(bounded(300)) }, { additionalProperties: false }),
   Type.Object({ type: connectionType, from: reference, to: reference, mechanism: bounded(300) }, { additionalProperties: false }),
 ]);
+const flowOmissions = Type.Optional(Type.Array(bounded(500), { minItems: 1, maxItems: 3 }));
 const flowSchema = Type.Object({
   steps: Type.Array(Type.Object({
     name: bounded(120), service: reference, claim: reference,
     state: Type.Union([Type.Literal('implementation'), Type.Literal('documented'), Type.Literal('unknown')]),
+    kind: Type.Optional(Type.Enum(['branch', 'parallel', 'join', 'retry', 'loop'])),
+    annotation: Type.Optional(bounded(500)), omissions: flowOmissions,
   }, { additionalProperties: false }), { minItems: 1, maxItems: 6 }),
-  // Handoff i connects step i to step i+1, never a runtime-observed ordering.
-  handoffs: Type.Array(Type.Object({ kind: Type.Union([Type.Literal('synchronous'), Type.Literal('within-service'), Type.Literal('unknown')]), claim: reference }, { additionalProperties: false }), { maxItems: 5 }),
+  // Explicit zero-based endpoints describe a bounded DAG. Absent endpoints retain legacy adjacent flows.
+  handoffs: Type.Array(Type.Object({
+    kind: Type.Enum(['synchronous', 'asynchronous', 'within-service', 'unknown']), claim: reference,
+    from: Type.Optional(Type.Integer({ minimum: 0, maximum: 5 })), to: Type.Optional(Type.Integer({ minimum: 0, maximum: 5 })),
+    condition: Type.Optional(bounded(300)), omissions: flowOmissions,
+  }, { additionalProperties: false }), { maxItems: 8 }),
   omissions: Type.Array(bounded(500), { minItems: 1, maxItems: 6 }),
 }, { additionalProperties: false });
 export type OperationFlow = Static<typeof flowSchema>;
+/** Display/index adjacency is not causality; only these explicit edges describe flow claims. */
+export function flowHandoffs(flow: OperationFlow) {
+  return flow.handoffs.map((edge, index) => ({ ...edge, from: edge.from ?? index, to: edge.to ?? index + 1 }));
+}
 export function flowReferences(flow: OperationFlow): string[] {
   return [...new Set([...flow.steps.flatMap(step => [step.service, step.claim]), ...flow.handoffs.map(edge => edge.claim)])];
 }
