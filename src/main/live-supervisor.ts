@@ -1,4 +1,4 @@
-import { BUILD_CONSENT, type BuildScope, type BuildCoverage } from '../shared/build';
+import { BUILD_CONSENT, reusableBuildKnowledge, type BuildScope, type BuildCoverage } from '../shared/build';
 import { FOLDER_CONSENT } from '../shared/inventory';
 import { SourceCheckouts } from './source-checkouts';
 import { EnvironmentPermissions } from './environment-permissions';
@@ -124,7 +124,7 @@ export class LiveSupervisor {
             const current = active.checkouts.find(checkout => checkout.folder === repo.root && checkout.repository?.name === repo.name);
             if (!current?.complete) continue;
             const receipt = receipts.find(receipt => receipt.scope.repositories.some(previous => JSON.stringify(previous) === JSON.stringify(repo)) && receipt.build?.repositories.includes(repo.name) && receipt.investigators?.some(task => task.scope === repo.name && task.knowledgePublication === 'published') && receipt.checkouts?.some(checkout => JSON.stringify(checkout) === JSON.stringify(current)));
-            if (receipt) {
+            if (receipt?.checkouts?.length && await this.checkouts.fresh(receipt.checkouts, active.controller.signal)) {
               reusable.push(repo.name);
               active.reuseReceipts.set(repo.name, receipt);
             }
@@ -354,7 +354,7 @@ export class LiveSupervisor {
                   }
                   if (active.coverage && message.input && typeof message.input === 'object') {
                     const request = message.input as KnowledgeRequest;
-                    if (request.operation === 'search' && request.scope && job.build?.reusable.includes(request.scope) && result.items.length && result.nextOffset === undefined && !result.items.some(item => item.truncated) && result.items.some(item => item.freshness === 'current' && item.validation !== 'stale')) {
+                    if (request.operation === 'search' && request.scope && job.build?.reusable.includes(request.scope) && reusableBuildKnowledge(result)) {
                       if (!active.coverage.reusedRepositories.includes(request.scope)) {
                         active.coverage.reusedRepositories.push(request.scope);
                         const receipt = active.reuseReceipts?.get(request.scope);

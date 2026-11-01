@@ -122,6 +122,28 @@ test('unchanged builds reuse retained knowledge without paid calls, but edited c
   expect(retained.items.some(item => item.freshness === 'stale')).toBe(true);
 });
 
+test.each(['receipt dependency', 'later stale claim'])('refresh does not reuse an unchanged repository when an external %s changed', async mode => {
+  registerBuildRepository();
+  const other = join(directory, 'other'); mkdirSync(join(other, '.git'), { recursive: true }); writeFileSync(join(other, 'other.ts'), 'export const external = 1;');
+  snapshot.roots.push({ path: other, consent: FOLDER_CONSENT, acceptedAt: 'now', includedLocations: [] });
+  snapshot.repositories.push({ ...snapshot.repositories[0], name: 'other', path: other });
+  const readA = response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 });
+  const readB = response(undefined, 'sources_read', { root: other, path: 'other.ts', start: 1, end: 1 });
+  const finish = (topic: string) => response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: [], candidateKnowledgeChanges: [], knowledgeCandidates: [{ ...knowledgeCandidate(), topic, scope: 'repo' }] });
+  scripts = [...(mode === 'receipt dependency' ? [response(undefined, 'investigate', { question: 'Inspect A only' })] : []), readA, finish('Local boundary'), response('Local overview [E1].')];
+  if (mode === 'receipt dependency') supervisor.start(null, 'Inspect A only'); else supervisor.build(['repo'], BUILD_CONSENT);
+  await idle();
+  scripts = [...(mode === 'later stale claim' ? [response(undefined, 'investigate', { question: 'Inspect A and B' })] : []), readA, readB, finish('Cross-boundary claim'), response('Cross-boundary overview [E1].')];
+  if (mode === 'later stale claim') supervisor.start(null, 'Inspect A and B'); else supervisor.build(['repo'], BUILD_CONSENT);
+  await idle();
+  writeFileSync(join(other, 'other.ts'), 'export const external = 2;');
+  const before = requests.length;
+  scripts = [readA, readB, finish('Cross-boundary claim'), response('Revalidated overview [E1].')];
+  supervisor.build(['repo'], BUILD_CONSENT); await idle();
+  expect(requests).toHaveLength(before + 4);
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', build: { reusedRepositories: [] }, investigators: [{ scope: 'repo', status: 'complete' }] });
+});
+
 test('mixed documentation layouts report unsupported inputs and unresolved references without requiring a manifest', async () => {
   registerBuildRepository(); mkdirSync(join(root, 'notes')); mkdirSync(join(root, 'odd'));
   writeFileSync(join(root, 'README.md'), 'Start with the notes; old architecture is only intent.');

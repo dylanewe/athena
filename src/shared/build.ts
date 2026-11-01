@@ -1,3 +1,10 @@
+import type { KnowledgeResult } from './knowledge';
+
+/** An unchanged receipt never overrides known stale, missing or bounded-out leads. */
+export function reusableBuildKnowledge(result: KnowledgeResult): boolean {
+  return result.items.length > 0 && result.nextOffset === undefined && result.items.every(item => !item.truncated && item.freshness === 'current' && item.validation !== 'stale');
+}
+
 export const BUILD_CONSENT = 'Build/refresh knowledge authorizes paid model processing for the selected repositories under the existing provider approvals and shared job limits. Eligible material elsewhere in designated folders may be consulted for relevant references. Static analysis is not runtime tracing; coverage is bounded, not exhaustive.';
 
 export interface BuildRepository {

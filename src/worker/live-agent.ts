@@ -1,3 +1,4 @@
+import { reusableBuildKnowledge } from '../shared/build';
 import { EnvironmentContext } from './environment-context';
 import { apiStream } from './api-stream';
 import { requestAllowance, type ApiGrant, type ModelRole } from '../shared/api-models';
@@ -177,7 +178,7 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
           const leads = result.items.map(({ id, scope, topic, summary, claim, kind, provenance, perspective, validation, validationNote, architecture, flow }) => ({ id, scope, topic, summary, claim, kind, provenance, perspective, validation, validationNote, architecture, flow }));
           buildLeads.set(repo.name, leads);
           moreKnowledge = result.nextOffset !== undefined || result.items.some(item => item.truncated);
-          if (job.build.reusable.includes(repo.name) && result.items.length && !moreKnowledge && result.items.some(item => item.freshness === 'current' && item.validation !== 'stale')) {
+          if (job.build.reusable.includes(repo.name) && reusableBuildKnowledge(result)) {
             reused.push(repo.name); continue;
           }
         } catch { /* Missing indexed leads require fresh bounded investigation, not guessed support. */ }
