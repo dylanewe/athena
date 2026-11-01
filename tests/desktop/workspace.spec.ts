@@ -45,6 +45,49 @@ function resume() { if (pausedWorker) { try { process.kill(pausedWorker, 'SIGCON
 test.beforeEach(async () => { directory = realpathSync(mkdtempSync(join(tmpdir(), 'athena-desktop-'))); await launch(); });
 test.afterEach(async () => { resume(); await application?.close().catch(() => {}); rmSync(directory, { recursive: true, force: true }); });
 
+test('dependency explorer groups progressive services, inspects connection evidence, expands neighbors and prepares unpaid follow-up drafts', async () => {
+  const root = join(directory, 'repo'); mkdirSync(join(root, '.git'), { recursive: true });
+  const implementation = 'export const API = serve(); export const Worker = consume("orders"); Worker.store("postgres://orders");\n';
+  writeFileSync(join(root, 'answer.ts'), implementation);
+  await installLiveFixture(application, directory, root, false, false, false, false, true);
+  await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] }); }, root);
+  await page.evaluate(() => window.athena.inventory.chooseFolder());
+  await page.getByRole('button', { name: 'Repositories', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'I understand the folder permission' }).check();
+  await page.getByRole('button', { name: 'Save consent and discover' }).click();
+  await expect.poll(() => page.evaluate(async () => (await window.athena.inventory.snapshot()).discovery.status)).not.toBe('running');
+  await newConversation(); await send('Explore the services and concrete dependencies');
+  await expect.poll(() => page.evaluate(async () => (await window.athena.workspace()).activeConversationId)).toBeNull();
+  await page.getByRole('button', { name: 'Explore investigation map', exact: true }).click();
+  let map = page.getByRole('region', { name: 'Dependency neighborhood' });
+  await expect(map.getByRole('region', { name: 'repo', exact: true })).toContainText('API');
+  await expect(map.getByRole('region', { name: 'repo', exact: true })).toContainText('Worker');
+  await expect(map.getByRole('region', { name: 'External / unresolved' })).toContainText('Orders database');
+  await page.getByRole('button', { name: 'Reverse visual group order' }).click();
+  const connection = page.getByRole('button', { name: 'data-store · Worker.store("postgres://orders")', exact: true });
+  await expect(connection).toBeVisible(); await connection.click();
+  await expect(page.getByRole('heading', { name: 'Worker storage', exact: true })).toBeVisible();
+  await page.getByText('Evidence (1)', { exact: true }).click();
+  await page.getByRole('button', { name: 'Read retained excerpt', exact: true }).click();
+  await expect(page.locator('pre').first()).toContainText('Worker.store');
+  await page.getByRole('button', { name: 'Inspect current file', exact: true }).click();
+  await expect(page.getByText('Matches retained content.', { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: 'Ask follow-up question', exact: true }).click();
+  await expect(page.getByLabel('Message', { exact: true })).toHaveValue(/Investigate this source-backed architectural claim.*Worker storage/s);
+  expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: { workers: number } }).liveFixture.workers)).toBe(1);
+  await page.getByRole('button', { name: 'Services & dependencies', exact: true }).click();
+  await page.getByLabel('Traversal depth').selectOption('0');
+  await page.getByRole('button', { name: 'Show neighborhood', exact: true }).click();
+  await expect(connection).toHaveCount(0);
+  await application.close(); await launch();
+  map = page.getByRole('region', { name: 'Dependency neighborhood' });
+  await page.getByRole('button', { name: 'Services & dependencies', exact: true }).click();
+  await expect(map.getByRole('button', { name: 'Worker', exact: true })).toBeVisible();
+  await map.getByRole('button', { name: 'Expand neighbors' }).first().click();
+  expect(readFileSync(join(root, 'answer.ts'), 'utf8')).toBe(implementation);
+  expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: { workers: number } }).liveFixture.workers)).toBe(0);
+});
+
 test('contradictions show both source trails in answers and details, with durable user resolutions and explicit rebuild reconnection', async () => {
   const root = join(directory, 'repo'); mkdirSync(root);
   writeFileSync(join(root, 'README.md'), 'Use dependency B.\n');

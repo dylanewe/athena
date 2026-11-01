@@ -4,7 +4,7 @@ import { KnowledgeRetrieval, knowledgeName as nameKey } from './knowledge-retrie
 import { relative, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Check } from 'typebox/value';
-import { knowledgeCandidatesSchema, type KnowledgeCandidate, type KnowledgeOwner, type KnowledgeRecord, type KnowledgeRequest, type KnowledgeResult } from '../shared/knowledge';
+import { isConnection, knowledgeCandidatesSchema, type KnowledgeCandidate, type KnowledgeOwner, type KnowledgeRecord, type KnowledgeRequest, type KnowledgeResult } from '../shared/knowledge';
 import type { ResolutionTarget } from '../shared/resolutions';
 import type { Evidence } from '../shared/live';
 import type { SourceCheckout, SourceIdentity, SourceScope } from '../shared/sources';
@@ -198,16 +198,32 @@ export class Knowledge {
     if (dependencies.length + scopes.length > 1000) throw new Error('Inspected dependency limit reached.');
     const checkouts = this.checkouts.select([...dependencies, ...scopes], input.checkouts ?? await this.checkouts.capture(input.signal, [...dependencies, ...scopes]));
     if (!this.checkouts.covers([...dependencies, ...scopes], checkouts) || input.checkouts && !await this.checkouts.fresh(checkouts, input.signal)) throw new Error('Checkout changed or scan coverage incomplete before publication.');
-    const records = candidates.map(candidate => {
+    const existing = this.records();
+    const built = new Map<string, { candidate: KnowledgeCandidate; record: Stored }>();
+    // Endpoints are explicit claim references, never name-based guesses. Build entities first.
+    for (const candidate of [...candidates].sort((a, b) => Number(a.kind === 'relationship') - Number(b.kind === 'relationship'))) {
+      let architecture = candidate.architecture;
+      if ((candidate.kind === 'entity' || candidate.kind === 'relationship') !== !!architecture || architecture && (candidate.kind === 'relationship') !== isConnection(architecture)) throw new Error('Architecture claims require a matching typed entity or relationship.');
+      if (architecture && isConnection(architecture)) {
+        const endpoint = (ref: string) => {
+          const record = built.get(ref)?.record ?? existing.find(item => item.id === ref);
+          if (!record || record.kind !== 'entity' || !record.architecture || isConnection(record.architecture)) throw new Error('Relationship endpoints require explicit entity claims; ambiguous names stay unresolved.');
+          return record.id;
+        };
+        architecture = { ...architecture, from: endpoint(architecture.from), to: endpoint(architecture.to) };
+        if (architecture.from === architecture.to) throw new Error('A concrete connection requires distinct endpoints.');
+      }
       const evidence = candidate.evidenceIds.map(id => {
         const item = observed.find(item => item.id === id);
         if (!item) throw new Error('Citation was not inspected.');
         return item;
       });
       const scope = this.canonicalScope(candidate.scope, evidence);
+      if (architecture && ['service', 'interface'].includes(architecture.type) && !evidence.some(item => item.citation.repository && nameKey(item.citation.repository.name) === nameKey(scope))) throw new Error('Services and interfaces require repository-scoped source locations.');
       // Exact identity only: no fuzzy equivalence, no overwrite of differently worded claims.
       const material = { scope, topic: candidate.topic.normalize('NFC').trim(), summary: candidate.summary.trim(),
         kind: candidate.kind, claim: candidate.claim.trim(), provenance: candidate.provenance, perspective: candidate.perspective,
+        ...(architecture ? { architecture } : {}),
         ...(candidate.aliases?.length ? { aliases: [...new Set(candidate.aliases.map(alias => alias.normalize('NFC').trim()))].sort() } : {}) };
       const sourceIdentity = (c: SourceIdentity) => ({ scope: this.scope(c), path: this.sourcePath(c), identity: c.contentIdentity });
       const ordered = <T>(items: T[]) => items.sort((a, b) => digest(a).localeCompare(digest(b)));
@@ -222,12 +238,15 @@ export class Knowledge {
       const record: Stored = { ...material, id, derivation, evidence, dependencies, scopes, checkouts,
         validation: supported ? 'supported' : 'unchecked',
         validationNote: supported ? 'The declaration is present verbatim. This does not certify that the declared behavior is implemented.' : 'Model interpretation; schema and citations verified, semantic truth not independently validated.' };
-      return { candidate, record };
-    });
+      built.set(candidate.id, { candidate, record });
+    }
+    const records = candidates.map(candidate => built.get(candidate.id)!);
     const localIds = new Map(records.map(({ candidate, record }) => [candidate.id, record.id]));
-    const existing = this.records();
     const edges = records.flatMap(({ candidate, record }) => {
-      const proposed = candidate.relations.map(edge => {
+      const architecture = record.architecture;
+      // Connections inherit endpoint lifecycle through the shared provenance graph, including revocation.
+      const endpointDependencies = architecture && isConnection(architecture) ? [architecture.from, architecture.to].map(target => ({ kind: 'depends-on' as const, target })) : [];
+      const proposed = [...candidate.relations, ...endpointDependencies].map(edge => {
         const target = localIds.get(edge.target) ?? edge.target;
         if (target === record.id || !records.some(item => item.record.id === target) && !existing.some(item => item.id === target)) throw new Error('Unknown or self-referential claim relationship.');
         return { claim: record.id, kind: edge.kind, target };
@@ -235,7 +254,7 @@ export class Knowledge {
       // An exact derivation cannot drop a retained dependency by omitting its edge.
       // Only an explicit edge to an exactly matching assertion can select a new source-backed contribution.
       const assertion = (item: Stored) => digest({ scope: item.scope, topic: item.topic, summary: item.summary, claim: item.claim,
-        kind: item.kind, provenance: item.provenance, perspective: item.perspective, aliases: item.aliases });
+        kind: item.kind, provenance: item.provenance, perspective: item.perspective, aliases: item.aliases, architecture: item.architecture });
       const find = (id: string) => records.find(item => item.record.id === id)?.record ?? existing.find(item => item.id === id)!;
       const inherited = existing.filter(item => item.derivation === record.derivation).flatMap(item => item.relations.filter(edge => edge.kind === 'depends-on')).map(edge => {
         const replacement = proposed.find(proposed => proposed.kind === 'depends-on' && assertion(find(proposed.target)) === assertion(find(edge.target)));
@@ -258,7 +277,7 @@ export class Knowledge {
     guard();
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      for (const { record } of records) {
+      for (const { record } of built.values()) {
         this.db.prepare('INSERT OR IGNORE INTO claims VALUES (?, ?)').run(record.id, JSON.stringify(record));
         this.db.prepare('INSERT OR IGNORE INTO owners VALUES (?, ?, ?)').run(record.id, input.owner.conversationId, input.owner.messageId);
         for (const snapshot of checkouts) this.indexCheckout(record.id, snapshot);

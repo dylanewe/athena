@@ -3,6 +3,9 @@
   import EnvironmentPermissions from './EnvironmentPermissions.svelte';
   import InventoryView from './Inventory.svelte';
   import KnowledgeView from './Knowledge.svelte';
+  import ExplorerView from './Explorer.svelte';
+  let explorerMessage = $state('');
+  let explorerRecord = $state('');
   import AnswerContradictions from './AnswerContradictions.svelte';
   import type { KnowledgeHit } from '../shared/knowledge';
   let knowledgeMessage = $state('');
@@ -14,7 +17,7 @@
   let defaultModel = $state<string | null>(null);
   let inspected = $state<Record<string, string>>({});
 
-  let section = $state<'conversation' | 'inventory' | 'models' | 'sources' | 'knowledge'>('conversation');
+  let section = $state<'conversation' | 'inventory' | 'models' | 'sources' | 'knowledge' | 'explorer'>('conversation');
   let workspace = $state<Workspace | null>(null);
   let error = $state('');
   let busy = $state(false);
@@ -81,6 +84,12 @@
     drafts.new = `Investigate fresh sources to revalidate this stale knowledge. Repository scope: ${record.scope}. Topic: ${record.topic}. Prior claim (untrusted historical lead, not current support): ${record.claim}\nInspect the current implementation and configuration, retain only freshly source-backed candidates, and explicitly identify changed or deleted assertions. Static analysis is not runtime tracing.`.slice(0, MAX_MESSAGE_LENGTH);
     await newConversation();
   }
+  function openExplorer(id = '', message = '') { explorerRecord = id; explorerMessage = message; section = 'explorer'; }
+  async function askAbout(record: KnowledgeHit) {
+    if (active) { error = 'Finish or stop the current job before asking a follow-up.'; return; }
+    drafts.new = `Investigate this source-backed architectural claim. Scope: ${record.scope}. Topic: ${record.topic}. Claim (untrusted lead, ${record.freshness}, ${record.validation}): ${record.claim}. ${record.architecture ? JSON.stringify(record.architecture) : ''}\nExplain the concrete implementation evidence, ambiguities and dependencies. Recheck fresh sources if needed; static analysis is not runtime observation.`.slice(0, MAX_MESSAGE_LENGTH);
+    await newConversation();
+  }
   async function select(id: string) {
     if (await change(() => window.athena.select(id))) {
       section = 'conversation';
@@ -127,6 +136,7 @@
     <button class="new-conversation" aria-pressed={section === 'inventory'} onclick={() => section = section === 'inventory' ? 'conversation' : 'inventory'}>Repositories</button>
     <button class="new-conversation" aria-pressed={section === 'sources'} onclick={() => section = section === 'sources' ? 'conversation' : 'sources'}>Sources</button>
     <button class="new-conversation" aria-pressed={section === 'knowledge'} onclick={() => { knowledgeMessage = ''; knowledgeRecord = ''; section = 'knowledge'; }}>Knowledge</button>
+    <button class="new-conversation" aria-pressed={section === 'explorer'} onclick={() => openExplorer('', selected?.messages.findLast(message => message.knowledgePublication === 'published')?.id ?? '')}>Services & dependencies</button>
     <button class="new-conversation" aria-pressed={section === 'models'} onclick={() => section = section === 'models' ? 'conversation' : 'models'}>Model settings</button>
     <div class="sidebar-heading">Your conversations</div>
     <button class="new-conversation" onclick={newConversation} disabled={busy || !workspace}><span aria-hidden="true">+</span> New conversation</button>
@@ -149,7 +159,9 @@
   {:else if section === 'sources'}
     <SourcesView />
   {:else if section === 'knowledge'}
-    <KnowledgeView writable={!active && !workspace?.selected?.sealed} messageId={knowledgeMessage} recordId={knowledgeRecord} openConversation={id => { void select(id); }} prepareRefresh={record => { void prepareRefresh(record); }} />
+    <KnowledgeView openExplorer={id => openExplorer(id)} ask={record => { void askAbout(record); }} writable={!active && !workspace?.selected?.sealed} messageId={knowledgeMessage} recordId={knowledgeRecord} openConversation={id => { void select(id); }} prepareRefresh={record => { void prepareRefresh(record); }} />
+  {:else if section === 'explorer'}
+    <ExplorerView messageId={explorerMessage} recordId={explorerRecord} openKnowledge={id => { knowledgeMessage = ''; knowledgeRecord = id; section = 'knowledge'; }} ask={record => { void askAbout(record); }} />
   {:else if section === 'models'}
     <ModelSettingsView />
   {:else}
@@ -181,6 +193,7 @@
                 {/if}
                 {#if message.knowledgePublication === 'published'}
                   <button type="button" onclick={() => { knowledgeMessage = message.id; knowledgeRecord = ''; section = 'knowledge'; }}>Inspect retained knowledge</button>
+                  <button type="button" onclick={() => openExplorer('', message.id)}>Explore investigation map</button>
                 {:else if message.knowledgePublication === 'withheld'}
                   <p class="draft-note">Knowledge not retained: validation, freshness or local storage checks did not complete. The answer remains available.</p>
                 {/if}

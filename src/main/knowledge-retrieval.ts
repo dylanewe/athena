@@ -1,7 +1,7 @@
 import { relative } from 'node:path';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { Check } from 'typebox/value';
-import { KNOWLEDGE_LIMITS as L, knowledgeRequestSchema, type KnowledgeRequest, type KnowledgeRecord, type KnowledgeContext, type KnowledgeHit, type KnowledgeResult } from '../shared/knowledge';
+import { isConnection, KNOWLEDGE_LIMITS as L, knowledgeRequestSchema, type KnowledgeRequest, type KnowledgeRecord, type KnowledgeContext, type KnowledgeHit, type KnowledgeResult } from '../shared/knowledge';
 import type { SourceCheckout, SourceIdentity, SourceScope } from '../shared/sources';
 import type { Evidence } from '../shared/live';
 
@@ -11,6 +11,7 @@ const NOTICE = 'Bounded, access-filtered indexed leads, not exhaustive knowledge
 function claimContext(record: KnowledgeRecord, stale: boolean): KnowledgeContext {
   return { id: record.id, scope: record.scope, topic: record.topic, summary: record.summary, claim: record.claim, kind: record.kind,
     provenance: record.provenance, perspective: record.perspective, validation: stale ? 'stale' : record.validation,
+    ...(record.architecture ? { architecture: record.architecture } : {}),
     validationNote: stale ? 'An inspected dependency changed or bounded freshness could not be established. Use only as an investigation lead.' : record.validationNote };
 }
 
@@ -44,6 +45,10 @@ export class KnowledgeRetrieval {
     db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(id UNINDEXED, topic, aliases, summary, claim, evidence, tokenize='unicode61 remove_diacritics 2');
       CREATE TABLE IF NOT EXISTS knowledge_names (scope TEXT NOT NULL, name TEXT NOT NULL, id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE, PRIMARY KEY(scope, name, id));
       CREATE TRIGGER IF NOT EXISTS knowledge_delete AFTER DELETE ON claims BEGIN DELETE FROM knowledge_fts WHERE id = OLD.id; END;
+      CREATE TABLE IF NOT EXISTS architecture_entities (id TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE CASCADE, scope TEXT NOT NULL, type TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS architecture_connections (id TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE CASCADE, source TEXT NOT NULL REFERENCES claims(id), target TEXT NOT NULL REFERENCES claims(id), type TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS architecture_outgoing ON architecture_connections(source, type);
+      CREATE INDEX IF NOT EXISTS architecture_incoming ON architecture_connections(target, type);
       CREATE TABLE IF NOT EXISTS knowledge_index_version (version INTEGER PRIMARY KEY);`);
     if (!db.prepare('SELECT version FROM knowledge_index_version WHERE version = 1').get()) {
       db.exec('BEGIN IMMEDIATE');
@@ -55,7 +60,14 @@ export class KnowledgeRetrieval {
     }
   }
   /** Called inside the publisher's transaction, so failed publication cannot enter search. */
-  index(record: Pick<KnowledgeRecord, 'id' | 'scope' | 'topic' | 'aliases' | 'summary' | 'claim' | 'evidence'>): void {
+  index(record: Pick<KnowledgeRecord, 'id' | 'scope' | 'topic' | 'aliases' | 'summary' | 'claim' | 'evidence' | 'architecture'>): void {
+    this.db.prepare('DELETE FROM architecture_entities WHERE id = ?').run(record.id);
+    this.db.prepare('DELETE FROM architecture_connections WHERE id = ?').run(record.id);
+    if (record.architecture) {
+      const a = record.architecture;
+      if (isConnection(a)) this.db.prepare('INSERT INTO architecture_connections VALUES (?, ?, ?, ?)').run(record.id, a.from, a.to, a.type);
+      else this.db.prepare('INSERT INTO architecture_entities VALUES (?, ?, ?)').run(record.id, knowledgeName(record.scope), a.type);
+    }
     this.db.prepare('DELETE FROM knowledge_fts WHERE id = ?').run(record.id);
     this.db.prepare('DELETE FROM knowledge_names WHERE id = ?').run(record.id);
     this.db.prepare('INSERT INTO knowledge_fts VALUES (?, ?, ?, ?, ?, ?)').run(record.id, record.topic, (record.aliases ?? []).join(' '), record.summary, record.claim, record.evidence.map(item => item.text).join('\n'));
@@ -65,14 +77,17 @@ export class KnowledgeRetrieval {
   }
   async retrieve(input: KnowledgeRequest, external?: AbortSignal, canPersistInvalidations = () => true): Promise<KnowledgeResult> {
     if (!Check(knowledgeRequestSchema, input)) throw new Error('Invalid bounded knowledge request.');
+    if (input.operation === 'neighborhood' && input.id && (input.scope || input.messageId)) throw new Error('Choose a claim origin or scoped investigation seeds, not both.');
     if (input.operation === 'search' && input.exact && !input.scope) throw new Error('Exact name lookup requires a repository scope.');
     const signal = AbortSignal.any([AbortSignal.timeout(10000), ...(external ? [external] : [])]);
     const offset = 'offset' in input ? input.offset ?? 0 : 0;
-    const limit = input.operation === 'search' || input.operation === 'expand' ? input.limit ?? L.defaultResults : 1;
+    const limit = input.operation === 'search' || input.operation === 'expand' || input.operation === 'neighborhood' ? input.limit ?? L.defaultResults : 1;
     const budget = this.budget(signal, canPersistInvalidations);
     let ids: string[];
     let edges: NonNullable<KnowledgeResult['edges']> = [];
-    if (input.operation === 'search') {
+    if (input.operation === 'neighborhood') {
+      ids = await this.neighborhood(input, limit, signal, budget);
+    } else if (input.operation === 'search') {
       const filters: string[] = [], params: SQLInputValue[] = [];
       if (input.scope) { filters.push('EXISTS (SELECT 1 FROM knowledge_names n WHERE n.id = c.id AND n.scope = ?)'); params.push(knowledgeName(input.scope)); }
       if (input.messageId) { filters.push('EXISTS (SELECT 1 FROM owners o WHERE o.claim_id = c.id AND o.message_id = ?)'); params.push(input.messageId); }
@@ -98,6 +113,7 @@ export class KnowledgeRetrieval {
     const items: KnowledgeHit[] = [];
     let evidence: Evidence | undefined;
     let derivation: KnowledgeResult['derivation'];
+    const neighborhoodDerivations: NonNullable<KnowledgeResult['derivation']>[] = [];
     let consumed = 0;
     for (const id of ids.slice(0, limit)) {
       external?.throwIfAborted();
@@ -137,6 +153,7 @@ export class KnowledgeRetrieval {
       const visibleEdges = edges.filter(edge => [...items, hit].some(item => item.id === edge.target));
       if (Buffer.byteLength(JSON.stringify({ items: [...items, hit], edges: visibleEdges, notice: NOTICE })) > L.bytes - 128) { consumed--; break; }
       items.push(hit);
+      if (input.operation === 'neighborhood') neighborhoodDerivations.push(checked.derivation);
     }
     const next = offset + consumed;
     const result: KnowledgeResult = { items, ...(ids.length > consumed && next <= L.offset && consumed > 0 ? { nextOffset: next } : {}), notice: NOTICE };
@@ -144,8 +161,53 @@ export class KnowledgeRetrieval {
     if (evidence && derivation?.checkouts.length && Buffer.byteLength(JSON.stringify({ ...result, evidence, derivation })) <= L.bytes) {
       result.evidence = evidence; result.derivation = derivation;
     }
+    if (input.operation === 'neighborhood') {
+      const unique = <T>(values: T[]) => [...new Map(values.map(value => [JSON.stringify(value), value])).values()];
+      const coverage = { files: unique(neighborhoodDerivations.flatMap(item => item.files)), scopes: unique(neighborhoodDerivations.flatMap(item => item.scopes)), checkouts: unique(neighborhoodDerivations.flatMap(item => item.checkouts)) };
+      // A graph response cannot omit the transitive provenance its runtime consumer needs.
+      if (Buffer.byteLength(JSON.stringify({ ...result, derivation: coverage })) > L.bytes) result.items = [];
+      else result.derivation = coverage;
+    }
     this.contexts.set(result, budget);
     return result;
+  }
+  /** Bounded static adjacency, indexed only by the central claim publisher. No inference or independent source authority. */
+  private async neighborhood(input: Extract<KnowledgeRequest, { operation: 'neighborhood' }>, limit: number, signal: AbortSignal, budget: RetrievalBudget): Promise<string[]> {
+    const filters: string[] = [], params: SQLInputValue[] = [];
+    if (input.scope) { filters.push('e.scope = ?'); params.push(knowledgeName(input.scope)); }
+    if (input.messageId) { filters.push('EXISTS (SELECT 1 FROM owners o WHERE o.claim_id = e.id AND o.message_id = ?)'); params.push(input.messageId); }
+    const seeds = input.id ? [input.id] : this.db.prepare(`SELECT e.id FROM architecture_entities e JOIN claims c ON c.id = e.id ${filters.length ? 'WHERE ' + filters.join(' AND ') : ''} ORDER BY c.rowid DESC LIMIT ?`).all(...params, limit).map(row => String(row.id));
+    const ids = new Set<string>();
+    const queue: { id: string; depth: number }[] = [];
+    const add = async (id: string, depth: number) => {
+      if (ids.has(id)) return true;
+      if (ids.size >= limit || signal.aborted) return false;
+      const item = await this.checked(id, signal, budget);
+      if (!item?.record.architecture) return false;
+      ids.add(id);
+      if (!isConnection(item.record.architecture)) queue.push({ id, depth });
+      return true;
+    };
+    for (const id of seeds) {
+      const origin = await this.checked(id, signal, budget);
+      const a = origin?.record.architecture;
+      if (a && isConnection(a)) {
+        await add(a.from, 0); await add(a.to, 0);
+        if (input.depth > 0) await add(id, 0);
+      } else if (a) await add(id, 0);
+    }
+    for (let cursor = 0; cursor < queue.length && ids.size < limit; cursor++) {
+      const node = queue[cursor];
+      if (node.depth >= input.depth) continue;
+      const kinds = input.kinds;
+      const rows = this.db.prepare(`SELECT id, source, target FROM architecture_connections WHERE (source = ? OR target = ?) ${kinds ? `AND type IN (${kinds.map(() => '?').join(',')})` : ''} ORDER BY rowid DESC LIMIT ?`).all(node.id, node.id, ...(kinds ?? []), limit);
+      for (const row of rows) {
+        // Checking the connection includes both endpoints and all transitive provenance in this response's budget.
+        if (!await add(String(row.id), node.depth + 1)) continue;
+        await add(String(row.source), node.depth + 1); await add(String(row.target), node.depth + 1);
+      }
+    }
+    return [...ids];
   }
   async compareAnnotationSnapshot(record: KnowledgeRecord, external: AbortSignal, connected: boolean, context?: object) {
     const inherited = context ? this.contexts.get(context) : this.budget(external);

@@ -596,6 +596,37 @@ test('citation-free source investigations retain checkout provenance and cannot 
   expect(requests).toHaveLength(count);
 });
 
+test.each(['during', 'follow-up'] as const)('typed neighborhood lookup without E citations retains transitive checkout scope for %s edits', async when => {
+  for (const name of ['a', 'b']) {
+    mkdirSync(join(root, name, '.git'), { recursive: true });
+    writeFileSync(join(root, name, 'source.ts'), 'export const service = serve();\n');
+    snapshot.repositories.push({ name, path: join(root, name), presence: 'present', documentationRoots: [], boundaries: [], fileCount: 1, examined: false });
+  }
+  const observed = await Promise.all(['a', 'b'].map(async (scope, index) => {
+    const read = await sources.run('read', { root, path: `${scope}/source.ts`, start: 1, end: 1 });
+    return { id: `E${index + 1}`, citation: read.entries[0].citation!, text: read.entries[0].text! };
+  }));
+  const base = knowledgeCandidate();
+  const [a, b, connection] = await knowledge.publish({ owner: { conversationId: 'prior', messageId: 'prior' }, candidates: [
+    { ...base, scope: 'a', kind: 'entity', architecture: { type: 'service' } },
+    { ...base, id: 'C2', scope: 'b', kind: 'entity', evidenceIds: ['E2'], architecture: { type: 'service' } },
+    { ...base, id: 'C3', scope: 'a', kind: 'relationship', architecture: { type: 'api-call', from: 'C1', to: 'C2', mechanism: 'GET /status' } },
+  ], evidence: observed, completed: true, environmentExposed: false, signal: new AbortController().signal });
+  scripted([functionResponse('retrieve_knowledge', { operation: 'neighborhood', id: a, depth: 1, limit: 20 }), textResponse('Static dependency leads only, not runtime observations.')],
+    request => { if (when === 'during' && request === 2) writeFileSync(join(root, 'b', 'caller.ts'), 'changed();'); });
+  jobs.start(null, 'Explore the dependency map'); await idle();
+  const id = db.workspace().selected!.id, reply = db.workspace().selected!.messages.at(-1)!;
+  expect(reply.knowledgeReferences?.map(item => item.id).sort()).toEqual([a, b, connection].sort());
+  if (when === 'during') expect(reply.status).toBe('partial');
+  else {
+    expect(reply.status).toBe('complete'); expect(db.liveContext(id).evidence).toEqual([]);
+    expect(db.liveContext(id).checkouts).toHaveLength(2);
+    const count = requests.length; writeFileSync(join(root, 'b', 'caller.ts'), 'changed();');
+    jobs.start(id, 'Explain more'); await idle();
+    expect(db.workspace().selected!.messages.at(-1)?.status).toBe('failed'); expect(requests).toHaveLength(count);
+  }
+});
+
 test.each(['during', 'follow-up'] as const)('reused evidence retains its cross-repository dependency closure for %s edits', async when => {
   for (const name of ['a', 'b']) {
     mkdirSync(join(root, name, '.git'), { recursive: true });

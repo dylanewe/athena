@@ -268,6 +268,10 @@ export class LiveSupervisor {
                   if (citation) {
                     if (!active.evidence.some(item => item.id === citation.id)) active.evidence.push(citation);
                     active.retainedCheckouts = [...new Map([...active.retainedCheckouts, ...(derivation?.checkouts ?? [])].map(snapshot => [JSON.stringify(snapshot), snapshot])).values()];
+                  }
+                  if (derivation) {
+                    // Neighborhood leads (even without E citations) scope later model requests/history
+                    // to the job's current checkout baseline. Stale fingerprints are not revived.
                     active.dependencies = [...new Map([...active.dependencies, ...(derivation?.files ?? [])].map(identity => [JSON.stringify(identity), identity])).values()];
                     active.scopes = [...new Map([...active.scopes, ...(derivation?.scopes ?? [])].map(identity => [JSON.stringify(identity), identity])).values()];
                     if (active.dependencies.length + active.scopes.length > 1000) { finish(failure('limit')); return; }

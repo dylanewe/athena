@@ -4,7 +4,7 @@ import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 /** Isolated fake saved registration; OAuth itself is exercised in chatgpt.spec.ts. */
-export async function installLiveFixture(application: ElectronApplication, directory: string, root?: string, environment = false, knowledge = false, reuse = false, discrepancy = false) {
+export async function installLiveFixture(application: ElectronApplication, directory: string, root?: string, environment = false, knowledge = false, reuse = false, discrepancy = false, architecture = false) {
   const fixture = join(directory, 'live-worker-fixture.mjs');
   writeFileSync(fixture, `
     const frame = value => 'data: ' + JSON.stringify(value) + '\\n\\n';
@@ -51,7 +51,12 @@ export async function installLiveFixture(application: ElectronApplication, direc
             ] })});
           }
           if (!called('sources_read')) return call('sources_read', {root:${JSON.stringify(root ?? '')},path:${JSON.stringify(environment ? '.env' : 'answer.ts')},start:1,end:1});
-          return call('finish_investigation', {findings:[{claim:${JSON.stringify(environment ? 'PASSWORD=synthetic-desktop-env-7' : 'The value is 42')},support:'source',evidenceIds:['E1']}],unresolvedQuestions:['Runtime behavior was not observed'],candidateKnowledgeChanges:['Constant location could be remembered']${knowledge ? ',knowledgeCandidates:' + JSON.stringify([{ id: 'C1', scope: `folder:${root}`, topic: 'Answer ownership', aliases: ['Answer value'], summary: 'A synchronous answer boundary.', kind: 'responsibility', claim: 'The answer module owns the application answer value.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [] }]) : ''}});
+          return call('finish_investigation', {findings:[{claim:${JSON.stringify(environment ? 'PASSWORD=synthetic-desktop-env-7' : 'The value is 42')},support:'source',evidenceIds:['E1']}],unresolvedQuestions:['Runtime behavior was not observed'],candidateKnowledgeChanges:['Constant location could be remembered']${architecture ? ',knowledgeCandidates:' + JSON.stringify([
+            { id: 'C1', scope: 'repo', topic: 'API', summary: 'Request entry service.', kind: 'entity', claim: 'API defines the request-serving boundary.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [], architecture: { type: 'service' } },
+            { id: 'C2', scope: 'repo', topic: 'Worker', summary: 'Orders worker service.', kind: 'entity', claim: 'Worker consumes orders.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [], architecture: { type: 'service' } },
+            { id: 'C3', scope: 'repo', topic: 'Orders database', summary: 'Explicit external store.', kind: 'entity', claim: 'Orders uses an external Postgres datastore.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [], architecture: { type: 'external', resource: 'datastore', address: 'postgres://orders' } },
+            { id: 'C4', scope: 'repo', topic: 'Worker storage', summary: 'Concrete datastore usage.', kind: 'relationship', claim: 'Worker stores orders in the orders database.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [], architecture: { type: 'data-store', from: 'C2', to: 'C3', mechanism: 'Worker.store("postgres://orders")' } },
+          ]) : knowledge ? ',knowledgeCandidates:' + JSON.stringify([{ id: 'C1', scope: `folder:${root}`, topic: 'Answer ownership', aliases: ['Answer value'], summary: 'A synchronous answer boundary.', kind: 'responsibility', claim: 'The answer module owns the application answer value.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [] }]) : ''}});
         }
       }
       const text = ${JSON.stringify(discrepancy ? 'Docs name B [E1] but the current implementation calls C [E2]. Implementation evidence takes precedence; no path to B was discovered, not proof of absence. Static inspection is not runtime observation.' : environment ? 'PASSWORD=synthetic-desktop-env-7' : root ? 'The answer is 42 [E1], answer.ts:1.' : 'Fixture response.')};

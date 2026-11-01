@@ -3,7 +3,7 @@
   import Contradictions from './Contradictions.svelte';
   import Resolutions from './Resolutions.svelte';
   import type { KnowledgeHit } from '../shared/knowledge';
-  let { messageId = '', recordId = '', writable, openConversation, prepareRefresh }: { messageId?: string; recordId?: string; writable: boolean; openConversation: (id: string) => void; prepareRefresh: (record: KnowledgeHit) => void } = $props();
+  let { messageId = '', recordId = '', writable, openConversation, prepareRefresh, openExplorer, ask }: { messageId?: string; recordId?: string; writable: boolean; openConversation: (id: string) => void; prepareRefresh: (record: KnowledgeHit) => void; openExplorer: (id: string) => void; ask: (record: KnowledgeHit) => void } = $props();
   let records = $state<KnowledgeHit[]>([]);
   let error = $state('');
   let busy = $state(true);
@@ -83,6 +83,11 @@
         <blockquote>{record.claim}</blockquote>
         <p class="meta">{record.provenance === 'declared' ? 'Declared in source' : 'Statically inferred'} · {record.perspective === 'current' ? 'Current-source interpretation' : record.perspective === 'intended' ? 'Intended behavior, not implementation' : 'Historical decision, not current behavior'} · Sources {record.freshness}</p>
         <p class="meta">{record.validationNote}</p>
+        {#if record.architecture}
+          <p class="meta">Architecture: {record.architecture.type}{'mechanism' in record.architecture ? ` · ${record.architecture.mechanism}` : 'address' in record.architecture ? ` · ${record.architecture.address ?? ''}` : ''}</p>
+          <button onclick={() => openExplorer(record.id)}>Explore neighborhood</button>
+          <button onclick={() => ask(record)}>Ask follow-up question</button>
+        {/if}
         <Contradictions {record} />
         <button disabled={busy} onclick={() => showClaim(record.id)}>Knowledge details</button>
         {#if record.freshness === 'stale'}<button disabled={busy} onclick={() => prepareRefresh(record)}>Prepare refresh</button>{/if}
