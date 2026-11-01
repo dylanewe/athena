@@ -17,6 +17,7 @@ let directory: string, root: string, settings: ApiSettings, conversations: Conve
 let http: typeof fetch, requests: { url: string; body: Record<string, unknown>; headers: Headers }[], workers: Worker[], reservations: number[];
 let scripts: string[];
 let knowledge: Knowledge;
+let changed: () => void;
 function knowledgeCandidate(claim = 'The answer boundary owns the application answer value.') {
   return { id: 'C1', scope: `folder:${root}`, topic: 'Answer boundary', summary: 'A synchronous answer boundary.', kind: 'responsibility', claim, provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [] };
 }
@@ -52,6 +53,7 @@ class Worker extends EventEmitter {
   kill() { this.controller.abort(); return true; }
 }
 beforeEach(() => {
+  changed = () => {};
   directory = realpathSync(mkdtempSync(join(tmpdir(), 'athena-api-live-'))); root = join(directory, 'repo'); mkdirSync(root); writeFileSync(join(root, 'answer.ts'), 'export const answer = 42;\n');
   conversations = new Conversations(join(directory, 'conversations.sqlite'));
   const inventory = { snapshot: () => ({ roots: [{ path: root, consent: FOLDER_CONSENT, acceptedAt: 'now', includedLocations: [] }], repositories: [], candidates: [], discovery: { status: 'complete' as const, visited: 0, current: '', nonGitFiles: 1, failures: [] } }) };
@@ -68,7 +70,7 @@ beforeEach(() => {
   };
   const noOAuth = { snapshot: vi.fn(() => { throw new Error('OAuth unavailable'); }) } as unknown as ChatGPTSettings;
   knowledge = new Knowledge(join(directory, 'knowledge.sqlite'), sources, inventory, material => conversations.assertClean(material));
-  supervisor = new LiveSupervisor(conversations, noOAuth, sources, inventory, () => { const w = new Worker(); workers.push(w); return w; }, () => {}, settings, knowledge);
+  supervisor = new LiveSupervisor(conversations, noOAuth, sources, inventory, () => { const w = new Worker(); workers.push(w); return w; }, () => changed(), settings, knowledge);
 });
 afterEach(() => { supervisor.cancel(); knowledge.close(); sources.close(); conversations.close(); settings.close(); rmSync(directory, { recursive: true, force: true }); });
 async function idle() { await expect.poll(() => conversations.workspace().activeConversationId).toBeNull(); }
@@ -169,6 +171,58 @@ test('a failed child leaves an explicit partial answer and publishes successful 
   // Semantic conflicts require explicit links; schema validation alone cannot certify them.
   expect(retained.every(record => record.validation === 'unchecked')).toBe(true);
   expect(conversations.liveContext(conversations.workspace().selected!.id).history).toEqual([]);
+});
+
+test('invalid delegation shapes do not consume the one main-owned batch', async () => {
+  scripts = [response(undefined, 'investigate', {}), response(undefined, 'investigate', { question: 'Ambiguous', tasks: [{ scope: 'API', question: 'Inspect' }] }),
+    response(undefined, 'investigate', { tasks: [{ scope: 'API', question: 'Inspect' }] }),
+    response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: [], candidateKnowledgeChanges: [] }), response('One valid batch completed.')];
+  supervisor.start(null, 'Inspect'); await idle();
+  expect(requests.map(request => request.body.model)).toEqual(['main-one', 'main-one', 'main-one', 'investigator-one', 'main-one']);
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', investigators: [{ scope: 'API', status: 'complete' }] });
+});
+
+test('mixed publication preserves per-task outcomes and answer navigation metadata across restart', async () => {
+  let mainCalls = 0;
+  const stages = new Map<string, number>();
+  http = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.model === 'main-one') return new Response(++mainCalls === 1 ? response(undefined, 'investigate', { tasks: ['bad', 'good'].map(scope => ({ scope, question: `Inspect ${scope}` })) }) : response('Both inspected [E1].'));
+    const name = JSON.stringify(body.messages).includes('Inspect bad') ? 'bad' : 'good';
+    const stage = stages.get(name) ?? 0; stages.set(name, stage + 1);
+    if (!stage) return new Response(response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }));
+    return new Response(response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: [], candidateKnowledgeChanges: ['A proposal note'], knowledgeCandidates: [{ ...knowledgeCandidate(), relations: name === 'bad' ? [{ kind: 'depends-on', target: 'C999' }] : [] }] }));
+  };
+  supervisor.start(null, 'Publish what validates'); await idle();
+  const answer = conversations.workspace().selected!.messages.at(-1)!;
+  expect(answer.knowledgePublication).toBe('partial');
+  expect(answer.investigators?.map(task => task.knowledgePublication)).toEqual(['withheld', 'published']);
+  expect(await knowledge.inspect()).toHaveLength(1);
+  conversations.close(); conversations = new Conversations(join(directory, 'conversations.sqlite'));
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ knowledgePublication: 'partial', investigators: [{ knowledgePublication: 'withheld' }, { knowledgePublication: 'published' }] });
+});
+
+test('stop after one transactional publication preserves its records and navigation without publishing the next task', async () => {
+  let mainCalls = 0, stopped = false;
+  const stages = new Map<string, number>();
+  http = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.model === 'main-one') return new Response(++mainCalls === 1 ? response(undefined, 'investigate', { tasks: ['first', 'second'].map(scope => ({ scope, question: `Inspect ${scope}` })) }) : response('Inspected [E1].'));
+    const name = JSON.stringify(body.messages).includes('Inspect first') ? 'first' : 'second';
+    const stage = stages.get(name) ?? 0; stages.set(name, stage + 1);
+    return new Response(!stage ? response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 })
+      : response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: [], candidateKnowledgeChanges: [], knowledgeCandidates: [{ ...knowledgeCandidate(), topic: name + ' boundary' }] }));
+  };
+  changed = () => {
+    if (!stopped && conversations.workspace().selected?.messages.at(-1)?.investigators?.[0]?.knowledgePublication === 'published') {
+      stopped = true; supervisor.cancel();
+    }
+  };
+  supervisor.start(null, 'Inspect and retain'); await idle();
+  expect(stopped).toBe(true);
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'cancelled', knowledgePublication: 'published' });
+  expect(conversations.workspace().selected!.messages.at(-1)!.investigators?.map(task => task.knowledgePublication)).toEqual(['published', undefined]);
+  expect((await knowledge.inspect()).map(record => record.topic)).toEqual(['first boundary']);
 });
 
 test.each(['stop', 'window-close', 'quit', 'revocation'] as const)('%s cancels running and queued tasks, rejects late events and never revives work', async action => {

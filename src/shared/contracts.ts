@@ -4,7 +4,7 @@ import type { InventoryBridge } from './inventory';
 import type { ModelBridge } from './models';
 import type { SourceBridge } from './sources';
 import type { ChatGPTBridge, ChatGPTUsage } from './chatgpt';
-import type { Evidence } from './live';
+import type { Evidence, KnowledgePublication } from './live';
 import type { KnowledgeBridge } from './knowledge';
 import type { InvestigatorResult, InvestigatorTask } from './investigation';
 
@@ -27,7 +27,7 @@ export interface Message {
   requests?: number;
   activity?: string;
   ephemeral?: boolean;
-  knowledgePublication?: 'published' | 'withheld';
+  knowledgePublication?: KnowledgePublication;
   knowledgeReferences?: { id: string; topic: string }[];
 }
 export interface ConversationSummary {

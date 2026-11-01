@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import EnvironmentPermissions from './EnvironmentPermissions.svelte';
+  import InvestigationResult from './InvestigationResult.svelte';
   import InventoryView from './Inventory.svelte';
   import KnowledgeView from './Knowledge.svelte';
   import ExplorerView from './Explorer.svelte';
@@ -16,7 +17,7 @@
   let knowledgeRecord = $state('');
   import SourcesView from './Sources.svelte';
   import ModelSettingsView from './ModelSettings.svelte';
-  import { MAX_MESSAGE_LENGTH, type Workspace } from '../shared/contracts';
+  import { MAX_MESSAGE_LENGTH, type Workspace, type Message } from '../shared/contracts';
   import type { Evidence } from '../shared/live';
   let defaultModel = $state<string | null>(null);
   let inspected = $state<Record<string, string>>({});
@@ -47,6 +48,10 @@
       complete: replies.every(message => message.usageComplete === true),
     };
   });
+
+  function hasRetainedKnowledge(message: Message): boolean {
+    return message.knowledgePublication === 'published' || message.knowledgePublication === 'partial';
+  }
 
   async function load() {
     // A mutation owns its response. Notifications during it are refreshed after it settles.
@@ -142,7 +147,7 @@
     <button class="new-conversation" aria-pressed={section === 'inventory'} onclick={() => section = section === 'inventory' ? 'conversation' : 'inventory'}>Repositories</button>
     <button class="new-conversation" aria-pressed={section === 'sources'} onclick={() => section = section === 'sources' ? 'conversation' : 'sources'}>Sources</button>
     <button class="new-conversation" aria-pressed={section === 'knowledge'} onclick={() => { knowledgeMessage = ''; knowledgeRecord = ''; section = 'knowledge'; }}>Knowledge</button>
-    <button class="new-conversation" aria-pressed={section === 'explorer'} onclick={() => openExplorer('', selected?.messages.findLast(message => message.knowledgePublication === 'published')?.id ?? '')}>Services & dependencies</button>
+    <button class="new-conversation" aria-pressed={section === 'explorer'} onclick={() => openExplorer('', selected?.messages.findLast(hasRetainedKnowledge)?.id ?? '')}>Services & dependencies</button>
     <button class="new-conversation" aria-pressed={section === 'flows'} onclick={() => openFlows()}>Request flows</button>
     <button class="new-conversation" aria-pressed={section === 'models'} onclick={() => section = section === 'models' ? 'conversation' : 'models'}>Model settings</button>
     <div class="sidebar-heading">Your conversations</div>
@@ -197,10 +202,11 @@
                     {#each message.knowledgeReferences as reference}<button type="button" onclick={() => { knowledgeMessage = ''; knowledgeRecord = reference.id; section = 'knowledge'; }}>Inspect knowledge: {reference.topic}</button>{/each}
                   </details>
                 {/if}
-                {#if message.knowledgePublication === 'published' || message.knowledgeReferences?.length}
-                  <AnswerContradictions messageId={message.knowledgePublication === 'published' ? message.id : undefined} references={message.knowledgeReferences ?? []} />
+                {#if hasRetainedKnowledge(message) || message.knowledgeReferences?.length}
+                  <AnswerContradictions messageId={hasRetainedKnowledge(message) ? message.id : undefined} references={message.knowledgeReferences ?? []} />
                 {/if}
-                {#if message.knowledgePublication === 'published'}
+                {#if hasRetainedKnowledge(message)}
+                  {#if message.knowledgePublication === 'partial'}<p class="draft-note">Some knowledge retained; other task candidates were withheld. Inspect each task's publication outcome below.</p>{/if}
                   <button type="button" onclick={() => { knowledgeMessage = message.id; knowledgeRecord = ''; section = 'knowledge'; }}>Inspect retained knowledge</button>
                   <button type="button" onclick={() => openExplorer('', message.id)}>Explore investigation map</button>
                   <button type="button" onclick={() => openFlows({ messageId: message.id })}>Open investigation flows</button>
@@ -214,10 +220,7 @@
                       <details><summary>{task.id} · {task.scope} · {task.status}</summary>
                         <p>{task.question}</p>
                         {#if task.result}
-                          <ul>{#each task.result.inspectedScope as location}<li>{location}</li>{/each}</ul>
-                          {#each task.result.findings as finding}<p>{finding.claim} · {finding.support} {finding.evidenceIds.map(id => `[${id}]`).join(' ')}</p>{/each}
-                          {#each task.result.unresolvedQuestions as question}<p class="draft-note">{question}</p>{/each}
-                          {#if task.result.scopeTruncated}<p class="draft-note">Scope truncated.</p>{/if}
+                          <InvestigationResult result={task.result} publication={task.knowledgePublication} />
                         {/if}
                       </details>
                     {/each}
@@ -225,31 +228,7 @@
                 {/if}
                 {#if message.investigation}
                   <details class="evidence"><summary>Investigation · {message.status === 'running' ? 'in progress' : message.investigation.status}</summary>
-                    <p class="draft-note">Static source inspection, not runtime observation.</p>
-                    <strong>Inspected scope</strong>
-                    <ul>{#each message.investigation.inspectedScope as location}<li>{location}</li>{/each}</ul>
-                    {#if message.investigation.scopeTruncated}<p class="draft-note">Scope display is truncated; detailed exploration is retained locally.</p>{/if}
-                    {#each message.investigation.findings as finding}
-                      <p>{finding.claim} · {finding.support === 'source' ? 'Source-supported' : 'Uncertain interpretation'} {finding.evidenceIds.map(id => `[${id}]`).join(' ')}</p>
-                    {/each}
-                    {#if message.investigation.unresolvedQuestions.length}
-                      <strong>Unresolved questions</strong>
-                      <ul>{#each message.investigation.unresolvedQuestions as question}<li>{question}</li>{/each}</ul>
-                    {/if}
-                    {#if message.investigation.knowledgeCandidates?.length}
-                      <strong>Normalization candidates · {message.knowledgePublication === 'published' ? 'retained with validation labels' : 'not published'}</strong>
-                      {#each message.investigation.knowledgeCandidates as candidate}
-                        <details><summary>{candidate.scope} · {candidate.topic}</summary>
-                          <p>{candidate.summary}</p><p>{candidate.claim}</p>
-                          <p class="draft-note">{candidate.provenance} · {candidate.perspective} · {candidate.evidenceIds.map(id => `[${id}]`).join(' ')} · Semantic truth not certified</p>
-                          {#each candidate.relations as relation}<p class="draft-note">{relation.kind} · {relation.target}</p>{/each}
-                        </details>
-                      {/each}
-                    {/if}
-                    {#if message.investigation.candidateKnowledgeChanges.length}
-                      <strong>Candidate knowledge changes (not applied)</strong>
-                      <ul>{#each message.investigation.candidateKnowledgeChanges as change}<li>{change}</li>{/each}</ul>
-                    {/if}
+                    <InvestigationResult result={message.investigation} publication={message.knowledgePublication} />
                   </details>
                 {/if}
                 {#if message.evidence?.length}
@@ -308,7 +287,6 @@
   .evidence { border-left: 2px solid var(--accent); padding: 8px 12px; margin: 12px 0; }
   .evidence details { padding: 8px 0; }
   .evidence summary { cursor: pointer; overflow-wrap: anywhere; }
-  .evidence li { overflow-wrap: anywhere; }
   .evidence pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
   .evidence .draft-note { overflow-wrap: anywhere; }
 </style>

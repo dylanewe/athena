@@ -33,6 +33,7 @@ interface Active {
   conversationId: string; messageId: string; prompt: string; controller: AbortController; environment: EnvironmentPermissions;
   knowledgeReferences: { id: string; topic: string }[];
   investigators?: InvestigatorTask[];
+  knowledgePublication?: LiveResult['knowledgePublication'];
   checkouts: SourceCheckout[];
   retainedCheckouts: SourceCheckout[];
   apiKey?: boolean; text: string; evidence: Evidence[]; dependencies: SourceIdentity[]; scopes: SourceScope[]; dependencyCoverageComplete: boolean; exploration?: Exploration; title?: string; requests: number; usage?: ChatGPTUsage; stop?: () => void;
@@ -100,16 +101,18 @@ export class LiveSupervisor {
         if (binding.apiKey) await work((role, bytes) => this.apiSettings!.grant(binding.apiKey!, role!, bytes!, active.controller.signal), active.controller.signal);
         else await this.chatgpt.conversation(binding, active.controller.signal, work);
         if (this.active !== active || !outcome) return;
+        if (outcome.investigators) active.investigators = outcome.investigators;
         if (outcome.status === 'complete') {
           const identitiesValid = await this.verify(active.evidence, active.controller.signal, active.environment);
           const citationsValid = [...outcome.text.matchAll(/\[(E\d+)\]/g)].every(match => active.evidence.some(evidence => evidence.id === match[1]));
           if (!identitiesValid || !citationsValid || !await this.checkoutValid(active)) outcome = { ...outcome, status: 'partial', history: [], text: outcome.text + '\n\nPartial: the checkout changed, became unavailable, or a citation could not be verified. Retry for current evidence.' };
         }
         const completedResults = outcome.investigators?.length
-          ? outcome.investigators.filter(task => task.status === 'complete').map(task => task.result!)
-          : [(outcome.exploration ?? active.exploration)?.result].filter(result => result !== undefined);
+          ? outcome.investigators.filter(task => task.status === 'complete').map(task => ({ result: task.result!, task }))
+          : [(outcome.exploration ?? active.exploration)?.result].filter(result => result !== undefined).map(result => ({ result, task: undefined }));
         if (this.knowledge && ['complete', 'partial'].includes(outcome.status) && !active.environment.tainted && !this.conversations.isEphemeral(active.messageId)) {
-          for (const result of completedResults) {
+          let published = 0, withheld = 0;
+          for (const { result, task } of completedResults) {
             const candidates = result.knowledgeCandidates;
             if (!candidates?.length) continue;
             try {
@@ -120,8 +123,17 @@ export class LiveSupervisor {
                   if (this.active !== active || active.environment.tainted || this.conversations.isEphemeral(active.messageId)) throw new Error('Knowledge publication revoked.');
                   this.conversations.assertClean({ outcome, exploration: active.exploration, evidence: active.evidence });
                 } });
-              if (outcome.knowledgePublication !== 'withheld') outcome.knowledgePublication = 'published';
-            } catch { outcome.knowledgePublication = 'withheld'; }
+              published++;
+              if (task) task.knowledgePublication = 'published';
+            } catch {
+              if (this.active !== active) return;
+              withheld++;
+              if (task) task.knowledgePublication = 'withheld';
+            }
+            if (this.active !== active) return;
+            outcome.knowledgePublication = active.knowledgePublication = published && withheld ? 'partial' : published ? 'published' : 'withheld';
+            if (active.investigators) this.conversations.progressInvestigators(active.messageId, active.investigators, active.knowledgePublication);
+            this.changed();
           }
         }
         if (outcome.status === 'complete' && !await this.checkoutValid(active)) outcome = this.checkoutPartial(active, outcome);
@@ -400,6 +412,7 @@ export class LiveSupervisor {
     if (this.active !== active) return;
     this.active = undefined;
     result = { ...result, ...(!active.environment.tainted && active.investigators && !result.investigators ? { investigators: active.investigators } : {}), ...(!active.environment.tainted && result.status === 'complete' ? { checkouts: this.usedCheckouts(active) } : {}), ...(active.knowledgeReferences.length && !active.environment.tainted ? { knowledgeReferences: active.knowledgeReferences } : {}), ...(active.exploration && !result.exploration ? { exploration: active.exploration } : {}), ...(active.title && !result.title ? { title: active.title } : {}) };
+    if (active.knowledgePublication && !result.knowledgePublication) result.knowledgePublication = active.knowledgePublication;
     if (result.investigators) result.investigators = result.investigators.map(task => ['running', 'queued'].includes(task.status) ? { ...task, status: 'cancelled' } : task);
     if (result.status !== 'complete' && result.exploration) {
       const previous = result.exploration.result;

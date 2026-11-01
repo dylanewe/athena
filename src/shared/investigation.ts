@@ -31,6 +31,8 @@ export interface InvestigatorTask {
   scope: string;
   status: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled';
   result?: InvestigatorResult;
+  /** Set only by main's validator/writer, never by the child. */
+  knowledgePublication?: 'published' | 'withheld';
 }
 /** Local detailed exploration, never replayed into the conversational context or renderer. */
 export interface Exploration { history: Message[]; result: InvestigatorResult }

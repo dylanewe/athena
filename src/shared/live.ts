@@ -9,7 +9,8 @@ export const LIVE_LIMITS = { requests: 50, milliseconds: 15 * 60_000, historyByt
 export interface ConversationBinding { model: string; registration: string; apiKey?: ApiConversationConfig }
 export interface Evidence { id: string; citation: SourceCitation; text: string }
 export type LiveStatus = 'complete' | 'failed' | 'cancelled' | 'partial' | 'limit';
-export interface LiveResult { investigators?: InvestigatorTask[]; checkouts?: SourceCheckout[]; status: LiveStatus; text: string; history: PiMessage[]; usage?: ChatGPTUsage; usageComplete: boolean; requests: number; reason?: ChatGPTFailure; exploration?: Exploration; title?: string; knowledgePublication?: 'published' | 'withheld'; knowledgeReferences?: { id: string; topic: string }[] }
+export type KnowledgePublication = 'published' | 'withheld' | 'partial';
+export interface LiveResult { investigators?: InvestigatorTask[]; checkouts?: SourceCheckout[]; status: LiveStatus; text: string; history: PiMessage[]; usage?: ChatGPTUsage; usageComplete: boolean; requests: number; reason?: ChatGPTFailure; exploration?: Exploration; title?: string; knowledgePublication?: KnowledgePublication; knowledgeReferences?: { id: string; topic: string }[] }
 export interface LiveStart { maxInvestigators?: number; apiKey?: ApiConversationConfig; model: string; prompt: string; history: PiMessage[]; roots: { path: string; repositories: { name: string; path: string }[] }[]; needsTitle?: boolean; titlePrompt?: string }
 export type LiveRequest = { type: 'access'; id: number; role?: ModelRole; contextBytes?: number } | { type: 'source'; id: number; operation: SourceOperation; input: SourceRequest } | { type: 'inspect'; id: number; ids: string[] } | { type: 'knowledge'; id: number; input: KnowledgeRequest };
 export type LiveCheckpoint = Pick<LiveResult, 'exploration' | 'title' | 'investigators'>;

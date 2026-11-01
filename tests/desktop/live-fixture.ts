@@ -5,10 +5,11 @@ import { pathToFileURL } from 'node:url';
 
 interface ScriptedInvestigation { question: string; paths: string[]; candidates: unknown[]; text: string }
 /** Isolated fake saved registration; OAuth itself is exercised in chatgpt.spec.ts. */
-export async function installLiveFixture(application: ElectronApplication, directory: string, root?: string, options: boolean | { investigation?: ScriptedInvestigation; parallel?: boolean } = false, knowledge = false, reuse = false, discrepancy = false, architecture = false) {
+export async function installLiveFixture(application: ElectronApplication, directory: string, root?: string, options: boolean | { investigation?: ScriptedInvestigation; parallel?: boolean; mixedPublication?: boolean } = false, knowledge = false, reuse = false, discrepancy = false, architecture = false) {
   const environment = typeof options === 'boolean' ? options : false;
   const investigation = typeof options === 'object' ? options.investigation : undefined;
   const parallel = typeof options === 'object' && options.parallel === true;
+  const mixedPublication = typeof options === 'object' && options.mixedPublication === true;
   const fixture = join(directory, 'live-worker-fixture.mjs');
   writeFileSync(fixture, `
     const frame = value => 'data: ' + JSON.stringify(value) + '\\n\\n';
@@ -61,6 +62,13 @@ export async function installLiveFixture(application: ElectronApplication, direc
             ] })});
           }
           if (!called('sources_read')) return call('sources_read', {root:${JSON.stringify(root ?? '')},path:${JSON.stringify(environment ? '.env' : 'answer.ts')},start:1,end:1});
+          if (${JSON.stringify(mixedPublication)}) {
+            const assignment = body.input.find(item => item.role === 'user').content.map(part => part.text ?? '').join('');
+            const scope = ['API', 'Worker', 'Storage', 'Handoff'].find(scope => assignment.includes('answer for ' + scope));
+            return call('finish_investigation', {findings:[{claim:'The value is 42',support:'source',evidenceIds:['E1']}],unresolvedQuestions:['Runtime behavior was not observed'],candidateKnowledgeChanges:['Proposed note for ' + scope],knowledgeCandidates:[{
+              id:'C1',scope:${JSON.stringify(`folder:${root}`)},topic:scope + ' proposal',summary:'A synchronous answer boundary.',kind:'responsibility',claim:'The answer module owns the application answer value.',provenance:'statically-inferred',perspective:'current',evidenceIds:['E1'],relations:scope === 'Worker' ? [{kind:'depends-on',target:'C999'}] : []
+            }]});
+          }
           return call('finish_investigation', {findings:[{claim:${JSON.stringify(environment ? 'PASSWORD=synthetic-desktop-env-7' : 'The value is 42')},support:'source',evidenceIds:['E1']}],unresolvedQuestions:['Runtime behavior was not observed'],candidateKnowledgeChanges:['Constant location could be remembered']${architecture ? ',knowledgeCandidates:' + JSON.stringify([
             { id: 'C1', scope: 'repo', topic: 'API', summary: 'Request entry service.', kind: 'entity', claim: 'API defines the request-serving boundary.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [], architecture: { type: 'service' } },
             { id: 'C2', scope: 'repo', topic: 'Worker', summary: 'Orders worker service.', kind: 'entity', claim: 'Worker consumes orders.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [], architecture: { type: 'service' } },

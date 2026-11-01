@@ -90,14 +90,17 @@ export function investigatorTool(roots: LiveStart['roots'], runtime: Investigato
   return {
     name: 'investigate', label: 'Delegate investigations',
     description: 'Delegate one batch of up to eight isolated investigators. Split broad questions into bounded questions and relevance scopes, preferably repository-local; cross-repository handoff verification is allowed. All children share designated-folder permissions and job limits. Additional tasks queue; no nested delegation. Returns bounded structured findings, never transcripts. Available once per job.',
-    parameters: Type.Union([
-      Type.Object({ question: Type.String({ minLength: 1, maxLength: 8000 }) }, { additionalProperties: false }),
-      Type.Object({ tasks: Type.Array(Type.Object({ question: Type.String({ minLength: 1, maxLength: 8000 }), scope: Type.String({ minLength: 1, maxLength: 512 }) }, { additionalProperties: false }), { minItems: 1, maxItems: INVESTIGATOR_MAX }) }, { additionalProperties: false }),
-    ]),
+    // Provider adapters require object-root schemas; exclusivity is checked at execution.
+    parameters: Type.Object({
+      question: Type.Optional(Type.String({ minLength: 1, maxLength: 8000 })),
+      tasks: Type.Optional(Type.Array(Type.Object({ question: Type.String({ minLength: 1, maxLength: 8000 }), scope: Type.String({ minLength: 1, maxLength: 512 }) }, { additionalProperties: false }), { minItems: 1, maxItems: INVESTIGATOR_MAX })),
+    }, { additionalProperties: false }),
     async execute(_id, params) {
       if (delegated) throw new Error('Only one investigator batch is available per job. Use its findings or ask a follow-up question.');
-      signal.throwIfAborted(); delegated = true;
+      signal.throwIfAborted();
       const input = params as { question?: string; tasks?: { question: string; scope: string }[] };
+      if ((input.question !== undefined) === (input.tasks !== undefined)) throw new Error('Supply exactly one bounded question or task batch.');
+      delegated = true;
       const tasks: InvestigatorTask[] = (input.tasks ?? [{ question: input.question!, scope: 'Question-selected eligible sources' }]).map((task, index) => ({ ...task, id: `T${index + 1}`, status: 'queued' }));
       const notify = () => { if (!signal.aborted) runtime.tasks?.(structuredClone(tasks)); };
       const cancel = () => { for (const task of tasks) if (task.status === 'queued' || task.status === 'running') task.status = 'cancelled'; };
