@@ -175,14 +175,14 @@ export class KnowledgeRetrieval {
     const invalidate = (ids: string[], affectedSources: SourceIdentity[] = []) => {
       if (!signal.aborted && budget.canPersistInvalidations()) this.invalidate(ids, affectedSources);
     };
-    const visited = new Set<string>();
+    const visited = new Map<string, KnowledgeRecord>();
     const identities: (SourceIdentity | SourceScope)[] = [];
     let complete = true, invalidated = false;
     const checkouts: SourceCheckout[] = [];
     const collect = (item: KnowledgeRecord) => {
       if (visited.has(item.id)) return;
       if (visited.size >= L.graph) { complete = false; return; }
-      visited.add(item.id);
+      visited.set(item.id, item);
       identities.push(...item.dependencies, ...item.scopes);
       invalidated ||= item.validation === 'stale' || !item.checkouts?.length;
       checkouts.push(...(item.checkouts ?? []));
@@ -196,8 +196,8 @@ export class KnowledgeRetrieval {
       const key = (source: SourceIdentity) => source.repository
         ? JSON.stringify([knowledgeName(source.repository.name), relative(source.repository.path, source.path)])
         : JSON.stringify([source.folder, source.path]);
-      return [...new Set([record.id, ...[...visited].filter(id => {
-        const item = budget.records.get(id)!;
+      return [...new Set([record.id, ...[...visited.keys()].filter(id => {
+        const item = visited.get(id)!;
         return [...item.dependencies, ...item.scopes].some(source => key(source) === key(identity));
       })])];
     };
@@ -224,8 +224,8 @@ export class KnowledgeRetrieval {
     const filesChanged = !invalidated && !await this.fresh(unique.filter(item => !('operation' in item)), signal);
     const stale = invalidated || filesChanged;
     if (stale) {
-      const staleIds = [...visited].filter(id => {
-        const item = budget.records.get(id)!;
+      const staleIds = [...visited.keys()].filter(id => {
+        const item = visited.get(id)!;
         return item.validation === 'stale' || !item.checkouts?.length || item.checkouts.some(snapshot => budget.checkouts.get(JSON.stringify(snapshot)) === false);
       });
       invalidate([...new Set([record.id, ...staleIds])], [

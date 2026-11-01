@@ -128,6 +128,21 @@ test('annotation attachments share the original response-wide graph budget, incl
   expect((await f.resolutions.attach(response)).items[0].annotations).toBeUndefined(); // The separate origin would be claim 33.
 });
 
+test('orphaned annotations remain inspectable after source changes, withhold revoked sources, and explicitly reconnect to re-extracted versions', async () => {
+  const f = await fixture(); const ids = await f.publish();
+  const saved = (await f.resolutions.write({ operation: 'annotate', kind: 'note', text: 'My explanation for this discrepancy.', claimIds: ids })).items[0];
+  await f.knowledge.clear();
+  writeFileSync(join(f.root, 'service.ts'), 'export const result = D.call();\n');
+  expect((await f.resolutions.read({ operation: 'inspect', id: saved.id })).items[0]).toMatchObject({ revision: 1, status: 'requires-reconsideration' });
+  const roots = f.snapshot.roots; f.snapshot.roots = [];
+  expect((await f.resolutions.read({ operation: 'list' })).items).toEqual([]);
+  f.snapshot.roots = roots;
+  const replacements = await f.publish();
+  expect((await f.resolutions.read({ operation: 'list', claimId: replacements[0] })).items).toEqual([]);
+  expect((await f.resolutions.write({ operation: 'reconnect', id: saved.id, claimIds: replacements })).items[0]).toMatchObject({ revision: 2, status: 'recorded-for-these-versions' });
+  expect((await f.resolutions.read({ operation: 'inspect', id: saved.id, revision: 1 })).items[0].status).toBe('requires-reconsideration');
+});
+
 test('source-change reconsideration is sticky, while model reads do not persist observations', async () => {
   const f = await fixture(); const ids = await f.publish();
   const annotation = (await f.resolutions.write({ operation: 'annotate', kind: 'note', text: 'No B path found in this bounded inspection; not proof of absence.', claimIds: ids })).items[0];
