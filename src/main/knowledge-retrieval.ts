@@ -21,8 +21,7 @@ interface RetrievalBudget {
   checkouts: Map<string, boolean>;
   canPersistInvalidations: () => boolean;
   signal: AbortSignal;
-  neighborhood: boolean;
-  coverage: NonNullable<KnowledgeResult['derivation']>;
+  coverage: { required: boolean; derivation: NonNullable<KnowledgeResult['derivation']> };
 }
 
 /** Local, rebuildable FTS index and bounded one-hop retrieval. Never model-generated SQL. */
@@ -30,7 +29,7 @@ export class KnowledgeRetrieval {
   /** Main-private response capabilities: never serialized into renderer/model results or persistence. */
   private readonly contexts = new WeakMap<object, RetrievalBudget>();
   private budget(signal: AbortSignal, canPersistInvalidations = () => false): RetrievalBudget {
-    return { records: new Map(), sources: new Set(), checkouts: new Map(), canPersistInvalidations, signal, neighborhood: false, coverage: { files: [], scopes: [], checkouts: [] } };
+    return { records: new Map(), sources: new Set(), checkouts: new Map(), canPersistInvalidations, signal, coverage: { required: false, derivation: { files: [], scopes: [], checkouts: [] } } };
   }
   inspectionContext(signal: AbortSignal): object {
     const context = {};
@@ -85,7 +84,7 @@ export class KnowledgeRetrieval {
     const offset = 'offset' in input ? input.offset ?? 0 : 0;
     const limit = input.operation === 'search' || input.operation === 'expand' || input.operation === 'neighborhood' ? input.limit ?? L.defaultResults : 1;
     const budget = this.budget(signal, canPersistInvalidations);
-    budget.neighborhood = input.operation === 'neighborhood';
+    budget.coverage.required = input.operation === 'neighborhood';
     let ids: string[];
     let edges: NonNullable<KnowledgeResult['edges']> = [];
     if (input.operation === 'neighborhood') {
@@ -168,11 +167,11 @@ export class KnowledgeRetrieval {
   /** Finalize again after annotation attachment under the same opaque read context. */
   completeResult(result: KnowledgeResult): KnowledgeResult {
     const budget = this.contexts.get(result);
-    if (!budget?.neighborhood) return result;
-    result.derivation = budget.coverage;
+    if (!budget?.coverage.required) return result;
+    result.derivation = budget.coverage.derivation;
     if (Buffer.byteLength(JSON.stringify(result)) > L.bytes) {
       result.items = []; delete result.edges; delete result.derivation; delete result.evidence; delete result.evidenceId;
-      result.notice = NOTICE + ' Neighborhood withheld because complete attachment provenance exceeds response bounds.';
+      result.notice = NOTICE + ' Typed knowledge withheld because complete attachment provenance exceeds response bounds.';
     }
     return result;
   }
@@ -256,6 +255,7 @@ export class KnowledgeRetrieval {
       if (visited.has(item.id)) return;
       if (visited.size >= L.graph) { complete = false; return; }
       visited.set(item.id, item);
+      budget.coverage.required ||= !!item.architecture;
       identities.push(...item.dependencies, ...item.scopes);
       invalidated ||= item.validation === 'stale' || !item.checkouts?.length;
       checkouts.push(...(item.checkouts ?? []));
@@ -309,12 +309,13 @@ export class KnowledgeRetrieval {
       files: unique.filter(item => !('operation' in item)), scopes: unique.filter((item): item is SourceScope => 'operation' in item),
       checkouts: [...new Map(checkouts.map(snapshot => [JSON.stringify(snapshot), snapshot])).values()],
     };
-    if (budget.neighborhood) {
-      const merge = <T>(left: T[], right: T[]) => [...new Map([...left, ...right].map(item => [JSON.stringify(item), item])).values()];
-      budget.coverage.files = merge(budget.coverage.files, derivation.files);
-      budget.coverage.scopes = merge(budget.coverage.scopes, derivation.scopes);
-      budget.coverage.checkouts = merge(budget.coverage.checkouts, derivation.checkouts);
-    }
+    // Accumulate before knowing which returned/attached claim is typed. The shared
+    // context enables its complete envelope as soon as any typed derivation is read.
+    const merge = <T>(left: T[], right: T[]) => [...new Map([...left, ...right].map(item => [JSON.stringify(item), item])).values()];
+    const coverage = budget.coverage.derivation;
+    coverage.files = merge(coverage.files, derivation.files);
+    coverage.scopes = merge(coverage.scopes, derivation.scopes);
+    coverage.checkouts = merge(coverage.checkouts, derivation.checkouts);
     return { record, stale, derivation };
   }
 }

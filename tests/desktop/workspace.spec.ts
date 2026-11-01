@@ -30,6 +30,25 @@ async function investigateEnvironment(question: string, canary: string) {
   await expect.poll(() => page.evaluate(async () => (await window.athena.inventory.snapshot()).discovery.status)).not.toBe('running');
   await newConversation(); await send(question);
 }
+async function holdNextKnowledgeDetail() {
+  await application.evaluate(({ ipcMain }) => {
+    type Handler = (event: Electron.IpcMainInvokeEvent, operation: unknown, payload: unknown) => unknown;
+    const original = (ipcMain as unknown as { _invokeHandlers: Map<string, Handler> })._invokeHandlers.get('athena:knowledge')!;
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const gate = { entered: false, release };
+    (globalThis as unknown as { detailGate: typeof gate }).detailGate = gate;
+    ipcMain.removeHandler('athena:knowledge');
+    ipcMain.handle('athena:knowledge', async (event, operation, payload) => {
+      const result = await original(event, operation, payload);
+      if (payload?.operation === 'detail') {
+        ipcMain.removeHandler('athena:knowledge'); ipcMain.handle('athena:knowledge', original);
+        gate.entered = true; await pending;
+      }
+      return result;
+    });
+  });
+}
 async function pauseNextWorker() {
   await application.evaluate(({ utilityProcess }) => {
     const fork = utilityProcess.fork;
@@ -108,10 +127,15 @@ test('contradictions show both source trails in answers and details, with durabl
   await expect(answer).toContainText('export const result = C.call();');
   await expect(answer).toContainText('Sources current');
   await page.getByRole('button', { name: 'Inspect retained knowledge', exact: true }).click();
+  await holdNextKnowledgeDetail();
   await page.getByRole('button', { name: 'Knowledge details', exact: true }).first().click();
+  await expect.poll(() => application.evaluate(() => (globalThis as unknown as { detailGate: { entered: boolean } }).detailGate.entered)).toBe(true);
   let resolutions = page.getByRole('region', { name: 'User resolutions' });
+  await expect(resolutions.getByLabel('Your resolution explanation')).toHaveCount(0);
+  await application.evaluate(() => (globalThis as unknown as { detailGate: { release: () => void } }).detailGate.release());
   await resolutions.getByLabel('Resolution kind', { exact: true }).selectOption('obsolete-declaration');
   await resolutions.getByLabel('Your resolution explanation').fill('B was the early plan; C is intentional.');
+  await expect(resolutions.getByLabel('Your resolution explanation')).toHaveValue('B was the early plan; C is intentional.');
   await resolutions.getByRole('button', { name: 'Save user annotation', exact: true }).click();
   await expect(resolutions).toContainText('Recorded for these versions only — not verification');
   await expect(page.getByRole('region', { name: 'Contradictory claims' }).first()).toContainText('Use dependency B.');

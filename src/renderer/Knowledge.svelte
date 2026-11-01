@@ -113,7 +113,7 @@
         <p class="identity">{record.id}</p>
       </article>
     {/each}
-    <Resolutions record={detailId ? records.find(record => record.id === detailId) : undefined} {writable} />
+    <Resolutions record={!busy && detailId ? records.find(record => record.id === detailId) : undefined} writable={writable && !busy} />
     <nav aria-label="Knowledge pages">
       <button disabled={busy || !pages.length} onclick={() => { const previous = pages.at(-1)!; pages = pages.slice(0, -1); void load(previous); }}>Previous page</button>
       <button disabled={busy || nextOffset === undefined} onclick={() => { pages = [...pages, offset]; void load(nextOffset); }}>Next page</button>

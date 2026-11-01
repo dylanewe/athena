@@ -596,7 +596,10 @@ test('citation-free source investigations retain checkout provenance and cannot 
   expect(requests).toHaveLength(count);
 });
 
-test.each(['conflict', 'annotation'] as const)('neighborhood %s attachments join runtime and saved-follow-up checkout coverage', async attachment => {
+test.each([
+  { attachment: 'conflict', operation: 'neighborhood' }, { attachment: 'annotation', operation: 'neighborhood' },
+  { attachment: 'conflict', operation: 'evidence' }, { attachment: 'annotation', operation: 'evidence' },
+] as const)('typed $operation $attachment attachments join runtime and saved-follow-up checkout coverage', async ({ attachment, operation }) => {
   for (const name of ['a', 'c']) {
     mkdirSync(join(root, name, '.git'), { recursive: true }); writeFileSync(join(root, name, 'source.ts'), 'export const service = serve();\n');
     snapshot.repositories.push({ name, path: join(root, name), presence: 'present', documentationRoots: [], boundaries: [], fileCount: 1, examined: false });
@@ -608,9 +611,10 @@ test.each(['conflict', 'annotation'] as const)('neighborhood %s attachments join
   const [c] = await publishEntity('c');
   const [a] = await publishEntity('a', attachment === 'conflict' ? [{ kind: 'conflicts-with', target: c }] : []);
   if (attachment === 'annotation') await resolutions.write({ operation: 'annotate', kind: 'note', text: 'Consider both service versions.', claimIds: [a, c] });
-  const inspected = await resolutions.attach(await knowledge.retrieve({ operation: 'neighborhood', id: a, depth: 0 }));
+  const request = operation === 'neighborhood' ? { operation, id: a, depth: 0 } : { operation, id: a, index: 0 };
+  const inspected = await resolutions.attach(await knowledge.retrieve(request));
   expect(inspected.derivation?.checkouts.map(item => item.repository?.name).sort()).toEqual(['a', 'c']);
-  scripted([functionResponse('retrieve_knowledge', { operation: 'neighborhood', id: a, depth: 0 }), textResponse('These are explicitly unverified architectural leads.')]);
+  scripted([functionResponse('retrieve_knowledge', request), textResponse('These are explicitly unverified architectural leads.')]);
   jobs.start(null, 'Inspect attached service context'); await idle();
   const id = db.workspace().selected!.id, count = requests.length;
   expect(db.liveContext(id).checkouts?.map(item => item.repository?.name).sort()).toEqual(['a', 'c']);
