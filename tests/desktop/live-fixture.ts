@@ -3,8 +3,11 @@ import { writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+interface ScriptedInvestigation { question: string; paths: string[]; candidates: unknown[]; text: string }
 /** Isolated fake saved registration; OAuth itself is exercised in chatgpt.spec.ts. */
-export async function installLiveFixture(application: ElectronApplication, directory: string, root?: string, environment = false, knowledge = false, reuse = false, discrepancy = false, architecture = false) {
+export async function installLiveFixture(application: ElectronApplication, directory: string, root?: string, options: boolean | { investigation: ScriptedInvestigation } = false, knowledge = false, reuse = false, discrepancy = false, architecture = false) {
+  const environment = typeof options === 'boolean' ? options : false;
+  const investigation = typeof options === 'object' ? options.investigation : undefined;
   const fixture = join(directory, 'live-worker-fixture.mjs');
   writeFileSync(fixture, `
     const frame = value => 'data: ' + JSON.stringify(value) + '\\n\\n';
@@ -40,8 +43,14 @@ export async function installLiveFixture(application: ElectronApplication, direc
         }
       }
       if (${JSON.stringify(root ?? '')} && !${JSON.stringify(reuse)}) {
-        if (hasTool('investigate') && !called('investigate')) return call('investigate', {question:'Find the exported answer'});
+        if (hasTool('investigate') && !called('investigate')) return call('investigate', {question:${JSON.stringify(investigation?.question ?? 'Find the exported answer')}});
         if (hasTool('sources_read')) {
+          if (${JSON.stringify(!!investigation)}) {
+            const paths = ${JSON.stringify(investigation?.paths ?? [])};
+            const reads = body.input.filter(item => item.type === 'function_call' && item.name === 'sources_read').length;
+            if (reads < paths.length) return call('sources_read', {root:${JSON.stringify(root ?? '')},path:paths[reads],start:1,end:1});
+            return call('finish_investigation', {findings:[],unresolvedQuestions:['Missing bank implementation; no runtime observation.'],candidateKnowledgeChanges:[],knowledgeCandidates:${JSON.stringify(investigation?.candidates ?? [])}});
+          }
           if (${JSON.stringify(discrepancy)}) {
             const reads = body.input.filter(item => item.type === 'function_call' && item.name === 'sources_read').length;
             if (reads < 2) return call('sources_read', {root:${JSON.stringify(root ?? '')},path:reads === 0 ? 'README.md' : 'answer.ts',start:1,end:1});
@@ -61,7 +70,7 @@ export async function installLiveFixture(application: ElectronApplication, direc
           ]) : knowledge ? ',knowledgeCandidates:' + JSON.stringify([{ id: 'C1', scope: `folder:${root}`, topic: 'Answer ownership', aliases: ['Answer value'], summary: 'A synchronous answer boundary.', kind: 'responsibility', claim: 'The answer module owns the application answer value.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [] }]) : ''}});
         }
       }
-      const text = ${JSON.stringify(discrepancy ? 'Docs name B [E1] but the current implementation calls C [E2]. Implementation evidence takes precedence; no path to B was discovered, not proof of absence. Static inspection is not runtime observation.' : environment ? 'PASSWORD=synthetic-desktop-env-7' : root ? 'The answer is 42 [E1], answer.ts:1.' : 'Fixture response.')};
+      const text = ${JSON.stringify(investigation?.text ?? (discrepancy ? 'Docs name B [E1] but the current implementation calls C [E2]. Implementation evidence takes precedence; no path to B was discovered, not proof of absence. Static inspection is not runtime observation.' : environment ? 'PASSWORD=synthetic-desktop-env-7' : root ? 'The answer is 42 [E1], answer.ts:1.' : 'Fixture response.'))};
       const item = {type:'message',id:'msg_1',role:'assistant',content:[{type:'output_text',text,annotations:[]}]};
       return new Response(new TextEncoder().encode(frame({type:'response.output_item.added',output_index:0,item:{...item,content:[]}}) + frame({type:'response.content_part.added',output_index:0,content_index:0,part:{type:'output_text',text:'',annotations:[]}}) + frame({type:'response.output_text.delta',output_index:0,content_index:0,delta:text}) + frame({type:'response.output_item.done',output_index:0,item}) + complete));
     };

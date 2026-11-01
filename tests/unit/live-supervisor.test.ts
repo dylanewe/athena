@@ -16,6 +16,7 @@ import { runLiveAgent } from '../../src/worker/live-agent';
 import { LIVE_LIMITS, type LiveParentMessage } from '../../src/shared/live';
 import type { InventorySnapshot } from '../../src/shared/inventory';
 import { FOLDER_CONSENT } from '../../src/shared/inventory';
+import { operationCandidates, operationFiles } from '../fixtures/operation';
 
 const frame = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
 const complete = frame({ type: 'response.completed', response: { status: 'completed', usage: { input_tokens: 10, output_tokens: 3 } } });
@@ -651,6 +652,53 @@ test.each(['during', 'follow-up'] as const)('typed neighborhood lookup without E
     jobs.start(id, 'Explain more'); await idle();
     expect(db.workspace().selected!.messages.at(-1)?.status).toBe('failed'); expect(requests).toHaveLength(count);
   }
+});
+
+async function retainOperation() {
+  for (const name of ['shop', 'ledger']) {
+    mkdirSync(join(root, name, '.git'), { recursive: true });
+    snapshot.repositories.push({ name, path: join(root, name), presence: 'present', documentationRoots: [], boundaries: [], fileCount: 1, examined: false });
+  }
+  const evidence = [];
+  for (const [scope, path, text] of operationFiles) {
+    writeFileSync(join(root, scope, path), text);
+    const result = await sources.run('read', { root, path: `${scope}/${path}`, start: 1, end: 1 });
+    evidence.push({ id: `E${evidence.length + 1}`, citation: result.entries[0].citation!, text: result.entries[0].text! });
+  }
+  const ids = await knowledge.publish({ owner: { conversationId: 'prior', messageId: 'prior-flow' }, candidates: operationCandidates, evidence,
+    completed: true, environmentExposed: false, signal: new AbortController().signal });
+  return ids.at(-1)!;
+}
+
+test.each(['flow', 'flows', 'detail', 'search', 'evidence'] as const)('operation %s retrieval without fresh investigation retains transitive checkout scope in runtime and saved history', async operation => {
+  const id = await retainOperation();
+  const request = operation === 'search' ? { operation, query: 'Checkout operation' } : operation === 'flows' ? { operation, messageId: 'prior-flow' } : operation === 'evidence' ? { operation, id, index: 0 } : { operation, id };
+  scripted([functionResponse('retrieve_knowledge', request), textResponse('Ordered static operation support, not runtime tracing.')]);
+  jobs.start(null, 'Explain the retained checkout operation'); await idle();
+  const conversation = db.workspace().selected!, count = requests.length;
+  expect(conversation.messages.at(-1)?.status).toBe('complete');
+  expect(db.liveContext(conversation.id).checkouts?.map(item => item.repository?.name).sort()).toEqual(['ledger', 'shop']);
+  expect(db.exploration(conversation.messages.at(-1)!.id)).toBeUndefined();
+  writeFileSync(join(root, 'ledger', 'uncited.ts'), 'changed();');
+  jobs.start(conversation.id, 'Explain more'); await idle();
+  expect(db.workspace().selected!.messages.at(-1)?.status).toBe('failed');
+  expect(requests).toHaveLength(count);
+});
+
+test.each(['conflict', 'annotation'] as const)('flow %s attachments contribute to the same live provenance envelope without an E citation', async attachment => {
+  const id = await retainOperation();
+  mkdirSync(join(root, 'audit', '.git'), { recursive: true });
+  writeFileSync(join(root, 'audit', 'entry.ts'), 'export const audit = record();\n');
+  snapshot.repositories.push({ name: 'audit', path: join(root, 'audit'), presence: 'present', documentationRoots: [], boundaries: [], fileCount: 1, examined: false });
+  const result = await sources.run('read', { root, path: 'audit/entry.ts', start: 1, end: 1 });
+  const [audit] = await knowledge.publish({ owner: { conversationId: 'prior', messageId: 'audit' }, candidates: [{ ...knowledgeCandidate(), scope: 'audit', relations: attachment === 'conflict' ? [{ kind: 'conflicts-with', target: id }] : [] }],
+    evidence: [{ id: 'E1', citation: result.entries[0].citation!, text: result.entries[0].text! }], completed: true, environmentExposed: false, signal: new AbortController().signal });
+  if (attachment === 'annotation') await resolutions.write({ operation: 'annotate', kind: 'note', text: 'Review audit and checkout together.', claimIds: [id, audit] });
+  scripted([functionResponse('retrieve_knowledge', { operation: 'flow', id }), textResponse('This is an uncertain static flow.')],
+    request => { if (request === 2) writeFileSync(join(root, 'audit', 'caller.ts'), 'changed();'); });
+  jobs.start(null, 'Explain the checkout flow and its attached context'); await idle();
+  expect(db.workspace().selected!.messages.at(-1)?.status).toBe('partial');
+  expect(requests).toHaveLength(2);
 });
 
 test.each(['during', 'follow-up'] as const)('reused evidence retains its cross-repository dependency closure for %s edits', async when => {

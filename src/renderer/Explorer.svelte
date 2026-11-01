@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { CONNECTION_TYPES, isConnection, type KnowledgeHit } from '../shared/knowledge';
-  let { messageId = '', recordId = '', openKnowledge, ask }: { messageId?: string; recordId?: string; openKnowledge: (id: string) => void; ask: (record: KnowledgeHit) => void } = $props();
+  let { messageId = '', recordId = '', openKnowledge, ask, openFlows, returnToFlow }: { openFlows: (service: string) => void; returnToFlow?: () => void; messageId?: string; recordId?: string; openKnowledge: (id: string) => void; ask: (record: KnowledgeHit) => void } = $props();
   let records = $state<KnowledgeHit[]>([]);
   let repositories = $state<string[]>([]);
   let scope = $state('');
@@ -33,6 +33,8 @@
 <main>
   <header><div><div class="eyebrow">Evidence-backed · Read-only</div><h1>Services & dependencies</h1></div><button disabled={busy} onclick={() => load()}>Check map freshness</button></header>
   <div class="explorer-content">
+    <button onclick={() => openFlows('')}>Flows in this investigation</button>
+    {#if returnToFlow}<button onclick={returnToFlow}>Return to request flow</button>{/if}
     <p>Repository-scoped services, interfaces and concrete connections. Static analysis is not runtime observation. This is a bounded neighborhood, never a complete architecture or proof of isolation.</p>
     <form onsubmit={event => { event.preventDefault(); focus = ''; void load(''); }}>
       <label>Map repository scope<select bind:value={scope}><option value="">Current neighborhood</option>{#each repositories as name}<option value={name}>{name}</option>{/each}</select></label>
@@ -59,6 +61,7 @@
               {#if record.evidence[0]}<p class="location">{record.evidence[0].citation.path}:{record.evidence[0].citation.start}</p>{/if}
               <button disabled={busy} onclick={() => { currentAnswer = false; void load(record.id); }}>Expand neighbors</button>
               <button onclick={() => ask(record)}>Ask about entity</button>
+              <button onclick={() => openFlows(record.id)}>Flows through this service</button>
             </div>
           {/each}
         </section>

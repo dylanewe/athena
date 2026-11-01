@@ -1,10 +1,11 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { SourceCheckouts } from './source-checkouts';
+import { resolveOperationFlow } from './operation-flows';
 import { KnowledgeRetrieval, knowledgeName as nameKey } from './knowledge-retrieval';
 import { relative, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Check } from 'typebox/value';
-import { isConnection, knowledgeCandidatesSchema, type KnowledgeCandidate, type KnowledgeOwner, type KnowledgeRecord, type KnowledgeRequest, type KnowledgeResult } from '../shared/knowledge';
+import { flowReferences, isConnection, knowledgeCandidatesSchema, type KnowledgeCandidate, type KnowledgeOwner, type KnowledgeRecord, type KnowledgeRequest, type KnowledgeResult } from '../shared/knowledge';
 import type { ResolutionTarget } from '../shared/resolutions';
 import type { Evidence } from '../shared/live';
 import type { SourceCheckout, SourceIdentity, SourceScope } from '../shared/sources';
@@ -202,7 +203,8 @@ export class Knowledge {
     const existing = this.records();
     const built = new Map<string, { candidate: KnowledgeCandidate; record: Stored }>();
     // Endpoints are explicit claim references, never name-based guesses. Build entities first.
-    for (const candidate of [...candidates].sort((a, b) => Number(a.kind === 'relationship') - Number(b.kind === 'relationship'))) {
+    const phase = (candidate: KnowledgeCandidate) => candidate.flow ? 2 : candidate.kind === 'relationship' ? 1 : 0;
+    for (const candidate of [...candidates].sort((a, b) => phase(a) - phase(b))) {
       let architecture = candidate.architecture;
       if ((candidate.kind === 'entity' || candidate.kind === 'relationship') !== !!architecture || architecture && (candidate.kind === 'relationship') !== isConnection(architecture)) throw new Error('Architecture claims require a matching typed entity or relationship.');
       if (architecture && isConnection(architecture)) {
@@ -214,6 +216,7 @@ export class Knowledge {
         architecture = { ...architecture, from: endpoint(architecture.from), to: endpoint(architecture.to) };
         if (architecture.from === architecture.to) throw new Error('A concrete connection requires distinct endpoints.');
       }
+      const flow = resolveOperationFlow(candidate, ref => built.get(ref)?.record ?? existing.find(item => item.id === ref));
       const evidence = candidate.evidenceIds.map(id => {
         const item = observed.find(item => item.id === id);
         if (!item) throw new Error('Citation was not inspected.');
@@ -224,7 +227,7 @@ export class Knowledge {
       // Exact identity only: no fuzzy equivalence, no overwrite of differently worded claims.
       const material = { scope, topic: candidate.topic.normalize('NFC').trim(), summary: candidate.summary.trim(),
         kind: candidate.kind, claim: candidate.claim.trim(), provenance: candidate.provenance, perspective: candidate.perspective,
-        ...(architecture ? { architecture } : {}),
+        ...(architecture ? { architecture } : {}), ...(flow ? { flow } : {}),
         ...(candidate.aliases?.length ? { aliases: [...new Set(candidate.aliases.map(alias => alias.normalize('NFC').trim()))].sort() } : {}) };
       const sourceIdentity = (c: SourceIdentity) => ({ scope: this.scope(c), path: this.sourcePath(c), identity: c.contentIdentity });
       const ordered = <T>(items: T[]) => items.sort((a, b) => digest(a).localeCompare(digest(b)));
@@ -247,7 +250,8 @@ export class Knowledge {
       const architecture = record.architecture;
       // Connections inherit endpoint lifecycle through the shared provenance graph, including revocation.
       const endpointDependencies = architecture && isConnection(architecture) ? [architecture.from, architecture.to].map(target => ({ kind: 'depends-on' as const, target })) : [];
-      const proposed = [...candidate.relations, ...endpointDependencies].map(edge => {
+      const flowDependencies = record.flow ? flowReferences(record.flow).map(target => ({ kind: 'depends-on' as const, target })) : [];
+      const proposed = [...candidate.relations, ...endpointDependencies, ...flowDependencies].map(edge => {
         const target = localIds.get(edge.target) ?? edge.target;
         if (target === record.id || !records.some(item => item.record.id === target) && !existing.some(item => item.id === target)) throw new Error('Unknown or self-referential claim relationship.');
         return { claim: record.id, kind: edge.kind, target };
@@ -255,7 +259,7 @@ export class Knowledge {
       // An exact derivation cannot drop a retained dependency by omitting its edge.
       // Only an explicit edge to an exactly matching assertion can select a new source-backed contribution.
       const assertion = (item: Stored) => digest({ scope: item.scope, topic: item.topic, summary: item.summary, claim: item.claim,
-        kind: item.kind, provenance: item.provenance, perspective: item.perspective, aliases: item.aliases, architecture: item.architecture });
+        kind: item.kind, provenance: item.provenance, perspective: item.perspective, aliases: item.aliases, architecture: item.architecture, flow: item.flow });
       const find = (id: string) => records.find(item => item.record.id === id)?.record ?? existing.find(item => item.id === id)!;
       const inherited = existing.filter(item => item.derivation === record.derivation).flatMap(item => item.relations.filter(edge => edge.kind === 'depends-on')).map(edge => {
         const replacement = proposed.find(proposed => proposed.kind === 'depends-on' && assertion(find(proposed.target)) === assertion(find(edge.target)));

@@ -48,6 +48,10 @@ Completed, unexposed investigations can retain concise architectural/domain topi
 
 **Services & dependencies** shows a bounded, read-only neighborhood grouped by repository, with separate services, interfaces and explicit external/unresolved endpoints. **Explore investigation map** starts from an answer; select entities or concrete API/event/library/store/deployment connections to inspect their ordinary knowledge evidence and annotations. Expand typed neighbors up to three hops, or prepare an unsent follow-up question. Layout order never changes claims. Missing analysis/edges are not proof of isolation; static analysis is not runtime tracing. Extraction, SQLite adjacency, access/freshness, sticky endpoint invalidation and dynamic taint guards all reuse the central knowledge authority. See [behavior, candidate contracts, shared lookup bounds and deterministic tests](docs/services.md).
 
+## Trace a named operation (#13)
+
+Ask how a selected operation proceeds, then choose **Open investigation flows** on its answer, **Request flows** in the sidebar, or a flow link from **Services & dependencies**. The separate read-only view orders evidenced steps and synchronous service handoffs, links back to services/source evidence/answers, and distinguishes documentation, static interpretations, uncertainty, stale sources and unknown external internals. Explicit omissions preserve missing implementation and uninvestigated state/branches. **Not a runtime trace**, and never exhaustive execution-path coverage. Flow claims reuse central transactional validation, provenance, access/freshness, sticky invalidation, bounded retrieval and durable annotations; no manifest, new permissions or automatic paid work. See [flow contracts, shared bounds and deterministic tests](docs/flows.md).
+
 ## Designate a folder
 
 1. Choose **Repositories → Choose folder**. The native macOS picker selects a directory; Athena displays its canonical path before accessing its contents.
@@ -132,6 +136,7 @@ No provider account or live API key is required. Desktop tests use real SQLite, 
 | Path | Responsibility |
 | --- | --- |
 | `src/main/knowledge.ts`, `knowledge-retrieval.ts`, `knowledge-bridge.ts`, `src/shared/knowledge.ts` | Transactional normalization/publication, freshness/identity reconciliation, SQLite FTS/name retrieval and bounded read-only inspection IPC |
+| `src/main/operation-flows.ts`, `src/renderer/Flows.svelte` | Named-operation candidate reference validation inside central publication and read-only ordered flow navigation |
 | `src/main/conversations.ts` | Durable conversation transactions and interruption recovery |
 | `src/main/bridge.ts` | Caller authorization and conversation request validation |
 | `src/main/inventory.ts` | Local discovery, filesystem boundaries, stable repository identities, consent and inventory persistence |

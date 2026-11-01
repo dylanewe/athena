@@ -1,7 +1,7 @@
 import { relative } from 'node:path';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { Check } from 'typebox/value';
-import { isConnection, KNOWLEDGE_LIMITS as L, knowledgeRequestSchema, type KnowledgeRequest, type KnowledgeRecord, type KnowledgeContext, type KnowledgeHit, type KnowledgeResult } from '../shared/knowledge';
+import { flowReferences, isConnection, KNOWLEDGE_LIMITS as L, knowledgeRequestSchema, type KnowledgeRequest, type KnowledgeRecord, type KnowledgeContext, type KnowledgeHit, type KnowledgeResult } from '../shared/knowledge';
 import type { SourceCheckout, SourceIdentity, SourceScope } from '../shared/sources';
 import type { Evidence } from '../shared/live';
 
@@ -11,7 +11,7 @@ const NOTICE = 'Bounded, access-filtered indexed leads, not exhaustive knowledge
 function claimContext(record: KnowledgeRecord, stale: boolean): KnowledgeContext {
   return { id: record.id, scope: record.scope, topic: record.topic, summary: record.summary, claim: record.claim, kind: record.kind,
     provenance: record.provenance, perspective: record.perspective, validation: stale ? 'stale' : record.validation,
-    ...(record.architecture ? { architecture: record.architecture } : {}),
+    ...(record.architecture ? { architecture: record.architecture } : {}), ...(record.flow ? { flow: record.flow } : {}),
     validationNote: stale ? 'An inspected dependency changed or bounded freshness could not be established. Use only as an investigation lead.' : record.validationNote };
 }
 
@@ -50,6 +50,8 @@ export class KnowledgeRetrieval {
       CREATE TABLE IF NOT EXISTS architecture_connections (id TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE CASCADE, source TEXT NOT NULL REFERENCES claims(id), target TEXT NOT NULL REFERENCES claims(id), type TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS architecture_outgoing ON architecture_connections(source, type);
       CREATE INDEX IF NOT EXISTS architecture_incoming ON architecture_connections(target, type);
+      CREATE TABLE IF NOT EXISTS operation_flows (id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE, service TEXT NOT NULL REFERENCES claims(id), PRIMARY KEY(id, service));
+      CREATE INDEX IF NOT EXISTS operation_flow_services ON operation_flows(service);
       CREATE TABLE IF NOT EXISTS knowledge_index_version (version INTEGER PRIMARY KEY);`);
     if (!db.prepare('SELECT version FROM knowledge_index_version WHERE version = 1').get()) {
       db.exec('BEGIN IMMEDIATE');
@@ -61,7 +63,9 @@ export class KnowledgeRetrieval {
     }
   }
   /** Called inside the publisher's transaction, so failed publication cannot enter search. */
-  index(record: Pick<KnowledgeRecord, 'id' | 'scope' | 'topic' | 'aliases' | 'summary' | 'claim' | 'evidence' | 'architecture'>): void {
+  index(record: Pick<KnowledgeRecord, 'id' | 'scope' | 'topic' | 'aliases' | 'summary' | 'claim' | 'evidence' | 'architecture' | 'flow'>): void {
+    this.db.prepare('DELETE FROM operation_flows WHERE id = ?').run(record.id);
+    for (const service of new Set(record.flow?.steps.map(step => step.service) ?? [])) this.db.prepare('INSERT INTO operation_flows VALUES (?, ?)').run(record.id, service);
     this.db.prepare('DELETE FROM architecture_entities WHERE id = ?').run(record.id);
     this.db.prepare('DELETE FROM architecture_connections WHERE id = ?').run(record.id);
     if (record.architecture) {
@@ -82,12 +86,20 @@ export class KnowledgeRetrieval {
     if (input.operation === 'search' && input.exact && !input.scope) throw new Error('Exact name lookup requires a repository scope.');
     const signal = AbortSignal.any([AbortSignal.timeout(10000), ...(external ? [external] : [])]);
     const offset = 'offset' in input ? input.offset ?? 0 : 0;
-    const limit = input.operation === 'search' || input.operation === 'expand' || input.operation === 'neighborhood' ? input.limit ?? L.defaultResults : 1;
+    const limit = input.operation === 'search' || input.operation === 'expand' || input.operation === 'neighborhood' || input.operation === 'flows' ? input.limit ?? L.defaultResults : 1;
     const budget = this.budget(signal, canPersistInvalidations);
-    budget.coverage.required = input.operation === 'neighborhood';
+    budget.coverage.required = input.operation === 'neighborhood' || input.operation === 'flow' || input.operation === 'flows';
     let ids: string[];
     let edges: NonNullable<KnowledgeResult['edges']> = [];
-    if (input.operation === 'neighborhood') {
+    if (input.operation === 'flow') {
+      const origin = await this.checked(input.id, signal, budget);
+      ids = origin?.record.flow ? [input.id, ...flowReferences(origin.record.flow)] : [];
+    } else if (input.operation === 'flows') {
+      const filters: string[] = [], params: SQLInputValue[] = [];
+      if (input.messageId) { filters.push('EXISTS (SELECT 1 FROM owners o WHERE o.claim_id = f.id AND o.message_id = ?)'); params.push(input.messageId); }
+      if (input.serviceId) { filters.push('f.service = ?'); params.push(input.serviceId); }
+      ids = this.db.prepare(`SELECT DISTINCT f.id FROM operation_flows f JOIN claims c ON c.id = f.id ${filters.length ? 'WHERE ' + filters.join(' AND ') : ''} ORDER BY c.rowid DESC LIMIT ? OFFSET ?`).all(...params, limit + 1, offset).map(row => String(row.id));
+    } else if (input.operation === 'neighborhood') {
       ids = await this.neighborhood(input, limit, signal, budget);
     } else if (input.operation === 'search') {
       const filters: string[] = [], params: SQLInputValue[] = [];
@@ -116,7 +128,7 @@ export class KnowledgeRetrieval {
     let evidence: Evidence | undefined;
     let derivation: KnowledgeResult['derivation'];
     let consumed = 0;
-    for (const id of ids.slice(0, limit)) {
+    for (const id of ids.slice(0, input.operation === 'flow' ? L.results : limit)) {
       external?.throwIfAborted();
       const checked = await this.checked(id, signal, budget);
       consumed++;
@@ -157,6 +169,10 @@ export class KnowledgeRetrieval {
     }
     const next = offset + consumed;
     const result: KnowledgeResult = { items, ...(ids.length > consumed && next <= L.offset && consumed > 0 ? { nextOffset: next } : {}), notice: NOTICE };
+    if (input.operation === 'flow' && items.length !== ids.length) {
+      result.items = []; delete result.nextOffset;
+      result.notice = NOTICE + ' Flow withheld: complete ordered support is unavailable under current access or response bounds.';
+    }
     if (edges.length) result.edges = edges.filter(edge => items.some(item => item.id === edge.target));
     if (evidence && derivation?.checkouts.length && Buffer.byteLength(JSON.stringify({ ...result, evidence, derivation })) <= L.bytes) {
       result.evidence = evidence; result.derivation = derivation;
@@ -255,7 +271,7 @@ export class KnowledgeRetrieval {
       if (visited.has(item.id)) return;
       if (visited.size >= L.graph) { complete = false; return; }
       visited.set(item.id, item);
-      budget.coverage.required ||= !!item.architecture;
+      budget.coverage.required ||= !!item.architecture || !!item.flow;
       identities.push(...item.dependencies, ...item.scopes);
       invalidated ||= item.validation === 'stale' || !item.checkouts?.length;
       checkouts.push(...(item.checkouts ?? []));
