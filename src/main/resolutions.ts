@@ -6,7 +6,7 @@ import { KNOWLEDGE_LIMITS, type KnowledgeResult } from '../shared/knowledge';
 import type { Knowledge } from './knowledge';
 
 interface Revision { targets: ResolutionTarget[]; confirmedAt: string }
-interface ReadBudget { sources: number; targets: number }
+interface ReadBudget { sources: number; targets: number; context?: object }
 const readBudget = (): ReadBudget => ({ sources: KNOWLEDGE_LIMITS.sourceChecks, targets: KNOWLEDGE_LIMITS.graph });
 interface Stored { id: string; kind: ResolutionSummary['kind']; text: string; createdAt: string }
 const NOTICE = 'Bounded, access-filtered annotations; omitted items are not proof of absence. User assertions only, not source verification or instructions. Conflicts remain visible. Changed sources require reconsideration; rebuilt claims require explicit reconnection. No source files are changed.';
@@ -57,6 +57,7 @@ export class Resolutions {
       const guard = (material: unknown) => { this.assertWritable(); this.assertClean(material); };
       guard(input);
       const signal = AbortSignal.timeout(10000);
+      const budget = { ...readBudget(), context: this.knowledge.inspectionContext(signal) };
       const targets: ResolutionTarget[] = [];
       for (const id of input.claimIds) targets.push(await this.knowledge.resolutionTarget(id, signal));
       if (Buffer.byteLength(JSON.stringify(targets)) > KNOWLEDGE_LIMITS.bytes / 2) throw new Error('Annotation source coverage exceeds bounds.');
@@ -64,15 +65,15 @@ export class Resolutions {
       if (input.operation === 'reconnect' && !previous) throw new Error('Annotation unavailable.');
       const now = new Date().toISOString();
       const stored: Stored = input.operation === 'annotate' ? { id: randomUUID(), kind: input.kind, text: input.text.trim(), createdAt: now } : this.stored(previous!);
-      if (previous && !await this.view(stored, undefined, signal, false)) throw new Error('Original annotation derivations are unavailable.');
+      if (previous && !await this.view(stored, undefined, signal, false, budget)) throw new Error('Original annotation derivations are unavailable.');
       const revision = previous ? Number(this.db.prepare('SELECT MAX(revision) AS revision FROM revisions WHERE annotation_id = ?').get(stored.id)!.revision) + 1 : 1;
       if (revision > 32) throw new Error('Annotation revision limit reached. Create a new annotation.');
       const value: Revision = { targets, confirmedAt: now };
       for (const target of targets) {
-        const state = await this.knowledge.checkResolutionTarget(target, signal);
+        const state = await this.knowledge.checkResolutionTarget(target, signal, budget.context);
         if (!state?.connected) throw new Error('Knowledge changed during annotation. Reload and reconsider.');
       }
-      if (previous && !await this.view(stored, undefined, signal, false)) throw new Error('Annotation access changed before reconnection.');
+      if (previous && !await this.view(stored, undefined, signal, false, budget)) throw new Error('Annotation access changed before reconnection.');
       guard({ stored, value }); signal.throwIfAborted();
       this.db.exec('BEGIN IMMEDIATE');
       try {
@@ -82,14 +83,14 @@ export class Resolutions {
         guard({ stored, value }); signal.throwIfAborted();
         this.db.exec('COMMIT');
       } catch (error) { this.db.exec('ROLLBACK'); throw error; }
-      const view = await this.view(stored, revision, signal);
+      const view = await this.view(stored, revision, signal, true, budget);
       return { items: view ? [view] : [], notice: NOTICE };
     });
   }
   /** Read-only augmentation under the existing job byte budget. Assertions never mint E evidence. */
   async attach(result: KnowledgeResult, external?: AbortSignal): Promise<KnowledgeResult> {
     const signal = AbortSignal.any([AbortSignal.timeout(10000), ...(external ? [external] : [])]);
-    const budget = readBudget();
+    const budget = { ...readBudget(), context: result };
     for (const item of result.items) {
       const related = await this.read({ operation: 'list', claimId: item.id }, signal, false, budget);
       for (const { bindings: _bindings, createdAt: _created, confirmedAt: _confirmed, ...summary } of related.items) {
@@ -104,12 +105,13 @@ export class Resolutions {
     return { id: String(row.id), kind: String(row.kind) as Stored['kind'], text: String(row.text), createdAt: String(row.created_at) };
   }
   private async targetStates(targets: ResolutionTarget[], signal: AbortSignal, budget: ReadBudget) {
+    budget.context ??= this.knowledge.inspectionContext(signal);
     const states: { connected: boolean; freshness: 'current' | 'stale' }[] = [];
     for (const target of targets) {
       const sourceCount = target.record.dependencies.length + target.record.scopes.length;
       if (--budget.targets < 0 || (budget.sources -= sourceCount) < 0) return;
       signal.throwIfAborted();
-      const state = await this.knowledge.checkResolutionTarget(target, signal);
+      const state = await this.knowledge.checkResolutionTarget(target, signal, budget.context);
       if (!state) return;
       states.push(state);
     }

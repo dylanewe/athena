@@ -150,10 +150,12 @@ export class Knowledge {
       return { generation: this.generation(), version, record: snapshot };
     });
   }
-  checkResolutionTarget(target: ResolutionTarget, signal: AbortSignal) {
+  /** Opaque, main-private shared read context for standalone annotation inspection. */
+  inspectionContext(signal: AbortSignal): object { return this.retrieval.inspectionContext(signal); }
+  checkResolutionTarget(target: ResolutionTarget, signal: AbortSignal, context?: object) {
     return this.serial(async () => {
       const current = target.generation === this.generation() ? this.records(target.record.id)[0] : undefined;
-      const checked = await this.retrieval.compareAnnotationSnapshot(target.record, signal, !!current);
+      const checked = await this.retrieval.compareAnnotationSnapshot(target.record, signal, !!current, context);
       if (!checked) return;
       const changed = checked.current && target.version !== this.resolutionVersion(checked.current.record, checked.current.derivation);
       return { connected: !!current, freshness: checked.retained.stale || checked.current?.stale || changed ? 'stale' as const : 'current' as const };

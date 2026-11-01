@@ -19,10 +19,21 @@ interface RetrievalBudget {
   sources: Set<string>;
   checkouts: Map<string, boolean>;
   canPersistInvalidations: () => boolean;
+  signal: AbortSignal;
 }
 
 /** Local, rebuildable FTS index and bounded one-hop retrieval. Never model-generated SQL. */
 export class KnowledgeRetrieval {
+  /** Main-private response capabilities: never serialized into renderer/model results or persistence. */
+  private readonly contexts = new WeakMap<object, RetrievalBudget>();
+  private budget(signal: AbortSignal, canPersistInvalidations = () => false): RetrievalBudget {
+    return { records: new Map(), sources: new Set(), checkouts: new Map(), canPersistInvalidations, signal };
+  }
+  inspectionContext(signal: AbortSignal): object {
+    const context = {};
+    this.contexts.set(context, this.budget(signal));
+    return context;
+  }
   constructor(private readonly db: DatabaseSync,
     private readonly load: (id: string) => KnowledgeRecord | undefined,
     private readonly permitted: (identity: SourceIdentity, signal: AbortSignal) => Promise<boolean>,
@@ -58,7 +69,7 @@ export class KnowledgeRetrieval {
     const signal = AbortSignal.any([AbortSignal.timeout(10000), ...(external ? [external] : [])]);
     const offset = 'offset' in input ? input.offset ?? 0 : 0;
     const limit = input.operation === 'search' || input.operation === 'expand' ? input.limit ?? L.defaultResults : 1;
-    const budget: RetrievalBudget = { records: new Map(), sources: new Set(), checkouts: new Map(), canPersistInvalidations };
+    const budget = this.budget(signal, canPersistInvalidations);
     let ids: string[];
     let edges: NonNullable<KnowledgeResult['edges']> = [];
     if (input.operation === 'search') {
@@ -133,20 +144,23 @@ export class KnowledgeRetrieval {
     if (evidence && derivation?.checkouts.length && Buffer.byteLength(JSON.stringify({ ...result, evidence, derivation })) <= L.bytes) {
       result.evidence = evidence; result.derivation = derivation;
     }
+    this.contexts.set(result, budget);
     return result;
   }
-  async compareAnnotationSnapshot(record: KnowledgeRecord, signal: AbortSignal, connected: boolean) {
-    const budget: RetrievalBudget = { records: new Map(), sources: new Set(), checkouts: new Map(), canPersistInvalidations: () => false };
+  async compareAnnotationSnapshot(record: KnowledgeRecord, external: AbortSignal, connected: boolean, context?: object) {
+    const inherited = context ? this.contexts.get(context) : this.budget(external);
+    if (!inherited) return; // An unknown/cloned response cannot acquire a replacement budget.
+    const budget = { ...inherited, canPersistInvalidations: () => false };
+    const signal = AbortSignal.any([external, inherited.signal]);
     const current = connected ? await this.checked(record.id, signal, budget) : undefined;
     if (connected && !current) return;
-    budget.records.set(record.id, record);
-    const retained = await this.checked(record.id, signal, budget);
+    const retained = await this.checked(record.id, signal, budget, record);
     return retained ? { current, retained } : undefined;
   }
   async annotationTarget(id: string, signal: AbortSignal) {
-    return this.checked(id, signal, { records: new Map(), sources: new Set(), checkouts: new Map(), canPersistInvalidations: () => false });
+    return this.checked(id, signal, this.budget(signal));
   }
-  private async checked(id: string, signal: AbortSignal, budget: RetrievalBudget): Promise<{ record: KnowledgeRecord; stale: boolean; derivation: NonNullable<KnowledgeResult['derivation']> } | undefined> {
+  private async checked(id: string, signal: AbortSignal, budget: RetrievalBudget, snapshot?: KnowledgeRecord): Promise<{ record: KnowledgeRecord; stale: boolean; derivation: NonNullable<KnowledgeResult['derivation']> } | undefined> {
     const load = (key: string) => {
       if (!budget.records.has(key)) {
         if (budget.records.size >= L.graph) return;
@@ -154,7 +168,9 @@ export class KnowledgeRetrieval {
       }
       return budget.records.get(key);
     };
-    const record = load(id);
+    const current = load(id);
+    if (!budget.records.has(id)) return; // The response-wide graph budget is exhausted, even for a retained snapshot.
+    const record = snapshot ?? current;
     if (!record) return;
     const invalidate = (ids: string[], affectedSources: SourceIdentity[] = []) => {
       if (!signal.aborted && budget.canPersistInvalidations()) this.invalidate(ids, affectedSources);

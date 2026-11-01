@@ -103,6 +103,31 @@ test('adding transitive evidence to an unchanged claim identity requires reconsi
   expect((await f.resolutions.read({ operation: 'inspect', id: saved.id })).items).toEqual([]);
 });
 
+test('annotation attachments share the original response-wide graph budget, including transitive claims and original provenance', async () => {
+  const f = await fixture(); const base = await f.publish();
+  const other = otherSource(f); const original = await f.publish(other, 'other');
+  const saved = (await f.resolutions.write({ operation: 'annotate', kind: 'note', text: 'Assertion with separately authorized original provenance.', claimIds: [original[0]] })).items[0];
+  const { record } = await f.knowledge.resolutionTarget(base[0], new AbortController().signal);
+  let head: string | undefined;
+  const extend = async (index: number) => {
+    [head] = await f.knowledge.publish({ owner: { conversationId: 'chain', messageId: `chain-${index}` }, candidates: [{
+      id: 'C1', scope: 'service', topic: 'Chain', summary: `Chain assertion ${index}.`, claim: `Chain assertion ${index}.`, kind: 'behavior',
+      provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: head ? [{ kind: 'depends-on', target: head }] : [],
+    }], evidence: record.evidence, completed: true, environmentExposed: false, signal: new AbortController().signal });
+    return head!;
+  };
+  for (let index = 1; index <= 31; index++) await extend(index);
+  const annotated = head!;
+  await f.resolutions.write({ operation: 'reconnect', id: saved.id, claimIds: [annotated] });
+  expect((await f.resolutions.read({ operation: 'list', claimId: annotated })).items).toHaveLength(1); // 31 transitive claims + original = 32.
+  const outer = await extend(32);
+  await expect(f.resolutions.write({ operation: 'reconnect', id: saved.id, claimIds: [outer] })).rejects.toThrow();
+  expect((await f.resolutions.read({ operation: 'inspect', id: saved.id })).items[0].revision).toBe(2);
+  const response = await f.knowledge.retrieve({ operation: 'expand', id: outer, kinds: ['depends-on'] });
+  expect(response.items[0].id).toBe(annotated); // The original retrieval has already checked 32 claims.
+  expect((await f.resolutions.attach(response)).items[0].annotations).toBeUndefined(); // The separate origin would be claim 33.
+});
+
 test('source-change reconsideration is sticky, while model reads do not persist observations', async () => {
   const f = await fixture(); const ids = await f.publish();
   const annotation = (await f.resolutions.write({ operation: 'annotate', kind: 'note', text: 'No B path found in this bounded inspection; not proof of absence.', claimIds: ids })).items[0];
