@@ -59,27 +59,36 @@ export class Conversations {
     const columns = this.db.prepare('PRAGMA table_info(conversations)').all().map(row => row.name);
     if (!columns.includes('sealed')) this.db.exec('ALTER TABLE conversations ADD COLUMN sealed INTEGER NOT NULL DEFAULT 0');
     if (!columns.includes('binding')) this.db.exec('ALTER TABLE conversations ADD COLUMN binding TEXT');
+    if (!columns.includes('scope')) this.db.exec('ALTER TABLE conversations ADD COLUMN scope TEXT');
     if (!columns.includes('model_title')) this.db.exec('ALTER TABLE conversations ADD COLUMN model_title INTEGER NOT NULL DEFAULT 0');
     this.db.exec(`CREATE TABLE IF NOT EXISTS live_attempts (
       message_id TEXT PRIMARY KEY REFERENCES messages(id), user_id TEXT NOT NULL,
       prompt TEXT NOT NULL, history TEXT NOT NULL DEFAULT '[]', evidence TEXT NOT NULL DEFAULT '[]', result TEXT
     );
+    UPDATE live_attempts SET result = json_set(json_remove(COALESCE(result, '{}'), '$.activity'), '$.status', 'cancelled', '$.usageComplete', json('false'), '$.interrupted', json('true'))
+      WHERE message_id IN (SELECT id FROM messages WHERE status = 'running') OR json_extract(result, '$.status') = 'running';
     UPDATE messages SET status = 'cancelled', text = CASE
       WHEN id IN (SELECT message_id FROM live_attempts)
       THEN text || char(10) || char(10) || 'Conversation interrupted. Retry explicitly when ready.'
       ELSE 'Demonstration interrupted. Send another message to try again.' END
-      WHERE status = 'running';
-    UPDATE live_attempts SET result = json_set(json_remove(result, '$.activity'), '$.status', 'cancelled', '$.usageComplete', json('false'))
-      WHERE json_extract(result, '$.status') = 'running';`);
+      WHERE status = 'running';`);
     const attempts = this.db.prepare('PRAGMA table_info(live_attempts)').all().map(row => row.name);
+    if (!attempts.includes('binding')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN binding TEXT');
     if (!attempts.includes('ephemeral')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN ephemeral INTEGER NOT NULL DEFAULT 0');
     if (!attempts.includes('build_scope')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN build_scope TEXT');
     if (!attempts.includes('exploration')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN exploration TEXT');
+    // Earlier releases pinned one binding per conversation. Backfill original
+    // attempt identities and saved build scopes before allowing model changes.
+    this.db.exec(`UPDATE live_attempts SET binding = (SELECT c.binding FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.id = message_id) WHERE binding IS NULL;
+      UPDATE conversations SET scope = (SELECT a.build_scope FROM live_attempts a JOIN messages m ON m.id = a.message_id WHERE m.conversation_id = conversations.id AND a.build_scope IS NOT NULL ORDER BY m.rowid DESC LIMIT 1) WHERE scope IS NULL;`);
     // Interrupted child work is terminal, never resumed on restart.
     for (const row of this.db.prepare('SELECT message_id, result FROM live_attempts WHERE result IS NOT NULL').all()) {
       const result = JSON.parse(String(row.result));
-      if (result.investigators?.some((task: InvestigatorTask) => ['running', 'queued'].includes(task.status))) {
-        for (const task of result.investigators as InvestigatorTask[]) if (['running', 'queued'].includes(task.status)) task.status = 'cancelled';
+      if (result.investigators?.some((task: InvestigatorTask) => ['running', 'queued'].includes(task.status)) || result.interrupted && result.investigators?.length) {
+        for (const task of result.investigators as InvestigatorTask[]) {
+          if (['running', 'queued'].includes(task.status)) task.status = 'cancelled';
+          if (result.interrupted && task.result) task.result.status = 'partial';
+        }
         this.db.prepare('UPDATE live_attempts SET result = ? WHERE message_id = ?').run(JSON.stringify(result), String(row.message_id));
       }
     }
@@ -89,8 +98,8 @@ export class Conversations {
   }
 
   workspace(): Workspace {
-    const conversations = this.db.prepare('SELECT id, title, binding, sealed FROM conversations ORDER BY rowid').all().map(row => ({
-      id: String(row.id), title: String(row.title), ...(row.sealed ? { sealed: true } : {}), ...(row.binding ? { kind: (JSON.parse(String(row.binding)) as ConversationBinding).apiKey ? 'api-key' as const : 'chatgpt' as const, model: (JSON.parse(String(row.binding)) as ConversationBinding).model } : {}),
+    const conversations = this.db.prepare('SELECT id, title, binding, sealed, scope FROM conversations ORDER BY rowid').all().map(row => ({
+      id: String(row.id), title: String(row.title), ...(row.scope ? { scope: JSON.parse(String(row.scope)) as BuildScope } : {}), ...(row.sealed ? { sealed: true } : {}), ...(row.binding ? { kind: (JSON.parse(String(row.binding)) as ConversationBinding).apiKey ? 'api-key' as const : 'chatgpt' as const, model: (JSON.parse(String(row.binding)) as ConversationBinding).model } : {}),
     })) as ConversationSummary[];
     const selectedId = this.db.prepare("SELECT value FROM settings WHERE key = 'selected'").get()?.value;
     const summary = conversations.find(conversation => conversation.id === selectedId);
@@ -98,10 +107,14 @@ export class Conversations {
       'SELECT id, role, text, status FROM messages WHERE conversation_id = ? ORDER BY rowid',
     ).all(summary.id) as unknown as Message[] : [];
     for (const message of messages) {
-      const attempt = this.db.prepare('SELECT result, evidence FROM live_attempts WHERE message_id = ?').get(message.id);
+      const attempt = this.db.prepare('SELECT result, evidence, binding FROM live_attempts WHERE message_id = ?').get(message.id);
       if (attempt?.result) {
         const { checkouts: _checkouts, ...visible } = JSON.parse(String(attempt.result));
         Object.assign(message, visible, { evidence: JSON.parse(String(attempt.evidence)) });
+      }
+      if (attempt?.binding) {
+        const binding = JSON.parse(String(attempt.binding)) as ConversationBinding;
+        Object.assign(message, { model: binding.model, provider: binding.apiKey?.conversation.model.provider ?? 'ChatGPT' });
       }
       Object.assign(message, this.ephemeral.get(message.id));
     }
@@ -172,6 +185,11 @@ export class Conversations {
     return JSON.parse(String(row.binding)) as ConversationBinding;
   }
 
+  scope(id: string): BuildScope | undefined {
+    const row = this.db.prepare('SELECT scope FROM conversations WHERE id = ?').get(id);
+    return row?.scope ? JSON.parse(String(row.scope)) as BuildScope : undefined;
+  }
+
   naming(id: string): { needsTitle: boolean; titlePrompt?: string } {
     this.requireConversation(id);
     if (this.db.prepare('SELECT model_title FROM conversations WHERE id = ?').get(id)?.model_title) return { needsTitle: false };
@@ -190,6 +208,21 @@ export class Conversations {
       ...(result.checkouts ? { checkouts: result.checkouts } : {}), ...(result.investigation?.inspectedScope?.length ? { sourceBacked: true } : {}) };
   }
 
+  /** One bounded public turn, not saved protocol/tool/subagent transcripts. The
+   * supervisor must freshness/access-check its provenance before sending it. */
+  resumeContext(id: string): ReturnType<Conversations['liveContext']> {
+    this.binding(id);
+    if (this.db.prepare('SELECT sealed FROM conversations WHERE id = ?').get(id)?.sealed) return { history: [], evidence: [] };
+    const row = this.db.prepare(`SELECT substr(a.prompt, 1, 1024) AS prompt, substr(m.text, 1, 1024) AS answer, a.evidence,
+      json_extract(a.result, '$.checkouts') AS checkouts,
+      json_extract(a.result, '$.investigation.inspectedScope') AS inspected
+      FROM live_attempts a JOIN messages m ON m.id = a.message_id
+      WHERE m.conversation_id = ? AND m.status = 'complete' ORDER BY m.rowid DESC LIMIT 1`).get(id);
+    if (!row) return { history: [], evidence: [] };
+    return { history: [{ role: 'user', timestamp: 0, content: 'Historical conversation context only — NOT implementation evidence. Only the latest completed turn is included, bounded to 1024 characters per field; older constraints/details may be omitted. Ask for clarification if needed. Historical E IDs belong to that answer, not this job. Retrieve current knowledge or delegate revalidation before making implementation claims.\n' + JSON.stringify({ question: String(row.prompt), historicalAnswer: String(row.answer) }) }],
+      evidence: JSON.parse(String(row.evidence)), ...(row.checkouts ? { checkouts: JSON.parse(String(row.checkouts)) } : {}), ...(row.inspected && JSON.parse(String(row.inspected)).length ? { sourceBacked: true } : {}) };
+  }
+
   beginLive(id: string | null, prompt: string, binding: ConversationBinding, retryId?: string, build?: BuildScope): { conversationId: string; messageId: string; prompt: string } {
     if (this.workspace().activeConversationId) throw new Error('A conversation is already running.');
     let userId: string = randomUUID();
@@ -205,18 +238,19 @@ export class Conversations {
     if (id && this.db.prepare('SELECT sealed FROM conversations WHERE id = ?').get(id)?.sealed) throw new Error('Ephemeral investigation is sealed. Start a new conversation.');
     if (!prompt.trim() || prompt.length > MAX_MESSAGE_LENGTH || prompt.includes('\0')) throw new Error('Invalid message.');
     this.assertClean(prompt);
-    if (id && JSON.stringify(this.binding(id)) !== JSON.stringify(binding)) throw new Error('Conversation identity changed.');
+    if (id) this.binding(id); // Demonstrations cannot acquire live authority.
     const messageId = randomUUID();
     this.transaction(() => {
       if (!id) {
         id = randomUUID();
         this.db.prepare('INSERT INTO conversations(id, title, binding) VALUES (?, ?, ?)').run(id, firstPromptTitle(prompt), JSON.stringify(binding));
       }
+      this.db.prepare('UPDATE conversations SET binding = ?, scope = COALESCE(?, scope) WHERE id = ?').run(JSON.stringify(binding), build ? JSON.stringify(build) : null, id);
       this.select(id);
       const insert = this.db.prepare('INSERT INTO messages(id, conversation_id, role, text, status) VALUES (?, ?, ?, ?, ?)');
       if (!retryId) insert.run(userId, id, 'user', prompt.trim(), 'complete');
       insert.run(messageId, id, 'assistant', '', 'running');
-      this.db.prepare('INSERT INTO live_attempts(message_id, user_id, prompt, build_scope) VALUES (?, ?, ?, ?)').run(messageId, userId, prompt.trim(), build ? JSON.stringify(build) : null);
+      this.db.prepare('INSERT INTO live_attempts(message_id, user_id, prompt, build_scope, binding) VALUES (?, ?, ?, ?, ?)').run(messageId, userId, prompt.trim(), build ? JSON.stringify(build) : null, JSON.stringify(binding));
     });
     return { conversationId: id!, messageId, prompt: prompt.trim() };
   }

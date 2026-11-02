@@ -21,12 +21,12 @@ async function scriptWorker() {
 test.beforeEach(async () => { directory = mkdtempSync(join(tmpdir(), 'athena-api-desktop-')); await launch(); });
 test.afterEach(async () => { await app?.close().catch(() => {}); rmSync(directory, { recursive: true, force: true }); });
 
-test('explicit API-key routing, endpoint approval, protected entry, real worker, restart pinning and revocation', async () => {
+test('explicit API-key routing, endpoint approval, protected entry, real worker, restart identity, current routing and revocation', async () => {
   await modelSettings();
   let section = page.getByRole('region', { name: 'API-key conversation configuration' });
   await expect(section.getByRole('combobox', { name: 'Conversation model', exact: true })).toHaveValue('deepseek/deepseek-flash');
   await expect(section.getByRole('combobox', { name: 'Investigator model', exact: true })).toHaveValue('deepseek/deepseek-flash');
-  await section.getByLabel('Route for new conversations').selectOption('api-key');
+  await section.getByLabel('Route for new work').selectOption('api-key');
   await section.getByRole('button', { name: 'Save route and role models' }).click();
   await section.getByLabel('Credential source', { exact: true }).fill('fake-desktop-api-key');
   await section.getByRole('button', { name: 'Save protected credential', exact: true }).click();
@@ -48,10 +48,15 @@ test('explicit API-key routing, endpoint approval, protected entry, real worker,
   expect(readFileSync(join(directory, 'state', 'api-models.sqlite')).includes(Buffer.from('fake-desktop-api-key'))).toBe(false);
   expect(readFileSync(join(directory, 'state', 'conversations.sqlite')).includes(Buffer.from('fake-desktop-api-key'))).toBe(false);
   await launch(); await modelSettings(); section = page.getByRole('region', { name: 'API-key conversation configuration' });
-  await section.getByLabel('Route for new conversations').selectOption('chatgpt'); await section.getByRole('button', { name: 'Save route and role models' }).click();
+  await section.getByLabel('Route for new work').selectOption('chatgpt'); await section.getByRole('button', { name: 'Save route and role models' }).click();
   await section.getByRole('button', { name: 'Revoke deepseek credentials', exact: true }).click();
   await page.getByRole('button', { name: 'A normal API-key question', exact: true }).click();
-  await page.getByRole('textbox', { name: 'Message' }).fill('Follow up stays pinned'); await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Message' }).fill('Follow up uses the current route'); await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('ChatGPT authorization');
+  await modelSettings();
+  await section.getByLabel('Route for new work').selectOption('api-key'); await section.getByRole('button', { name: 'Save route and role models' }).click();
+  await page.getByRole('button', { name: 'A normal API-key question', exact: true }).click();
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('revoked');
   expect((await page.evaluate(() => window.athena.workspace())).selected!.messages.filter(m => m.role === 'user')).toHaveLength(1);
 });

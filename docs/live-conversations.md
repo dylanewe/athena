@@ -2,6 +2,8 @@
 
 [#15 adds parallel investigator batches](parallel-investigations.md), per-task progress, shared limits and bounded transient retries. Its batch/retry behavior supersedes the original single-investigator/no-retry behavior below. [#17 adds capacity-bounded context continuation](context-continuation.md), superseding the original no-compaction behavior below.
 
+[#18 adds safe conversation resumption](conversation-resumption.md), superseding the original cross-job transcript replay, initial-model pinning and stale-history blocking below. New jobs use explicit current settings/consent; historical answers remain unchanged and are not current evidence.
+
 This document describes the preserved ChatGPT route. #6 adds an explicitly selected [API-key conversation route](api-key-models.md), with independently pinned role models and its own endpoint consent and shared dollar gate. New ChatGPT-route conversations use the saved ChatGPT subscription connection. The approved combined scope preserves #25's ChatGPT/global-folder workflow and adds #5's isolated investigator and model-derived titles. #5's older dollar gate and scope picker/restrictions are superseded by this approval. #15 later adds bounded transient retries under the unchanged shared limits. Existing demonstration conversations remain readable but cannot be sent to a provider. The fixed DeepSeek connection test remains separate, never a fallback.
 
 ## User workflow

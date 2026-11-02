@@ -12,7 +12,7 @@ test('restart retains interrupted streamed text without replaying its unfinished
     const job = db.beginLive(null, 'Question', { model: 'fixture-model', registration: 'fingerprint' });
     db.progressLive(job.messageId, 'Useful partial answer', 'Reading sources', { usage: { input: 10, output: 3, cachedInput: 0 }, requests: 1, usageComplete: false });
     db.close(); db = new Conversations(join(directory, 'conversations.sqlite'));
-    expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'cancelled', text: expect.stringContaining('Useful partial answer'), usage: { input: 10, output: 3, cachedInput: 0 }, requests: 1, usageComplete: false });
+    expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'cancelled', interrupted: true, text: expect.stringContaining('Useful partial answer'), usage: { input: 10, output: 3, cachedInput: 0 }, requests: 1, usageComplete: false });
     expect(db.liveContext(job.conversationId).history).toEqual([]);
     const interrupted = db.workspace().selected!.messages.at(-1)!.text;
     db.close(); db = new Conversations(join(directory, 'conversations.sqlite'));
@@ -70,7 +70,7 @@ test('sealed conversations cannot persist batch checkpoint evidence or findings'
   } finally { db.close(); }
 });
 
-test('new live conversations pin identity and retain completed context; demonstrations cannot acquire live authority', () => {
+test('new live conversations retain attempt identity and completed context; demonstrations cannot acquire live authority', () => {
   const db = new Conversations(':memory:');
   const demo = db.begin(null, 'Demo'); db.finish(demo.messageId, 'complete', 'Local demo');
   const demoId = db.workspace().selected!.id;
@@ -93,6 +93,9 @@ test('explicit retry retains the interrupted attempt, avoids a duplicated questi
   expect(db.workspace().selected!.messages.filter(m => m.role === 'user').map(m => m.text)).toEqual(['Hi', 'Next']);
   db.finishLive(retry.messageId, { ...answer, status: 'cancelled' }, []);
   expect(() => db.beginLive(first.conversationId, '', binding, failed.messageId)).toThrow('latest');
-  expect(() => db.beginLive(first.conversationId, 'Next', { ...binding, model: 'other' })).toThrow('identity');
+  const changed = db.beginLive(first.conversationId, 'Next', { ...binding, model: 'other' });
+  expect(db.binding(first.conversationId).model).toBe('other');
+  expect(db.workspace().selected!.messages.find(message => message.id === first.messageId)?.model).toBe('fixture-model');
+  db.finishLive(changed.messageId, answer, []);
   db.close();
 });

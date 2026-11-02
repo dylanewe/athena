@@ -227,10 +227,15 @@ test('#17 long source exploration compacts whole tool exchanges, retains externa
   expect(JSON.stringify(history)).toContain('withheld/uninspected');
   expect(Buffer.byteLength(JSON.stringify(history))).toBeLessThan(27000);
   expect(requests.every(request => Buffer.byteLength(JSON.stringify(request.body)) < 32000)).toBe(true);
-  snapshot.roots = []; // Revocation must reject reconstruction BEFORE any summary or answer request.
+  snapshot.roots = []; // Revoked history must be excluded before ANY summary or answer request.
+  scripts = [response('No accessible source evidence; fresh permissions are required.')];
   supervisor.start(conversations.workspace().selected!.id, 'Continue from the compacted references.'); await idle();
-  expect(requests).toHaveLength(39);
-  expect(conversations.workspace().selected!.messages.at(-1)!.status).toBe('failed');
+  expect(requests).toHaveLength(40);
+  expect(JSON.stringify(requests[39].body)).not.toContain('export const answer');
+  expect(JSON.stringify(requests[39].body)).not.toContain('Static answer [E1]');
+  expect(JSON.stringify(workers.at(-1)!.job!.history)).not.toContain('E1');
+  expect(workers.at(-1)!.job!.roots).toEqual([]);
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', evidence: [], contextNotice: expect.stringContaining('withheld') });
   conversations.close(); conversations = new Conversations(join(directory, 'conversations.sqlite'));
   expect(conversations.workspace().selected!.messages.find(message => message.id === answer.id)!.text).toContain('Context compacted');
   expect(conversations.exploration(answer.id)!.result.unresolvedQuestions).toEqual(['Who calls this?']);
@@ -633,20 +638,34 @@ test('API-key outbound environment approval propagates across separately pinned 
   expect(JSON.stringify(conversations.workspace()).includes(canary)).toBe(false);
 });
 
-test('edits during a job and between jobs never change an existing conversation; new conversations use new settings', async () => {
+test('model settings are frozen within a job; follow-ups use current destinations only after new consent', async () => {
   const original = http;
   http = async (...args) => { settings.configure(configuration('Changed', 'https://changed.example/v1')); return original(...args); };
   scripts = [response(undefined, 'set_conversation_title', { title: 'Pinned title' }), response('First answer')];
   supervisor.start(null, 'First question'); await idle();
   expect(requests.every(r => r.url.startsWith('https://main.example/'))).toBe(true);
   const id = conversations.workspace().selected!.id;
-  http = original; scripts = [response('Second answer')]; supervisor.start(id, 'Second question'); await idle();
-  expect(requests.at(-1)!.url).toBe('https://main.example/v1/chat/completions');
-  expect(workers.at(-1)!.job!.apiKey!.conversation.model.name).toBe('Main one');
+  http = original;
+  expect(() => supervisor.start(id, 'Second question')).toThrow('Approve');
+  expect(requests).toHaveLength(2);
   expect(() => supervisor.start(null, 'New question')).toThrow('Approve');
   const newDestination = settings.snapshot().destinations.find(d => d.endpoint.startsWith('https://changed.example'))!; settings.approveDestination(newDestination.id, true);
-  scripts = [response('New conversation')]; supervisor.start(null, 'New question'); await idle();
+  scripts = [response('New answer')]; supervisor.start(id, 'Second question'); await idle();
   expect(requests.at(-1)!.url).toBe('https://changed.example/v1/chat/completions');
+  expect(workers.at(-1)!.job!.apiKey!.conversation.model.name).toBe('Changed');
+  expect(conversations.workspace().selected!.messages.find(message => message.role === 'assistant')?.model).toBe('main-one');
+});
+
+test('explicit follow-up role/provider changes use new accounted grants, not historical model authority', async () => {
+  supervisor.start(null, 'Question'); await idle();
+  const id = conversations.workspace().selected!.id;
+  settings.select('api-key', 'investigator/investigator-one', 'main/main-one');
+  scripts = [response('New provider answer')];
+  supervisor.start(id, 'Follow-up'); await idle();
+  expect(requests.at(-1)!.url).toBe('https://investigator.example/v1/chat/completions');
+  expect(requests.at(-1)!.body.model).toBe('investigator-one');
+  expect(reservations).toHaveLength(2);
+  expect(conversations.workspace().selected!.messages.filter(message => message.role === 'assistant').map(message => [message.provider, message.model])).toEqual([['main', 'main-one'], ['investigator', 'investigator-one']]);
 });
 
 test('revoked consent/credentials block old transcripts and retry without starting a provider worker', async () => {

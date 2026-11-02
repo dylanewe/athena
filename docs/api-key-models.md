@@ -1,5 +1,7 @@
 # Pi-compatible API-key configuration (#6)
 
+[#18 safe conversation resumption](conversation-resumption.md) supersedes the original conversation-lifetime pinning below: Send/Retry use explicit current route/model settings with current provider consent and a new accounted job. Configuration remains frozen within a job. Historical attempt identities stay unchanged; there is still no automatic fallback.
+
 ## Compatibility and scope
 
 Athena pins `@earendil-works/pi-ai` **1.4.0** and `@earendil-works/pi-agent-core` **1.4.0** (exact dependencies and lockfile). The configuration contract follows Pi coding-agent **1.4.0** `model-config`, `provider-composer`, and `resolve-config-value` conventions. No coding-agent runtime is installed or invoked. Metadata/compatibility schemas come directly from the pinned pi-ai package, not a reduced Athena model format. See Pi's [models](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models.md) and [providers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md) documentation; upstream main may evolve beyond this pinned version.

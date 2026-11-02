@@ -89,6 +89,8 @@ test('repository build is an explicit paid action, persists source coverage and 
   await page.getByRole('button', { name: 'Inspect retained knowledge', exact: true }).click();
   await expect(page.getByText('Answer ownership', { exact: true }).first()).toBeVisible();
   await application.close(); await launch();
+  expect(await page.evaluate(async () => (await window.athena.workspace()).selected!.scope?.repositories.map(repo => repo.name))).toEqual(['repo']);
+  await expect(page.getByRole('region', { name: 'Conversation composer' })).toContainText('Selected scope: repo');
   expect(await page.evaluate(async () => (await window.athena.workspace()).selected!.messages.at(-1)!.build?.repositories)).toEqual(['repo']);
   expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: { workers: number } }).liveFixture.workers)).toBe(0);
 });
@@ -391,8 +393,12 @@ test('abrupt application death marks the saved attempt interrupted, never replay
   await newConversation(); await pauseNextWorker(); await send('Keep the question after a crash'); pausedWorker = await workerPid();
   const closed = application.waitForEvent('close'); application.process().kill('SIGKILL'); await closed;
   try { process.kill(pausedWorker, 'SIGKILL'); } catch { /* Already gone */ } pausedWorker = undefined;
-  await launch(); await expect(page.getByRole('log')).toContainText('interrupted');
-  await send('A fresh job'); await answered();
+  await launch(); await expect(page.getByRole('log')).toContainText('Interrupted after restart · Partial work');
+  expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: { workers: number } }).liveFixture.workers)).toBe(0);
+  const interruptedId = await page.evaluate(async () => (await window.athena.workspace()).selected!.messages.at(-1)!.id);
+  await page.getByRole('button', { name: 'Retry', exact: true }).click(); await answered();
+  expect(await page.evaluate(async () => (await window.athena.workspace()).selected!.messages.at(-1)!.id)).not.toBe(interruptedId);
+  await expect(page.getByRole('log').getByText('Keep the question after a crash', { exact: true })).toHaveCount(1);
 });
 
 test('storage failure still stops the worker and offers Retry saving', async () => {
@@ -409,7 +415,7 @@ test('storage failure still stops the worker and offers Retry saving', async () 
   } finally { writer.close(); }
 });
 
-test('read-only investigation uses global folder consent, renders evidence and blocks stale-history reuse', async () => {
+test('reopened investigation preserves historical citations and revalidates changed sources in a new follow-up job', async () => {
   const root = join(directory, 'repo'); mkdirSync(root); writeFileSync(join(root, 'answer.ts'), 'export const answer = 42;\n');
   await installLiveFixture(application, directory, root);
   await application.evaluate(({ dialog }, root) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] }); }, root);
@@ -430,10 +436,25 @@ test('read-only investigation uses global folder consent, renders evidence and b
   await page.getByText('Inspected evidence (1)', { exact: true }).click();
   await page.getByText('[E1] answer.ts:1–1', { exact: true }).click();
   await expect(page.getByRole('log')).toContainText('export const answer = 42;');
+  const historical = await page.evaluate(async () => (await window.athena.workspace()).selected!.messages.at(-1)!);
+  await application.close(); await launch();
+  expect(await application.evaluate(() => (globalThis as unknown as { liveFixture: unknown }).liveFixture)).toEqual({ catalog: 0, workers: 0 });
+  await expect(page.getByRole('log')).toContainText('Historical answer · Not current verification');
+  await page.getByText('Inspected evidence (1)', { exact: true }).click();
+  await page.getByText('[E1] answer.ts:1–1', { exact: true }).click();
   writeFileSync(join(root, 'answer.ts'), 'export const answer = 43;\n');
   await page.getByRole('button', { name: 'Inspect current file' }).click();
   await expect(page.getByRole('log')).toContainText('Changed since this answer');
-  await send('Explain more'); await expect(page.getByRole('log')).toContainText('Saved evidence changed');
+  await installLiveFixture(application, directory, root, { investigation: { question: 'Revalidate the current value', paths: ['answer.ts'], candidates: [], text: 'The current answer is 43 [E1].' } });
+  await send('Explain more using current sources');
+  await expect.poll(() => page.evaluate(async () => (await window.athena.workspace()).activeConversationId)).toBeNull();
+  await expect(page.getByRole('log')).toContainText('The current answer is 43 [E1].');
+  await expect(page.getByRole('log')).toContainText('Historical context withheld');
+  expect(await page.evaluate(async id => (await window.athena.workspace()).selected!.messages.find(message => message.id === id), historical.id)).toEqual(historical);
+  rmSync(join(root, 'answer.ts'));
+  await page.getByRole('button', { name: 'Inspect current file' }).first().click();
+  await expect(page.getByRole('log')).toContainText('Current file is unavailable');
+  await expect(page.getByRole('log')).toContainText('export const answer = 42;');
 });
 
 test('environment permission UI separates local preview from outbound access and seals ephemeral output across restart', async () => {

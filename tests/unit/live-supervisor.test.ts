@@ -238,6 +238,15 @@ test('save retries after exposed output cannot persist tool, answer or error can
 });
 
 async function idle() { await expect.poll(() => db.workspace().activeConversationId).toBeNull(); }
+async function followupWithHistoricalContextWithheld(id: string, count: number) {
+  const old = db.workspace().selected!.messages.at(-1)!;
+  scripted([textResponse('Current evidence must be retrieved before making implementation claims.')]);
+  jobs.start(id, 'Explain more'); await idle();
+  expect(requests).toHaveLength(count + 1);
+  expect(JSON.stringify(requests[count].input)).not.toContain(old.text);
+  for (const evidence of old.evidence ?? []) expect(JSON.stringify(requests[count].input)).not.toContain(evidence.text);
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', evidence: [], contextNotice: expect.stringContaining('Historical context withheld') });
+}
 beforeEach(async () => {
   directory = realpathSync(mkdtempSync(join(tmpdir(), 'athena-live-'))); root = join(directory, 'repo'); mkdirSync(root); writeFileSync(join(root, 'answer.ts'), 'export const answer = 42;\n');
   snapshot = { roots: [{ path: root, consent: FOLDER_CONSENT, acceptedAt: 'now', includedLocations: [] }], repositories: [], candidates: [], discovery: { status: 'complete', visited: 0, current: '', nonGitFiles: 1, failures: [] } };
@@ -413,28 +422,60 @@ test('a failed naming attempt keeps the local fallback and later naming still us
   expect(db.workspace().selected!.title).toBe('Architecture overview');
 });
 
-test('real Pi agent and adapter produce multi-turn durable answers with pinned identity and usage', async () => {
+test('real Pi agent follow-ups use the explicit current model and bounded historical context', async () => {
   jobs.start(null, 'Hello'); await idle();
   const first = db.workspace().selected!;
   expect(first.messages.at(-1)).toMatchObject({ status: 'complete', text: 'Hello from ChatGPT', requests: 1, usage: { input: 10, output: 3, cachedInput: 0 } });
   chatgpt.selectModel('other-model');
   jobs.start(first.id, 'Follow up'); await idle();
-  expect(requests[1].model).toBe('fixture-model');
+  expect(requests[1].model).toBe('other-model');
   expect(JSON.stringify(requests[1])).toContain('Hello from ChatGPT');
   expect(JSON.stringify(requests)).not.toContain('fixture-oauth');
   expect(workers.every(worker => worker.killed)).toBe(true);
 });
 
-test('agent tools use the real global source boundary, retain evidence and reject stale history before another model request', async () => {
+test('changed sources allow fresh follow-up investigation without replaying stale answers or evidence', async () => {
   scripted(investigationScripts(root));
   jobs.start(null, 'Find the answer'); await idle();
   const conversation = db.workspace().selected!;
   expect(conversation.messages.at(-1)).toMatchObject({ status: 'complete', evidence: [{ id: 'E1', text: 'export const answer = 42;' }], requests: 4 });
   expect(JSON.stringify(requests[2])).toContain('export const answer = 42;');
   writeFileSync(join(root, 'answer.ts'), 'export const answer = 43;\n');
+  scripted(investigationScripts(root, 'The value is now 43 [E1].'));
   jobs.start(conversation.id, 'Explain further'); await idle();
-  expect(requests).toHaveLength(4);
-  expect(db.workspace().selected!.messages.at(-1)?.text).toContain('Saved evidence changed');
+  expect(requests).toHaveLength(8);
+  expect(JSON.stringify(requests[4])).not.toContain('The value is 42');
+  expect(JSON.stringify(requests[4])).not.toContain('export const answer = 42');
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', text: 'The value is now 43 [E1].', evidence: [{ text: 'export const answer = 43;' }] });
+  expect(db.workspace().selected!.messages.find(message => message.id === conversation.messages.at(-1)!.id)).toMatchObject({ evidence: [{ text: 'export const answer = 42;' }] });
+});
+
+test.each(['unchanged', 'changed', 'deleted', 'revoked'] as const)('restart with %s sources preserves historical identity but never grants old citations eligibility', async state => {
+  scripted(investigationScripts(root)); jobs.start(null, 'Find the answer'); await idle();
+  const saved = db.workspace().selected!;
+  const historical = saved.messages.at(-1)!;
+  db.close(); db = new Conversations(join(directory, 'conversations.sqlite'));
+  if (state === 'changed') writeFileSync(join(root, 'answer.ts'), 'export const answer = 43;');
+  if (state === 'deleted') rmSync(join(root, 'answer.ts'));
+  if (state === 'revoked') snapshot.roots = [];
+  jobs = new LiveSupervisor(db, chatgpt, sources, { snapshot: () => snapshot }, () => { const worker = new Worker(); workers.push(worker); return worker; }, () => {}, undefined, knowledge, resolutions);
+  expect(workers).toHaveLength(1); // Reopening alone starts nothing.
+  scripted([textResponse('The old answer still applies [E1].')]);
+  jobs.start(saved.id, 'Does the old answer still apply?'); await idle();
+  expect(requests).toHaveLength(5);
+  expect(JSON.stringify(requests[4].input)).not.toContain('export const answer');
+  if (state !== 'unchanged') expect(JSON.stringify(requests[4].input)).not.toContain('The value is 42');
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'partial', evidence: [], text: expect.stringContaining('not in the input') });
+  expect(db.workspace().selected!.messages.find(message => message.id === historical.id)).toEqual(historical);
+});
+
+test('fresh indexed evidence can be retrieved explicitly on a reopened follow-up without resending saved exploration', async () => {
+  scripted(knowledgeScripts()); jobs.start(null, 'Explain the answer boundary'); await idle();
+  const id = db.workspace().selected!.id, [record] = await knowledge.inspect();
+  scripted([functionResponse('retrieve_knowledge', { operation: 'evidence', id: record.id, index: 0 }), textResponse('Current source [E1].')]);
+  jobs.start(id, 'Check current support'); await idle();
+  expect(JSON.stringify(requests[4].input)).not.toContain('export const answer');
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', evidence: [{ id: 'E1', text: 'export const answer = 42;' }] });
 });
 
 test('a complete tool call in an unterminated model stream cannot execute a source tool', async () => {
@@ -639,9 +680,7 @@ test('citation-free source investigations retain checkout provenance and cannot 
   const id = db.workspace().selected!.id, count = requests.length;
   expect(db.liveContext(id).evidence).toEqual([]);
   writeFileSync(join(root, 'caller.ts'), 'absent-handler();\n');
-  jobs.start(id, 'Explain more'); await idle();
-  expect(db.workspace().selected!.messages.at(-1)?.status).toBe('failed');
-  expect(requests).toHaveLength(count);
+  await followupWithHistoricalContextWithheld(id, count);
 });
 
 test.each([
@@ -666,8 +705,8 @@ test.each([
   jobs.start(null, 'Inspect attached service context'); await idle();
   const id = db.workspace().selected!.id, count = requests.length;
   expect(db.liveContext(id).checkouts?.map(item => item.repository?.name).sort()).toEqual(['a', 'c']);
-  writeFileSync(join(root, 'c', 'caller.ts'), 'changed();'); jobs.start(id, 'Explain more'); await idle();
-  expect(db.workspace().selected!.messages.at(-1)?.status).toBe('failed'); expect(requests).toHaveLength(count);
+  writeFileSync(join(root, 'c', 'caller.ts'), 'changed();');
+  await followupWithHistoricalContextWithheld(id, count);
 });
 
 test.each(['during', 'follow-up'] as const)('typed neighborhood lookup without E citations retains transitive checkout scope for %s edits', async when => {
@@ -696,8 +735,7 @@ test.each(['during', 'follow-up'] as const)('typed neighborhood lookup without E
     expect(reply.status).toBe('complete'); expect(db.liveContext(id).evidence).toEqual([]);
     expect(db.liveContext(id).checkouts).toHaveLength(2);
     const count = requests.length; writeFileSync(join(root, 'b', 'caller.ts'), 'changed();');
-    jobs.start(id, 'Explain more'); await idle();
-    expect(db.workspace().selected!.messages.at(-1)?.status).toBe('failed'); expect(requests).toHaveLength(count);
+    await followupWithHistoricalContextWithheld(id, count);
   }
 });
 
@@ -727,9 +765,7 @@ test.each(['flow', 'flows', 'detail', 'search', 'evidence'] as const)('operation
   expect(db.liveContext(conversation.id).checkouts?.map(item => item.repository?.name).sort()).toEqual(['ledger', 'shop']);
   expect(db.exploration(conversation.messages.at(-1)!.id)).toBeUndefined();
   writeFileSync(join(root, 'ledger', 'uncited.ts'), 'changed();');
-  jobs.start(conversation.id, 'Explain more'); await idle();
-  expect(db.workspace().selected!.messages.at(-1)?.status).toBe('failed');
-  expect(requests).toHaveLength(count);
+  await followupWithHistoricalContextWithheld(conversation.id, count);
 });
 
 test.each(['conflict', 'annotation'] as const)('flow %s attachments contribute to the same live provenance envelope without an E citation', async attachment => {
@@ -770,9 +806,7 @@ test.each(['during', 'follow-up'] as const)('reused evidence retains its cross-r
     expect(db.workspace().selected!.messages.at(-1)).not.toHaveProperty('checkouts');
     expect(db.liveContext(id).checkouts).toEqual(expect.arrayContaining([expect.objectContaining({ repository: { name: 'b', path: 'b' } })]));
     const count = requests.length; writeFileSync(join(root, 'b', 'caller.ts'), 'value();\n');
-    jobs.start(id, 'Explain more'); await idle();
-    expect(db.workspace().selected!.messages.at(-1)?.status).toBe('failed');
-    expect(requests).toHaveLength(count);
+    await followupWithHistoricalContextWithheld(id, count);
   }
 });
 
@@ -780,9 +814,7 @@ test('saved evidence cannot be replayed after an uncited caller changes, even wh
   scripted(knowledgeScripts()); jobs.start(null, 'Inspect the boundary'); await idle();
   const id = db.workspace().selected!.id, count = requests.length;
   writeFileSync(join(root, 'caller.ts'), 'answer();\n');
-  jobs.start(id, 'Explain more'); await idle();
-  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'failed', text: expect.stringContaining('Saved evidence changed') });
-  expect(requests).toHaveLength(count);
+  await followupWithHistoricalContextWithheld(id, count);
 });
 
 test.each([2, 4])('checkout edits at model step %s cannot combine incompatible source snapshots or commit current knowledge', async step => {

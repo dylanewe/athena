@@ -62,7 +62,7 @@ export class ChatGPTSettings {
       // This automatic catalog fetch is explicitly disclosed with the sign-in action. It is not generation.
       await this.loadModels(activity);
       this.message = this.models.length
-        ? 'ChatGPT signed in. Eligible tests use your ChatGPT plan or enabled credits. Choose a model to test; new conversations use your selected ChatGPT model.'
+        ? 'ChatGPT signed in. Eligible tests use your ChatGPT plan or enabled credits. Choose a model to test; new ChatGPT jobs, including follow-ups, use your selected ChatGPT model.'
         : 'ChatGPT signed in, but no models are available. Check account eligibility or refresh models later. No generation request was sent.';
     });
   }

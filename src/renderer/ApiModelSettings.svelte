@@ -29,11 +29,11 @@
 <section aria-label="API-key conversation configuration">
   <div class="eyebrow">Independent of Pi · No automatic requests</div>
   <h2>Conversation routes &amp; role models</h2>
-  <p>ChatGPT conversations stay unchanged. API-key conversations use the provider’s paid API, not a subscription. Send authorizes one bounded job, including eligible repository content, investigation, and naming. The shared $1 application gate reserves every request conservatively; cancellation does not refund reservations or prevent already-incurred charges. It is not a provider billing limit.</p>
+  <p>New jobs use the current route and models, including follow-ups and retries. API-key conversations use the provider’s paid API, not a subscription. Send authorizes one bounded job, including eligible repository content, investigation, and naming. The shared $1 application gate reserves every request conservatively; cancellation does not refund reservations or prevent already-incurred charges. It is not a provider billing limit.</p>
   {#if error}<p role="alert" class="problem">{error}</p>{/if}
   {#if settings}
     <form onsubmit={event => { event.preventDefault(); void change(() => window.athena.apiModels.select(route, conversation, investigator)); }}>
-      <label>Route for new conversations
+      <label>Route for new work
         <select bind:value={route} disabled={busy}><option value="chatgpt">ChatGPT plan (existing workflow)</option><option value="api-key">API key (paid provider API)</option></select>
       </label>
       <div class="roles">
@@ -46,7 +46,7 @@
       </div>
       <button disabled={busy}>Save route and role models</button>
     </form>
-    <p class="meta">These settings affect new conversations only. Both roles’ complete configuration is pinned when a conversation begins. Credentials and permission can still be revoked. There is no automatic route, provider, or model fallback.</p>
+    <p class="meta">These settings apply to the next Send or Retry in any conversation. Both roles’ complete configuration is frozen for that job; historical answers retain their original model labels. Credentials and permission can still be revoked. There is no automatic route, provider, or model fallback.</p>
     {#each settings.models.filter(model => model.ref === conversation || model.ref === investigator) as model}
       <div class="model-record"><strong>{model.ref}</strong><code>{model.endpoint}</code><span>{model.api} · Tools required · {model.reasoning ? 'Reasoning capable' : 'No reasoning'} · {model.contextWindow.toLocaleString()} context / {model.maxTokens.toLocaleString()} max output</span><span>USD / 1M: {model.cost.input} input · {model.cost.output} output · {model.cost.cacheRead} cache read · {model.cost.cacheWrite} cache write{model.cost.tiers?.length ? ' · Tiered pricing (gate uses highest rates)' : ''}</span></div>
     {/each}

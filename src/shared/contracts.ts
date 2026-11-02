@@ -27,11 +27,16 @@ export interface Message {
   usageComplete?: boolean;
   requests?: number;
   activity?: string;
+  contextNotice?: string;
+  interrupted?: boolean;
+  model?: string;
+  provider?: string;
   ephemeral?: boolean;
   knowledgePublication?: KnowledgePublication;
   knowledgeReferences?: { id: string; topic: string }[];
 }
 export interface ConversationSummary {
+  scope?: import('./build').BuildScope;
   id: string;
   title: string;
   kind?: 'demo' | 'chatgpt' | 'api-key';

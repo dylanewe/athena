@@ -62,7 +62,7 @@
       </label>
       <p>Default three. Extra child tasks queue within the current job; future paid user jobs never queue. All tasks share permissions and cost, request and time limits.</p>
     </section>
-    <p class="intro">Choose when Athena contacts a model. Route and role selections for new conversations are independent of the fixed DeepSeek connection test below. Connection testing never includes repository material.</p>
+    <p class="intro">Choose when Athena contacts a model. Route and role selections for new work, including follow-ups and retries, are independent of the fixed DeepSeek connection test below. Connection testing never includes repository material.</p>
     {#if error}<div class="settings-error" role="alert">{error}</div>{/if}
     {#if settings}
       <section aria-label="Selected model">

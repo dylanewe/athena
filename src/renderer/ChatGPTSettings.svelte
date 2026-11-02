@@ -69,7 +69,7 @@
     {#if settings.selectedModel && !settings.models.some(m => m.id === settings?.selectedModel)}
       <p class="meta">Saved model: {settings.selectedModel}. Refresh models to check availability. Athena never chooses a replacement automatically.</p>
     {/if}
-    <p class="meta">This selection applies to new conversations. Existing conversations retain their original model and registration. Send refreshes the catalog and expiring credentials as needed.</p>
+    <p class="meta">This selection applies to the next ChatGPT job, including follow-ups and retries. Historical answers keep their original identity; saved ChatGPT conversations cannot transfer between registrations/accounts. Send refreshes the catalog and expiring credentials as needed.</p>
     <h3>Test the selected model</h3>
     <blockquote>{CHATGPT_PROMPT}</blockquote>
     <p>One click sends only this prompt. Uses your ChatGPT plan or enabled credits. Cancellation may not prevent usage already incurred.</p>

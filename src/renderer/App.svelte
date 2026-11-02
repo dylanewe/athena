@@ -165,7 +165,7 @@
         </button>
       {/each}
     </nav>
-    <div class="local-note"><span class="eyebrow">On this Mac</span><p>History is saved here.<br />Live questions use the pinned route.</p></div>
+    <div class="local-note"><span class="eyebrow">On this Mac</span><p>History is saved here.<br />New work uses current model settings.</p></div>
   </aside>
 
   {#if section === 'inventory'}
@@ -199,6 +199,9 @@
                 <div class="message-heading"><strong>{message.role === 'user' ? 'You' : 'Athena'}</strong>
                   {#if message.role === 'assistant'}<span class:problem={!['running', 'complete'].includes(message.status)}>{message.status === 'running' && workspace.saveError ? 'Not saved' : message.status === 'complete' && !selected.model ? 'Local demo' : message.status === 'limit' ? 'limit-paused' : message.status}</span>{/if}
                 </div>
+                {#if message.role === 'assistant' && message.status !== 'running' && selected.model}<p class="draft-note">Historical answer · Not current verification{message.provider ? ` · ${message.provider} / ${message.model}` : ''}</p>{/if}
+                {#if message.contextNotice}<p class="draft-note">{message.contextNotice}</p>{/if}
+                {#if message.interrupted}<p class="draft-note">Interrupted after restart · Partial work · No automatic continuation. Retry explicitly starts a new accounted job using current model settings.</p>{/if}
                 {#if message.ephemeral}<p class="draft-note">Ephemeral · Not saved · May contain sensitive values</p>{/if}
                 <p>{message.text}</p>
                 {#if message.status === 'running' && message.activity}<p class="draft-note">{message.activity}</p>{/if}
@@ -249,7 +252,7 @@
                     {/each}
                   </details>
                 {/if}
-                {#if !selected.sealed && selected.kind === 'chatgpt' && message.role === 'assistant' && !['running', 'complete'].includes(message.status) && selected.messages.at(-1)?.id === message.id}
+                {#if !selected.sealed && (selected.kind === 'chatgpt' || selected.kind === 'api-key') && message.role === 'assistant' && !['running', 'complete'].includes(message.status) && selected.messages.at(-1)?.id === message.id}
                   <button type="button" disabled={busy || !!active} onclick={() => change(() => window.athena.retry(message.id))}>Retry</button>
                 {/if}
               </article>
@@ -259,8 +262,10 @@
         <section class="chat-input" class:unsent={!selected} aria-label="Conversation composer">
           <div class="composer-heading">
             <div><div class="eyebrow">{selected ? 'Conversation' : 'Start with a question'}</div><h1>{selected?.title ?? 'New conversation'}</h1></div>
-            <span class="demo-badge">{selected && !selected.model ? 'Local demo · Read-only' : selected?.model ?? defaultModel ?? 'ChatGPT · Select a model'}</span>
+            <span class="demo-badge">{selected && !selected.model ? 'Local demo · Read-only' : defaultModel ?? 'Select a current model in settings'}</span>
           </div>
+          {#if selected?.model}<p class="draft-note">Send / Retry uses the current model shown above and current provider permissions, not the historical selection. Prior answers and citations are historical; current support requires retrieval or revalidation.</p>{/if}
+          {#if selected?.scope}<p class="draft-note">Selected scope: {selected.scope.repositories.map(repo => repo.name).join(', ')} · Relevance only; current folder permissions still apply.</p>{/if}
           {#if !selected}<p class="draft-note">Send your first message to save this conversation. The selected model will suggest its title; a local title is kept if naming fails.</p>{/if}
           {#if selected && !selected.model}<p class="draft-note">This saved demonstration is read-only. Start a new conversation to use a configured provider.</p>{/if}
           {#if selected?.sealed}<p class="draft-note">This ephemeral investigation is sealed. Start a new conversation. Unsent drafts were cleared to avoid retaining derived sensitive content.</p>{/if}

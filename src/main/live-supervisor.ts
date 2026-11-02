@@ -37,6 +37,7 @@ interface Active {
   investigators?: InvestigatorTask[];
   knowledgePublication?: LiveResult['knowledgePublication'];
   build?: BuildScope;
+  contextNotice?: string;
   coverage?: BuildCoverage;
   buildGeneration?: string;
   reuseReceipts?: Map<string, ReturnType<Conversations['buildReceipts']>[number]>;
@@ -82,14 +83,17 @@ export class LiveSupervisor {
     try { this.conversations.assertClean({ prompt, build }); } catch { throw new LiveError('Message withheld by secret checks. Remove suspected credentials before sending.'); }
     let binding;
     try {
-      const pinned = id ? this.conversations.binding(id) : undefined;
-      if (pinned?.apiKey || (!pinned && this.apiSettings?.route() === 'api-key')) {
-        const apiKey = pinned?.apiKey ?? this.apiSettings!.conversationConfig();
+      const historicalBinding = id ? this.conversations.binding(id) : undefined; // Demos stay read-only.
+      if (this.apiSettings?.route() === 'api-key') {
+        const apiKey = this.apiSettings.conversationConfig();
         this.apiSettings!.assertApproved(apiKey.conversation); this.apiSettings!.assertApproved(apiKey.investigator);
-        binding = structuredClone(pinned ?? { model: apiKey.conversation.model.id, registration: '', apiKey });
+        binding = structuredClone({ model: apiKey.conversation.model.id, registration: '', apiKey });
       } else {
         if (this.chatgpt.snapshot().activity !== 'idle') throw new LiveError('Finish or cancel the current ChatGPT operation first.');
-        binding = this.chatgpt.conversationBinding(pinned);
+        binding = this.chatgpt.conversationBinding();
+        // Model changes do not silently transfer a saved ChatGPT transcript to
+        // another account/registration. Existing reconnect isolation still applies.
+        if (historicalBinding && !historicalBinding.apiKey && historicalBinding.registration !== binding.registration) throw new ChatGPTError('authentication');
       }
     } catch (error) {
       if (error instanceof ChatGPTError || error instanceof ApiSettingsError || error instanceof LiveError) throw error;
@@ -130,18 +134,30 @@ export class LiveSupervisor {
             }
           }
         }
-        const previous = this.conversations.liveContext(job.conversationId);
-        active.evidence = previous.evidence;
-        active.retainedCheckouts = previous.checkouts ?? [];
+        const previous = this.conversations.resumeContext(job.conversationId);
+        const historicalCurrent = await this.verify(previous.evidence, active.controller.signal) &&
+          (!(previous.evidence.length || previous.sourceBacked || previous.checkouts?.length) ||
+            !!previous.checkouts?.length && await this.checkouts.fresh(previous.checkouts, active.controller.signal));
+        if (!historicalCurrent) previous.history = [];
+        // Historical citations are navigation identities, never this job's evidence.
+        // Even unchanged historical text must acquire current evidence via retrieval.
+        if (historicalCurrent) active.retainedCheckouts = previous.checkouts ?? [];
+        if (id) active.contextNotice = historicalCurrent
+          ? 'Historical context only: at most the latest completed question/answer (1024 characters each). Saved tool transcripts, summaries and citations are not current evidence; retrieve or revalidate sources.'
+          : 'Historical context withheld: sources changed, were deleted, are unchecked or no longer permitted. Retrieve current knowledge or investigate fresh sources. Saved answers and citations are unchanged.';
         if (build) active.retainedCheckouts.push(...active.checkouts.filter(checkout => build.repositories.some(repo => checkout.folder === repo.root && checkout.repository?.name === repo.name)));
-        if (!await this.verify(previous.evidence, active.controller.signal) || (previous.evidence.length > 0 || previous.sourceBacked || active.retainedCheckouts.length > 0) && (!active.retainedCheckouts.length || !await this.checkouts.fresh(active.retainedCheckouts, active.controller.signal))) throw new LiveError('Saved evidence changed or is no longer permitted. Start a new conversation to investigate current sources.');
         if (this.active !== active) return;
         const work = async (access: (role?: ModelRole, bytes?: number) => Promise<string | ApiGrant>, signal: AbortSignal) => {
           const snapshot = this.inventory.snapshot();
-          const roots = snapshot.roots.map(root => ({ path: root.path, repositories: snapshot.repositories.filter(repo => repo.path === root.path || repo.path.startsWith(root.path + '/')).map(repo => ({ name: repo.name, path: repo.path })) }));
+          const roots = snapshot.roots.filter(root => root.consent === FOLDER_CONSENT && root.acceptedAt).map(root => ({ path: root.path, repositories: snapshot.repositories.filter(repo => repo.path === root.path || repo.path.startsWith(root.path + '/')).map(repo => ({ name: repo.name, path: repo.path })) }));
           signal.throwIfAborted();
           this.conversations.assertClean({ history: previous.history, roots });
-          outcome = await this.run(active, { ...(binding.apiKey ? { apiKey: binding.apiKey } : {}), model: binding.model, maxInvestigators, ...(build ? { build: { ...build, reusable } } : {}), prompt: job.prompt, history: previous.history, roots, ...this.conversations.naming(job.conversationId) }, access, signal);
+          const scope = this.conversations.scope(job.conversationId)?.repositories
+            .filter(repo => roots.some(root => root.path === repo.root && root.repositories.some(current => current.name === repo.name && current.path === repo.path)))
+            .map(repo => repo.name);
+          outcome = await this.run(active, { ...(binding.apiKey ? { apiKey: binding.apiKey } : {}), model: binding.model, maxInvestigators,
+            ...(build ? { build: { ...build, reusable } } : {}), prompt: job.prompt, history: previous.history, roots, scope,
+            ...this.conversations.naming(job.conversationId), ...(id ? { titlePrompt: job.prompt } : {}) }, access, signal);
           if (outcome.reason && !binding.apiKey) throw new ChatGPTError(outcome.reason);
         };
         if (binding.apiKey) await work((role, bytes) => this.apiSettings!.grant(binding.apiKey!, role!, bytes!, active.controller.signal), active.controller.signal);
@@ -489,7 +505,7 @@ export class LiveSupervisor {
   private end(active: Active, result: LiveResult): void {
     if (this.active !== active) return;
     this.active = undefined;
-    result = { ...result, ...(!active.environment.tainted && active.investigators && !result.investigators ? { investigators: active.investigators } : {}), ...(!active.environment.tainted && result.status === 'complete' ? { checkouts: this.usedCheckouts(active) } : {}), ...(active.knowledgeReferences.length && !active.environment.tainted ? { knowledgeReferences: active.knowledgeReferences } : {}), ...(active.exploration && !result.exploration ? { exploration: active.exploration } : {}), ...(active.title && !result.title ? { title: active.title } : {}) };
+    result = { ...result, ...(active.contextNotice ? { contextNotice: active.contextNotice } : {}), ...(!active.environment.tainted && active.investigators && !result.investigators ? { investigators: active.investigators } : {}), ...(!active.environment.tainted && result.status === 'complete' ? { checkouts: this.usedCheckouts(active) } : {}), ...(active.knowledgeReferences.length && !active.environment.tainted ? { knowledgeReferences: active.knowledgeReferences } : {}), ...(active.exploration && !result.exploration ? { exploration: active.exploration } : {}), ...(active.title && !result.title ? { title: active.title } : {}) };
     if (active.knowledgePublication && !result.knowledgePublication) result.knowledgePublication = active.knowledgePublication;
     if (active.coverage && !active.environment.tainted && !this.conversations.isEphemeral(active.messageId)) {
       active.coverage.unresolved = [...active.coverage.reusedRepositories.flatMap(name => active.reuseReceipts?.get(name)?.build?.unresolved.filter(question => question.startsWith(name + ':')).slice(0, 8) ?? []), ...(result.investigators ?? []).flatMap(task => (task.result?.unresolvedQuestions ?? [`${task.scope}: ${task.status}`]).map(question => `${task.scope}: ${question}`))].slice(0, 100);
