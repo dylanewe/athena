@@ -5,7 +5,7 @@ import { sourceTools } from '../main/source-tools';
 import { LIVE_LIMITS, type Evidence, type LiveStart } from '../shared/live';
 import { findingsSchema, INVESTIGATION_LIMITS, INVESTIGATOR_DEFAULT, INVESTIGATOR_MAX, validFindings, type InvestigatorTask, type Exploration, type InvestigatorResult } from '../shared/investigation';
 import type { LiveCapabilities } from './live-agent';
-import { retainedHistory, SOURCE_INSTRUCTIONS } from './agent-context';
+import { contextEvidenceIds, retainedHistory, SOURCE_INSTRUCTIONS } from './agent-context';
 
 interface InvestigatorRuntime {
   sourceBytes?: number;
@@ -51,7 +51,9 @@ function singleInvestigator(roots: LiveStart['roots'], runtime: InvestigatorRunt
         description: 'Finish with bounded findings, evidence IDs, unresolved questions, and candidate knowledge changes (proposals only, never writes). Source-supported findings require observed evidence; interpretation is explicitly uncertain. No runtime observation is available.',
         parameters: findingsSchema,
         async execute(_call, value) {
-          if (!validFindings(value, observed)) throw new Error('Findings require valid observed evidence IDs and bounded fields.');
+          const activeIds = contextEvidenceIds(investigator.state.messages as Message[]);
+          const eligible = observed.filter(item => activeIds.has(item.id));
+          if (!validFindings(value, eligible)) throw new Error('Findings require valid observed evidence IDs and bounded fields. Reinspect discarded or omitted evidence before citing it.');
           const ids = new Set([...value.findings.flatMap(finding => finding.evidenceIds), ...(value.knowledgeCandidates ?? []).flatMap(candidate => candidate.evidenceIds)]);
           if (ids.size > INVESTIGATION_LIMITS.references) throw new Error('Too many evidence references.');
           const candidate: InvestigatorResult = { ...value, status: 'complete', inspectedScope: scope, scopeTruncated,

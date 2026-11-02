@@ -267,6 +267,51 @@ test('#17 evidence omitted from capacity-bounded output requires explicit inspec
   expect(requests).toHaveLength(6);
 });
 
+test('#17 compacted-away investigator evidence cannot support findings until explicitly redelivered', async () => {
+  const firstText = 'export const answer = 42; // FIRST_EXCERPT_REQUIRES_REDELIVERY';
+  writeFileSync(join(root, 'answer.ts'), firstText);
+  writeFileSync(join(root, 'other.ts'), 'export const other = 7; // ' + 'bounded unrelated implementation '.repeat(18));
+  const finish = response(undefined, 'finish_investigation', { findings: [{ claim: 'Value is 42', support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: [], candidateKnowledgeChanges: [] });
+  scripts = [response(undefined, 'investigate', { question: 'Find the answer, preserving source eligibility.' }),
+    response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }),
+    ...Array.from({ length: 31 }, () => response(undefined, 'sources_read', { root, path: 'other.ts', start: 1, end: 1 })), finish,
+    response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }), finish, response('Answer after explicit source reinspection [E1].')];
+  supervisor.start(null, 'Keep evidence eligibility honest across compaction.'); await idle();
+  const rejectedFinish = requests.find(request => JSON.stringify(request.body).includes('Reinspect discarded or omitted evidence'));
+  expect(rejectedFinish).toBeDefined();
+  expect(JSON.stringify(rejectedFinish!.body)).toContain('Athena compacted continuation');
+  expect(JSON.stringify(rejectedFinish!.body)).not.toContain('FIRST_EXCERPT_REQUIRES_REDELIVERY');
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', investigation: { evidence: [{ id: 'E1', text: firstText }] } });
+  expect(requests).toHaveLength(37);
+  expect(reservations).toHaveLength(37);
+});
+
+test.each([false, true])('#17 main citations after compaction require active-context reinspection (redelivery=%s)', async redeliver => {
+  writeFileSync(join(root, 'answer.ts'), 'export const answer = 42; // MAIN_EXCERPT_REQUIRES_REDELIVERY');
+  writeFileSync(join(root, 'other.ts'), 'export const other = 7; // ' + 'bounded unrelated implementation '.repeat(18));
+  scripts = [response(undefined, 'investigate', { question: 'Find both values.' }),
+    response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }),
+    response(undefined, 'sources_read', { root, path: 'other.ts', start: 1, end: 1 }),
+    response(undefined, 'finish_investigation', { findings: [{ claim: 'The two values differ', support: 'source', evidenceIds: ['E1', 'E2'] }], unresolvedQuestions: [], candidateKnowledgeChanges: [] }),
+    ...Array.from({ length: 32 }, () => response(undefined, 'inspect_evidence', { ids: ['E2'] })),
+    ...(redeliver ? [response(undefined, 'inspect_evidence', { ids: ['E1'] })] : []), response('Value is 42 [E1].')];
+  http = async (url, init) => {
+    const body = JSON.parse(String(init?.body));
+    requests.push({ url: String(url), body, headers: new Headers(init?.headers) });
+    return new Response(String(init?.body).includes('Compact continuation notes') ? response('The original value requires evidence reinspection.') : scripts.shift(), { headers: { 'content-type': 'text/event-stream' } });
+  };
+  supervisor.start(null, 'Compare the values while retaining evidence eligibility.'); await idle();
+  const answer = conversations.workspace().selected!.messages.at(-1)!;
+  expect(answer.text).toContain('Context compacted');
+  expect(answer.status).toBe(redeliver ? 'complete' : 'partial');
+  if (redeliver) expect(JSON.stringify(requests.at(-1)!.body)).toContain('MAIN_EXCERPT_REQUIRES_REDELIVERY');
+  else {
+    expect(JSON.stringify(requests.at(-1)!.body)).not.toContain('MAIN_EXCERPT_REQUIRES_REDELIVERY');
+    expect(answer.text).toContain('Reinspect retained evidence');
+    expect(conversations.liveContext(conversations.workspace().selected!.id).history).toEqual([]);
+  }
+});
+
 test('real Pi agents use separate pinned API-key providers, preserve source boundaries and reserve each request', async () => {
   scripts = [response(undefined, 'investigate', { question: 'Find the answer' }), response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }),
     response(undefined, 'finish_investigation', { findings: [{ claim: 'Value is 42', support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: ['Runtime not observed'], candidateKnowledgeChanges: [], knowledgeCandidates: [knowledgeCandidate()] }), response('Value is 42 [E1].')];

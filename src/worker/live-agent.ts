@@ -9,7 +9,7 @@ import { createAssistantMessageEventStream, type Message, type AssistantMessage,
 import { Type } from 'typebox';
 import { investigatorTool } from './investigator';
 import { titleTool } from './title-tool';
-import { retainedHistory, SOURCE_INSTRUCTIONS } from './agent-context';
+import { contextEvidenceIds, retainedHistory, SOURCE_INSTRUCTIONS } from './agent-context';
 import { chatgptModel, chatgptStream, type StreamObservation } from './chatgpt-stream';
 import { LIVE_LIMITS, type Evidence, type LiveResult, type LiveStart, type LiveCheckpoint } from '../shared/live';
 import { INVESTIGATION_LIMITS, type Exploration, type InvestigatorTask } from '../shared/investigation';
@@ -250,12 +250,23 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
   if (text.length > LIVE_LIMITS.answerCharacters) limited = true;
   const reason = observations.findLast(observation => observation.failure)?.failure;
   const anyCompleted = investigators.some(task => task.status === 'complete');
-  const partial = continuationNotices.size > 0 || exploration?.result.status === 'partial' || investigators.some(task => task.status !== 'complete');
-  const outcomeNotice = continuationNotices.size ? '\n\n' + [...continuationNotices].join('\n') : limited || !historyFits ? '\n\n' + (limitNotice || 'Local output/history limit reached. Start a new conversation.')
-    : partial ? '\n\nPartial: some investigators did not complete. Successful findings are retained; missing results remain unknown.'
-    : !success && anyCompleted ? '\n\nPartial: final synthesis failed. Successful findings remain available.' : '';
+  const activeIds = contextEvidenceIds(agent.state.messages as Message[]);
+  // Explicit builds supply their main-owned bounded results in the initial user
+  // input, not a model-invoked tool result. They grant eligibility only while that
+  // exact application-supplied payload remains present (never from arbitrary prose).
+  if (job.build && buildResults && agent.state.messages.some(message => message.role === 'user' &&
+      (typeof message.content === 'string' ? message.content : message.content.filter(block => block.type === 'text').map(block => block.text).join('')).endsWith(buildResults))) {
+    for (const task of investigators) for (const evidence of task.result?.evidence ?? []) activeIds.add(evidence.id);
+  }
+  const unsupportedCitations = [...text.matchAll(/\[(E\d+)\]/g)].some(match => !activeIds.has(match[1]!));
+  const partial = unsupportedCitations || continuationNotices.size > 0 || exploration?.result.status === 'partial' || investigators.some(task => task.status !== 'complete');
+  const outcomeNotice = (limited || !historyFits ? '\n\n' + (limitNotice || 'Local output/history limit reached. Start a new conversation.') : '') +
+    (continuationNotices.size ? '\n\n' + [...continuationNotices].join('\n')
+      : unsupportedCitations ? '\n\nPartial: cited source excerpts are not in active model context. Reinspect retained evidence before citing it; summaries are not evidence. Narrow follow-up: inspect the cited IDs and answer one unresolved question.'
+      : partial ? '\n\nPartial: some investigators did not complete. Successful findings are retained; missing results remain unknown.'
+      : !success && anyCompleted ? '\n\nPartial: final synthesis failed. Successful findings remain available.' : '');
   const notice = outcomeNotice + (compactions ? `\n\nContext compacted ${compactions} time(s). Older source excerpts are no longer in model context; retained references require source reinspection. Summaries are guidance, not evidence.` : '');
   return { status: limited || !historyFits ? 'limit' : signal.aborted ? 'cancelled' : !success ? (anyCompleted || continuationNotices.size ? 'partial' : 'failed') : partial ? 'partial' : 'complete', investigators, text: text.slice(0, LIVE_LIMITS.answerCharacters - notice.length) + notice,
-    history: historyFits ? history : [], requests, usageComplete: requests > 0 && usageComplete, ...(exploration ? { exploration } : {}), ...(title ? { title } : {}),
+    history: historyFits && !partial ? history : [], requests, usageComplete: requests > 0 && usageComplete, ...(exploration ? { exploration } : {}), ...(title ? { title } : {}),
     ...(observations.some(observation => observation.usage) ? { usage } : {}), ...(!success && !anyCompleted && reason ? { reason } : {}) };
 }

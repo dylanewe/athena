@@ -23,7 +23,7 @@ test('long histories compact under the pinned capacity, preserving exact constra
   for (let i = 0; i < 18; i++) history.push(assistant(`Uncertain interpretation [E1]. ${'older discussion '.repeat(350)}`));
   const result = await runLiveAgent(job(history), capabilities(activities, grants), new AbortController().signal, async (_url, init) => {
     payloads.push(String(init?.body));
-    return response(String(init?.body).includes('Compact continuation notes') ? 'Retry ownership remains unresolved.' : 'Continuation is uncertain [E1].');
+    return response(String(init?.body).includes('Compact continuation notes') ? 'Retry ownership remains unresolved.' : 'Continuation is uncertain; reinspect retained evidence.');
   });
   expect(result.status).toBe('complete');
   expect(result.requests).toBeGreaterThan(1);

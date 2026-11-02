@@ -322,7 +322,8 @@ test('long inspected paths disclose scope truncation instead of presenting a cli
   const path = ['a'.repeat(200), 'b'.repeat(200), 'c'.repeat(100), 'answer.ts'].join('/');
   mkdirSync(join(root, path, '..'), { recursive: true });
   writeFileSync(join(root, path), 'export const answer = 42;\n');
-  scripted(investigationScripts(root, 'Found [E1].', path));
+  scripted([functionResponse('investigate', { question: 'Find the answer at the long path' }), toolResponse(root, true, path),
+    functionResponse('finish_investigation', { findings: [{ claim: 'The value is 42', support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: [], candidateKnowledgeChanges: [] }), textResponse('Found [E1].')]);
   jobs.start(null, 'Find the answer'); await idle();
   expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', investigation: { scopeTruncated: true } });
 });
