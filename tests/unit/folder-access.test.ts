@@ -114,6 +114,24 @@ test('a failed destructive database step leaves a durable pending purge that res
   expect(inventory.snapshot().roots[0].purgePending).toBe(false);
 });
 
+test.each(['current', 'reconnected-origin'] as const)('annotation inspection rechecks every %s target after sequential IO', async revision => {
+  const [leftId] = await publish(left), [rightId] = await publish(right);
+  const annotation = (await resolutions.write({ operation: 'annotate', kind: 'note', text: 'Explanation derived from both folders', claimIds: [leftId, rightId] })).items[0];
+  if (revision === 'reconnected-origin') await resolutions.write({ operation: 'reconnect', id: annotation.id, claimIds: [rightId] });
+  const actual = (await vi.importActual<typeof fs>('node:fs/promises')).open;
+  let entered!: () => void, resume!: () => void, paused = false;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const released = new Promise<void>(resolve => { resume = resolve; });
+  vi.mocked(fs.open).mockImplementation(async (...args) => {
+    const handle = await actual(...args);
+    if (!paused && String(args[0]) === join(right, 'source.ts')) { paused = true; entered(); await released; }
+    return handle;
+  });
+  const inspection = resolutions.read({ operation: 'inspect', id: annotation.id });
+  await waiting; access.revoke(left); resume();
+  expect((await inspection).items).toEqual([]);
+});
+
 test('withdrawal during retrieval IO never returns a cached excerpt or claim', async () => {
   const [id] = await publish(left);
   const actual = (await vi.importActual<typeof fs>('node:fs/promises')).open;

@@ -125,25 +125,34 @@ export class Conversations {
   }
   /** Whole associated conversations are removed: free-form prose cannot safely be
    * separated into source-owned fragments. This also removes their later turns. */
-  purge(roots: string[]): void {
+  purge(roots: string[]): string[] {
     const ids = this.associatedConversations(roots);
+    const removed: string[] = [];
     this.transaction(() => {
       for (const id of ids) {
         const messages = this.db.prepare('SELECT id FROM messages WHERE conversation_id = ?').all(id);
-        for (const message of messages) { this.ephemeral.delete(String(message.id)); this.db.prepare('DELETE FROM live_attempts WHERE message_id = ?').run(message.id!); }
+        for (const message of messages) { removed.push(String(message.id)); this.ephemeral.delete(String(message.id)); this.db.prepare('DELETE FROM live_attempts WHERE message_id = ?').run(message.id!); }
         this.db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(id);
         this.db.prepare('DELETE FROM conversations WHERE id = ?').run(id);
       }
     });
     this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    return removed;
   }
 
   workspace(): Workspace {
+    // Ownership envelopes are large; scan once per withdrawn root, not once per
+    // conversation on every streaming workspace refresh.
+    const revocations = new Map<string, string[]>();
+    for (const root of this.withdrawn()) for (const id of this.associatedConversations([root])) {
+      revocations.set(id, [...(revocations.get(id) ?? []), root]);
+    }
     const conversations = this.db.prepare('SELECT id, title, binding, sealed, scope FROM conversations ORDER BY rowid').all().map(row => {
-      const revokedSources = this.revokedSources(String(row.id));
+      const revokedSources = revocations.get(String(row.id)) ?? [];
       return {
       id: String(row.id), title: String(row.title), ...(revokedSources.length ? { revokedSources } : {}), ...(row.scope ? { scope: JSON.parse(String(row.scope)) as BuildScope } : {}), ...(row.sealed ? { sealed: true } : {}), ...(row.binding ? { kind: (JSON.parse(String(row.binding)) as ConversationBinding).apiKey ? 'api-key' as const : 'chatgpt' as const, model: (JSON.parse(String(row.binding)) as ConversationBinding).model } : {}),
-    }; }) as ConversationSummary[];
+      };
+    }) as ConversationSummary[];
     const selectedId = this.db.prepare("SELECT value FROM settings WHERE key = 'selected'").get()?.value;
     const summary = conversations.find(conversation => conversation.id === selectedId);
     const messages = summary ? this.db.prepare(
@@ -344,6 +353,7 @@ export class Conversations {
   }
 
   progressLive(messageId: string, text: string, activity: string, reported?: Pick<LiveResult, 'usage' | 'requests' | 'usageComplete'>): void {
+    if (!this.db.prepare('SELECT 1 FROM live_attempts WHERE message_id = ?').get(messageId)) return;
     if (this.protect(messageId, { text, activity, reported })) {
       this.ephemeral.set(messageId, { text, activity, ...reported, ephemeral: true });
       return;

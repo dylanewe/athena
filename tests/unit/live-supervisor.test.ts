@@ -705,6 +705,21 @@ test('revocation during request authority preparation never releases the next ca
   expect(db.workspace().selected?.revokedSources).toEqual([root]);
 });
 
+test('purge discards a failed-save terminal result instead of retaining it for a later save retry', async () => {
+  const canary = 'synthetic-purged-unsaved-7';
+  await exposeEnvironmentAndStall(canary);
+  workers[0].emit('message', { type: 'progress', text: canary, activity: 'Working' });
+  const lock = new DatabaseSync(join(directory, 'conversations.sqlite'));
+  try { lock.exec('BEGIN IMMEDIATE'); jobs.cancel(); expect(jobs.saveError).toBeDefined(); }
+  finally { lock.exec('ROLLBACK'); lock.close(); }
+  snapshot.roots[0].revokedAt = 'now'; db.revoke([root]);
+  jobs.discardPurgedResults(db.purge([root]));
+  expect(jobs.saveError).toBeUndefined();
+  expect(db.workspace().conversations).toEqual([]);
+  jobs.cancel();
+  expect(db.workspace().conversations).toEqual([]);
+});
+
 test('all parallel children and the queued tail share the original job wall-clock deadline', async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
   http = async (_url, init) => {

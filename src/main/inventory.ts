@@ -263,7 +263,10 @@ export class Inventory {
       }
     }
     if (!this.closed) this.save({ ...this.state,
-      repositories: repositories.map(repo => this.state.roots.some(root => root.revokedAt && within(root.path, repo.path)) ? { ...repo, presence: 'unknown' } : repo),
+      // Reconciliation may have held previous repository objects across IO while
+      // a purge removed them. Recheck the deletion journal at the final save.
+      repositories: repositories.filter(repo => !this.state.roots.some(root => (root.purgePending || root.purgedAt) && within(root.path, repo.path)))
+        .map(repo => this.state.roots.some(root => root.revokedAt && within(root.path, repo.path)) ? { ...repo, presence: 'unknown' } : repo),
       candidates: candidates.filter(repo => !this.state.roots.some(root => root.revokedAt && within(root.path, repo.path))),
     });
   }

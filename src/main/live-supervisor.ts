@@ -227,6 +227,9 @@ export class LiveSupervisor {
   revokeFolderAccess(): void {
     if (this.active) this.end(this.active, { status: 'cancelled', text: this.active.text + '\n\nFolder access revoked. Active and queued work stopped. Local history is retained with revoked-source labels and excluded from future context. Data already transmitted to a provider cannot be recalled; incurred usage remains.', history: [], requests: this.active.requests, usageComplete: false });
   }
+  discardPurgedResults(messageIds: string[]): void {
+    if (this.unsaved && messageIds.includes(this.unsaved.messageId)) this.unsaved = undefined;
+  }
   revokeApiAuthority(): void { if (this.active?.apiKey) this.cancel(); }
   retry(messageId: string): void { this.start(null, '', messageId); }
   lifecycle(event: 'window-close' | 'quit' | 'minimize'): void { if (event !== 'minimize') this.cancel(); }

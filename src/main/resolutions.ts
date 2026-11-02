@@ -62,7 +62,9 @@ export class Resolutions {
         if (Buffer.byteLength(JSON.stringify({ items: [...items, view], notice: NOTICE })) > KNOWLEDGE_LIMITS.bytes - 128) { consumed--; break; }
         items.push(view);
       }
-      return { items, notice: NOTICE, ...(rows.length > consumed && consumed > 0 && offset + consumed <= 10000 ? { nextOffset: offset + consumed } : {}) };
+      // Earlier views may have awaited a different annotation's IO since their
+      // own checks. Finalize the entire response against current authorization.
+      return { items: items.filter(item => this.eligibleRevision(item.id, item.revision)), notice: NOTICE, ...(rows.length > consumed && consumed > 0 && offset + consumed <= 10000 ? { nextOffset: offset + consumed } : {}) };
     });
   }
   write(input: ResolutionWrite): Promise<ResolutionResult> {
@@ -99,7 +101,7 @@ export class Resolutions {
         this.db.exec('COMMIT');
       } catch (error) { this.db.exec('ROLLBACK'); throw error; }
       const view = await this.view(stored, revision, signal, true, budget);
-      return { items: view ? [view] : [], notice: NOTICE };
+      return { items: view && this.eligibleRevision(view.id, view.revision) ? [view] : [], notice: NOTICE };
     });
   }
   /** Read-only augmentation under the existing job byte budget. Assertions never mint E evidence. */
@@ -114,7 +116,14 @@ export class Resolutions {
         item.annotations = annotations;
       }
     }
+    for (const item of result.items) if (item.annotations) item.annotations = item.annotations.filter(annotation => this.eligibleRevision(annotation.id, annotation.revision));
     return this.knowledge.completeRetrieval(result);
+  }
+  /** Check both the displayed revision and original explanation ownership after
+   * all asynchronous checks. Missing/purged revisions cannot release cached text. */
+  private eligibleRevision(id: string, revision: number): boolean {
+    const rows = this.db.prepare('SELECT value FROM revisions WHERE annotation_id = ? AND (revision = 1 OR revision = ?)').all(id, revision);
+    return rows.length > 0 && rows.every(row => (JSON.parse(String(row.value)) as Revision).targets.every(target => this.knowledge.targetEligible(target)));
   }
   private stored(row: Record<string, unknown>): Stored {
     return { id: String(row.id), kind: String(row.kind) as Stored['kind'], text: String(row.text), createdAt: String(row.created_at) };
@@ -146,7 +155,7 @@ export class Resolutions {
       if (!await this.targetStates(origin.targets, signal, budget)) return;
     }
     const states = await this.targetStates(value.targets, signal, budget);
-    if (!states) return;
+    if (!states || !this.eligibleRevision(stored.id, Number(row.revision))) return;
     const changed = states.some(state => state.freshness === 'stale');
     // A user-visible observation remains sticky across reverts. Model/tainted reads are strictly read-only.
     if (changed && observe && !row.reconsider) {

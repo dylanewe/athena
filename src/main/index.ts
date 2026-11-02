@@ -185,7 +185,7 @@ if (!app.requestSingleInstanceLock()) {
     jobs = new LiveSupervisor(conversations, chatgpt, sources, inventory, () => utilityProcess.fork(join(output, 'live.js'), [], {
       serviceName: 'Athena ChatGPT conversation', env: {}, stdio: 'ignore', cwd: stateDirectory,
     }), notify, apiSettings, knowledge, resolutions);
-    folderAccess = new FolderAccess(inventory, conversations, sources, knowledge, resolutions, () => { jobs?.revokeFolderAccess(); sourceGateway?.cancel(); }, notify);
+    folderAccess = new FolderAccess(inventory, conversations, sources, knowledge, resolutions, () => { jobs?.revokeFolderAccess(); sourceGateway?.cancel(); }, notify, ids => jobs?.discardPurgedResults(ids));
     await folderAccess.recover(); // Finish interrupted destructive cleanup before exposing any local views.
     ipcMain.handle('athena:resolutions', async (event, operation: unknown, payload: unknown) => {
       try {

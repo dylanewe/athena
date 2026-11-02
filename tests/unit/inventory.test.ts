@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, expect, test } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import * as fs from 'node:fs/promises';
 import { mkdtemp, mkdir, writeFile, rm, realpath, symlink, rename } from 'node:fs/promises';
 import { renameSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -7,6 +8,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { execFileSync } from 'node:child_process';
 import { Inventory } from '../../src/main/inventory';
 import { FOLDER_CONSENT } from '../../src/shared/inventory';
+
+vi.mock('node:fs/promises', { spy: true });
 
 let directory: string;
 let root: string;
@@ -18,12 +21,13 @@ async function repository(path: string) {
   await writeFile(join(path, 'source.ts'), 'export const answer = 42;');
 }
 beforeEach(async () => {
+  vi.mocked(fs.realpath).mockImplementation((await vi.importActual<typeof fs>('node:fs/promises')).realpath);
   directory = await realpath(await mkdtemp(join(tmpdir(), 'athena-inventory-')));
   root = join(directory, 'chosen');
   await mkdir(root);
   inventory = new Inventory(join(directory, 'inventory.sqlite'));
 });
-afterEach(async () => { inventory.close(); await rm(directory, { recursive: true, force: true }); });
+afterEach(async () => { vi.restoreAllMocks(); inventory.close(); await rm(directory, { recursive: true, force: true }); });
 
 test('cancellation retains partial progress without inventing missing repositories and can resume', async () => {
   await repository(join(root, 'alpha'));
@@ -281,6 +285,28 @@ test('revoking during discovery cannot restore a revoked repository from late re
   expect(withdrawn).toBe(true);
   expect(inventory.snapshot().repositories).toEqual([]);
   expect(inventory.snapshot().roots[0].revokedAt).toBeTruthy();
+});
+
+test('purge during missing-repository reconciliation cannot be undone by a resumed late scan', async () => {
+  await repository(join(root, 'atlas')); await inventory.designate(root, FOLDER_CONSENT); await inventory.scan();
+  await rename(join(root, 'atlas'), join(directory, 'moved'));
+  const actual = (await vi.importActual<typeof fs>('node:fs/promises')).realpath;
+  let entered!: () => void, resume!: () => void, roots = 0;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const released = new Promise<void>(resolve => { resume = resolve; });
+  vi.mocked(fs.realpath).mockImplementation(async path => {
+    const canonical = await actual(path);
+    if (String(path) === root && ++roots === 2) { entered(); await released; }
+    return canonical;
+  });
+  const scan = inventory.scan();
+  await waiting;
+  inventory.revoke(root); inventory.purgeState([root], true); inventory.purgeState([root], false);
+  expect(inventory.snapshot().repositories).toEqual([]);
+  resume(); await scan;
+  expect(inventory.snapshot().repositories).toEqual([]);
+  inventory.close(); inventory = new Inventory(join(directory, 'inventory.sqlite'));
+  expect(inventory.snapshot().repositories).toEqual([]);
 });
 
 test('revocation persists and withdraws every overlapping grant across restart', async () => {

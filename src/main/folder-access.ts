@@ -13,7 +13,8 @@ export class FolderAccess {
   private pending: Promise<unknown> = Promise.resolve();
   constructor(private readonly inventory: Inventory, private readonly conversations: Conversations,
     private readonly sources: Sources, private readonly knowledge: Knowledge, private readonly resolutions: Resolutions,
-    private readonly stop: () => void, private readonly changed: () => void = () => {}) {}
+    private readonly stop: () => void, private readonly changed: () => void = () => {},
+    private readonly discardResults: (messageIds: string[]) => void = () => {}) {}
 
   revoke(path: string): string[] {
     const roots = this.inventory.revoke(path); // COMMIT before cancellation/notification.
@@ -42,7 +43,7 @@ export class FolderAccess {
     // in-flight normalization/annotation based on revoked input.
     await this.resolutions.purge(roots);
     await this.knowledge.purge(roots);
-    this.conversations.purge(roots);
+    this.discardResults(this.conversations.purge(roots));
     this.sources.purge(roots);
     this.inventory.purgeState(roots, false);
     this.changed();
