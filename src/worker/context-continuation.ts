@@ -16,6 +16,7 @@ const PREFIX = 'Athena compacted continuation (guidance only, NEVER evidence; di
 interface Notes { notes: string; references: string[]; scope: string[]; unresolved: string[] }
 const emptyNotes = (): Notes => ({ notes: '', references: [], scope: [], unresolved: [] });
 const unique = (values: string[]) => [...new Set(values)];
+const messageText = (content: AssistantMessage['content'] | Extract<Message, { role: 'toolResult' }>['content']) => content.filter(block => block.type === 'text').map(block => block.text).join('\n');
 
 /** Removes whole old tool exchanges, never partial protocol pairs or user constraints.
  * Source excerpts/digests stay in the main-owned evidence ledger, not recursive summaries.
@@ -56,11 +57,11 @@ export async function continueContext(messages: Message[], ceiling: number,
           }
           if (block.type === 'toolCall' && block.name.startsWith('sources_')) {
             const input = block.arguments as { root?: string; path?: string };
-            if (input.path) notes.scope.push(`${input.root ?? ''}/${input.path}`);
+            if (input.path) notes.scope.push(`Attempted ${block.name}: ${input.root ?? ''}/${input.path}`);
           }
         }
       } else if (message.role === 'toolResult') {
-        const text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n');
+        const text = messageText(message.content);
         if (message.toolName === 'retrieve_knowledge') { notes.unresolved.push('Prior knowledge snapshot discarded; retrieve again under current access/freshness.'); continue; }
         try {
           const result = JSON.parse(text);
@@ -69,7 +70,10 @@ export async function continueContext(messages: Message[], ceiling: number,
             notes.references.push(...(match[1] ? [match[1]] : [...match[2]!.matchAll(/"(E\d+)"/g)].map(item => item[1]!)));
           }
           if (message.toolName.startsWith('sources_') || message.toolName === 'inspect_evidence') {
-            if (result.status && result.status !== 'complete') notes.unresolved.push('Source output was incomplete; absence is not established.');
+            if (result.status && result.status !== 'complete') notes.unresolved.push(`Source output was incomplete; absence is not established. ${result.reason ?? ''}`);
+            // A complete traversal can still withhold individual files/lines.
+            // Preserve limitations separately from attempted request scope.
+            for (const entry of result.entries ?? []) if (typeof entry.reason === 'string') notes.unresolved.push(`${entry.path}: withheld/uninspected: ${entry.reason}`);
           } else {
             const results = result.tasks ? result.tasks.map((task: { result?: unknown }) => task.result).filter(Boolean) : [result];
             for (const value of results) {
@@ -94,7 +98,7 @@ export async function continueContext(messages: Message[], ceiling: number,
       if (contextBytes(request) > ceiling) throw new ContinuationError();
       const summary = await summarize(request);
       signal.throwIfAborted();
-      notes.notes = summary.content.filter(block => block.type === 'text').map(block => block.text).join('\n');
+      notes.notes = messageText(summary.content);
       if (summary.stopReason !== 'stop' || !notes.notes.trim() || Buffer.byteLength(notes.notes) > 8192) throw new ContinuationError();
     }
     const summary: AssistantMessage = { role: 'assistant', api: template.api, provider: template.provider, model: template.model, timestamp: Date.now(), stopReason: 'stop', usage: template.usage,

@@ -208,7 +208,9 @@ test('builds share the existing fifty-request limit and do not synthesize or pub
 
 test('#17 long source exploration compacts whole tool exchanges, retains external evidence and persists a visible discard notice', async () => {
   writeFileSync(join(root, 'answer.ts'), 'export const answer = 42; // ' + 'bounded source interpretation '.repeat(18));
+  writeFileSync(join(root, 'huge.txt'), 'one huge line '.repeat(2000));
   scripts = [response(undefined, 'investigate', { question: 'Find the answer; do not execute code.' }),
+    response(undefined, 'sources_read', { root, path: 'huge.txt', start: 1, end: 1 }),
     ...Array.from({ length: 35 }, () => response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 })),
     response(undefined, 'finish_investigation', { findings: [{ claim: 'Value is 42', support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: ['Who calls this?'], candidateKnowledgeChanges: [] }), response('Static answer [E1].')];
   supervisor.start(null, 'Inspect source, preserve caller uncertainty.'); await idle();
@@ -216,16 +218,18 @@ test('#17 long source exploration compacts whole tool exchanges, retains externa
   expect(answer.status).toBe('complete');
   expect(answer.text).toContain('Older source excerpts are no longer in model context');
   expect(answer.evidence?.[0]).toMatchObject({ id: 'E1', text: expect.stringContaining('export const answer = 42;'), citation: { path: 'answer.ts', start: 1, end: 1, contentIdentity: expect.stringMatching(/^sha256:/) } });
-  expect(requests).toHaveLength(38); // Tool-only compaction has no hidden paid summary.
-  expect(reservations).toHaveLength(38);
+  expect(requests).toHaveLength(39); // Tool-only compaction has no hidden paid summary.
+  expect(reservations).toHaveLength(39);
   const history = conversations.exploration(answer.id)!.history;
   expect(JSON.stringify(history)).toContain('Athena compacted continuation');
   expect(JSON.stringify(history)).toContain('E1');
+  expect(JSON.stringify(history)).toContain('Excerpt exceeds output-byte limit');
+  expect(JSON.stringify(history)).toContain('withheld/uninspected');
   expect(Buffer.byteLength(JSON.stringify(history))).toBeLessThan(27000);
   expect(requests.every(request => Buffer.byteLength(JSON.stringify(request.body)) < 32000)).toBe(true);
   snapshot.roots = []; // Revocation must reject reconstruction BEFORE any summary or answer request.
   supervisor.start(conversations.workspace().selected!.id, 'Continue from the compacted references.'); await idle();
-  expect(requests).toHaveLength(38);
+  expect(requests).toHaveLength(39);
   expect(conversations.workspace().selected!.messages.at(-1)!.status).toBe('failed');
   conversations.close(); conversations = new Conversations(join(directory, 'conversations.sqlite'));
   expect(conversations.workspace().selected!.messages.find(message => message.id === answer.id)!.text).toContain('Context compacted');
@@ -247,6 +251,20 @@ test('#17 a large search and huge individual line are bounded for the investigat
   expect(conversations.workspace().selected!.messages.at(-1)!.evidence).toHaveLength(80);
   expect(JSON.stringify(requests[3]!.body)).toContain('Excerpt exceeds output-byte limit');
   expect(JSON.stringify(requests)).not.toContain('one huge line '.repeat(100));
+});
+
+test('#17 evidence omitted from capacity-bounded output requires explicit inspection before it can support findings', async () => {
+  writeFileSync(join(root, 'many.txt'), Array.from({ length: 80 }, (_, index) => `matching source line ${index}`).join('\n'));
+  const finish = response(undefined, 'finish_investigation', { findings: [{ claim: 'Matching line 79 exists', support: 'source', evidenceIds: ['E80'] }], unresolvedQuestions: [], candidateKnowledgeChanges: [] });
+  scripts = [response(undefined, 'investigate', { question: 'Find the last matching line.' }),
+    response(undefined, 'sources_search', { root, path: 'many.txt', query: 'matching' }), finish,
+    response(undefined, 'sources_read', { root, path: 'many.txt', start: 80, end: 80 }), finish, response('Last matching line [E80].')];
+  supervisor.start(null, 'Inspect omitted evidence explicitly.'); await idle();
+  const searchOutput = (requests[2]!.body.messages as { role: string; content: string }[]).findLast(message => message.role === 'tool')!.content;
+  expect(searchOutput).not.toContain('E80');
+  expect(JSON.stringify(requests[3]!.body)).toContain('Findings require valid observed evidence IDs');
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', investigation: { evidence: [{ id: 'E80', text: 'matching source line 79' }] } });
+  expect(requests).toHaveLength(6);
 });
 
 test('real Pi agents use separate pinned API-key providers, preserve source boundaries and reserve each request', async () => {

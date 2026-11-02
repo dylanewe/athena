@@ -7,7 +7,8 @@ import type { SourceOperation, SourceResult } from '../shared/sources';
 import type { Evidence } from '../shared/live';
 
 /** Omit whole entries, never forge shortened line citations. Full evidence stays in main. */
-function modelSourceResult(result: SourceResult & { evidence?: Evidence[] }, maximum: number): unknown {
+type ModelSourceResult = SourceResult & { evidence?: Evidence[] };
+function modelSourceResult(result: ModelSourceResult, maximum: number): ModelSourceResult {
   if (Buffer.byteLength(JSON.stringify(result)) <= maximum) return result;
   const bounded: SourceResult & { evidence?: Evidence[] } = { entries: [], evidence: [], status: 'truncated', scanned: result.scanned, bytesRead: result.bytesRead,
     warning: 'Model-capacity bound: some entries/identities/excerpts were omitted, not inspected by this context. Request a narrower file/range/query. An oversized individual line cannot be shortened into a valid full-line citation.', reason: 'Model-capacity output limit.' };
@@ -20,7 +21,7 @@ function modelSourceResult(result: SourceResult & { evidence?: Evidence[] }, max
 }
 
 /** Local capabilities only. Caller supplies the authorized, cancellable job boundary. */
-export function sourceTools(sources: Pick<Sources, 'run'>, check: (material: unknown) => void = checkBeforeModelSend, maximumBytes = Infinity): AgentTool[] {
+export function sourceTools(sources: Pick<Sources, 'run'>, check: (material: unknown) => void = checkBeforeModelSend, maximumBytes = Infinity, delivered?: (result: ModelSourceResult) => void): AgentTool[] {
   return (['list', 'search', 'read'] as const).map((operation: SourceOperation): AgentTool => ({
     name: `sources_${operation}`,
     label: `Sources: ${operation}`,
@@ -36,7 +37,11 @@ export function sourceTools(sources: Pick<Sources, 'run'>, check: (material: unk
         const result = await sources.run(operation, sourceRequest(operation, params), signal);
         // Includes filenames, citations, and all tool-facing metadata, not only excerpts.
         check(result);
-        return { content: [{ type: 'text', text: JSON.stringify(modelSourceResult(result, maximumBytes)) }], details: { status: result.status } };
+        const bounded = modelSourceResult(result, maximumBytes);
+        const text = JSON.stringify(bounded);
+        // Retained by main is not the same as observed by this model context.
+        delivered?.(bounded);
+        return { content: [{ type: 'text', text }], details: { status: bounded.status } };
       } catch {
         return { content: [{ type: 'text', text: 'Source request rejected by access or secret checks.' }], details: {}, isError: true };
       }

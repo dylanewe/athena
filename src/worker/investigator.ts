@@ -37,14 +37,15 @@ function singleInvestigator(roots: LiveStart['roots'], runtime: InvestigatorRunt
       const sources = sourceTools({ run: async (operation, input) => {
         signal.throwIfAborted();
         const result = await runtime.source(operation, input);
-        for (const item of result.evidence) if (!observed.some(previous => previous.id === item.id)) observed.push(item);
         const fullLocation = `${input.root}/${input.path}`;
         const location = fullLocation.slice(0, 512);
         if (location.length < fullLocation.length) scopeTruncated = true;
         if (!scope.includes(location)) { if (scope.length < INVESTIGATION_LIMITS.scope) scope.push(location); else scopeTruncated = true; }
         runtime.progress(`Investigator: ${operation} ${input.path}`.slice(0, 200));
         return result;
-      } }, runtime.check, runtime.sourceBytes);
+      } }, runtime.check, runtime.sourceBytes, delivered => {
+        for (const item of delivered.evidence ?? []) if (!observed.some(previous => previous.id === item.id)) observed.push(item);
+      });
       const finish: AgentTool = {
         name: 'finish_investigation', label: 'Return findings',
         description: 'Finish with bounded findings, evidence IDs, unresolved questions, and candidate knowledge changes (proposals only, never writes). Source-supported findings require observed evidence; interpretation is explicitly uncertain. No runtime observation is available.',
