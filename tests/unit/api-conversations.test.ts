@@ -23,8 +23,8 @@ let changed: () => void;
 function knowledgeCandidate(claim = 'The answer boundary owns the application answer value.') {
   return { id: 'C1', scope: `folder:${root}`, topic: 'Answer boundary', summary: 'A synchronous answer boundary.', kind: 'responsibility', claim, provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [] };
 }
-const response = (text?: string, tool?: string, args?: unknown) => [
-  { choices: [{ index: 0, delta: { role: 'assistant', ...(tool ? { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: tool, arguments: JSON.stringify(tool === 'retrieve_knowledge' ? { request: args } : args) } }] } : { content: text }) }, finish_reason: null }] },
+const response = (text?: string, tool?: string | { name: string; args: unknown }[], args?: unknown) => [
+  { choices: [{ index: 0, delta: { role: 'assistant', ...(tool ? { ...(text ? { content: text } : {}), tool_calls: (typeof tool === 'string' ? [{ name: tool, args }] : tool).map((call, index) => ({ index, id: `call_${index + 1}`, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.name === 'retrieve_knowledge' ? { request: call.args } : call.args) } })) } : { content: text }) }, finish_reason: null }] },
   { choices: [{ index: 0, delta: {}, finish_reason: tool ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 } },
 ].map(value => 'data: ' + JSON.stringify({ id: 'test', ...value }) + '\n\n').join('') + 'data: [DONE]\n\n';
 function configuration(name = 'Main one', endpoint = 'https://main.example/v1') {
@@ -267,26 +267,29 @@ test('#17 evidence omitted from capacity-bounded output requires explicit inspec
   expect(requests).toHaveLength(6);
 });
 
-test('#17 compacted-away investigator evidence cannot support findings until explicitly redelivered', async () => {
+test.each([false, true])('#17 compacted-away investigator evidence requires a subsequent request after redelivery (same response=%s)', async sameResponse => {
   const firstText = 'export const answer = 42; // FIRST_EXCERPT_REQUIRES_REDELIVERY';
   writeFileSync(join(root, 'answer.ts'), firstText);
   writeFileSync(join(root, 'other.ts'), 'export const other = 7; // ' + 'bounded unrelated implementation '.repeat(18));
   const finish = response(undefined, 'finish_investigation', { findings: [{ claim: 'Value is 42', support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: [], candidateKnowledgeChanges: [] });
   scripts = [response(undefined, 'investigate', { question: 'Find the answer, preserving source eligibility.' }),
     response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }),
-    ...Array.from({ length: 31 }, () => response(undefined, 'sources_read', { root, path: 'other.ts', start: 1, end: 1 })), finish,
-    response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }), finish, response('Answer after explicit source reinspection [E1].')];
+    ...Array.from({ length: 31 }, () => response(undefined, 'sources_read', { root, path: 'other.ts', start: 1, end: 1 })),
+    ...(sameResponse ? [response(undefined, [{ name: 'sources_read', args: { root, path: 'answer.ts', start: 1, end: 1 } },
+      { name: 'finish_investigation', args: { findings: [{ claim: 'Value is 42', support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: [], candidateKnowledgeChanges: [] } }])]
+      : [finish, response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 })]),
+    finish, response('Answer after explicit source reinspection [E1].')];
   supervisor.start(null, 'Keep evidence eligibility honest across compaction.'); await idle();
   const rejectedFinish = requests.find(request => JSON.stringify(request.body).includes('Reinspect discarded or omitted evidence'));
   expect(rejectedFinish).toBeDefined();
   expect(JSON.stringify(rejectedFinish!.body)).toContain('Athena compacted continuation');
-  expect(JSON.stringify(rejectedFinish!.body)).not.toContain('FIRST_EXCERPT_REQUIRES_REDELIVERY');
+  expect(JSON.stringify(requests[33]!.body)).not.toContain('FIRST_EXCERPT_REQUIRES_REDELIVERY');
   expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', investigation: { evidence: [{ id: 'E1', text: firstText }] } });
-  expect(requests).toHaveLength(37);
-  expect(reservations).toHaveLength(37);
+  expect(requests).toHaveLength(sameResponse ? 36 : 37);
+  expect(reservations).toHaveLength(requests.length);
 });
 
-test.each([false, true])('#17 main citations after compaction require active-context reinspection (redelivery=%s)', async redeliver => {
+test.each([false, true, 'with-claim'] as const)('#17 main citations after compaction require prior-request reinspection (redelivery=%s)', async redeliver => {
   writeFileSync(join(root, 'answer.ts'), 'export const answer = 42; // MAIN_EXCERPT_REQUIRES_REDELIVERY');
   writeFileSync(join(root, 'other.ts'), 'export const other = 7; // ' + 'bounded unrelated implementation '.repeat(18));
   scripts = [response(undefined, 'investigate', { question: 'Find both values.' }),
@@ -294,7 +297,8 @@ test.each([false, true])('#17 main citations after compaction require active-con
     response(undefined, 'sources_read', { root, path: 'other.ts', start: 1, end: 1 }),
     response(undefined, 'finish_investigation', { findings: [{ claim: 'The two values differ', support: 'source', evidenceIds: ['E1', 'E2'] }], unresolvedQuestions: [], candidateKnowledgeChanges: [] }),
     ...Array.from({ length: 32 }, () => response(undefined, 'inspect_evidence', { ids: ['E2'] })),
-    ...(redeliver ? [response(undefined, 'inspect_evidence', { ids: ['E1'] })] : []), response('Value is 42 [E1].')];
+    ...(redeliver === true ? [response(undefined, 'inspect_evidence', { ids: ['E1'] })] : []),
+    ...(redeliver === 'with-claim' ? [response('Value is 42 [E1].', 'inspect_evidence', { ids: ['E1'] }), response('Done.')] : [response('Value is 42 [E1].')])];
   http = async (url, init) => {
     const body = JSON.parse(String(init?.body));
     requests.push({ url: String(url), body, headers: new Headers(init?.headers) });
@@ -303,10 +307,10 @@ test.each([false, true])('#17 main citations after compaction require active-con
   supervisor.start(null, 'Compare the values while retaining evidence eligibility.'); await idle();
   const answer = conversations.workspace().selected!.messages.at(-1)!;
   expect(answer.text).toContain('Context compacted');
-  expect(answer.status).toBe(redeliver ? 'complete' : 'partial');
-  if (redeliver) expect(JSON.stringify(requests.at(-1)!.body)).toContain('MAIN_EXCERPT_REQUIRES_REDELIVERY');
+  expect(answer.status).toBe(redeliver === true ? 'complete' : 'partial');
+  if (redeliver === true) expect(JSON.stringify(requests.at(-1)!.body)).toContain('MAIN_EXCERPT_REQUIRES_REDELIVERY');
   else {
-    expect(JSON.stringify(requests.at(-1)!.body)).not.toContain('MAIN_EXCERPT_REQUIRES_REDELIVERY');
+    expect(JSON.stringify(requests.at(redeliver === 'with-claim' ? -2 : -1)!.body)).not.toContain('MAIN_EXCERPT_REQUIRES_REDELIVERY');
     expect(answer.text).toContain('Reinspect retained evidence');
     expect(conversations.liveContext(conversations.workspace().selected!.id).history).toEqual([]);
   }

@@ -33,7 +33,8 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
   let text = '', activity = job.apiKey ? 'Preparing API-key model…' : 'Preparing ChatGPT…', requests = 0, limited = false, usageComplete = true, limitNotice = '';
   let exploration: Exploration | undefined, title: string | undefined;
   const continuationNotices = new Set<string>();
-  let compactions = 0;
+  let compactions = 0, unsupportedCitations = false;
+  const requestEvidence = new WeakMap<Agent, ReadonlySet<string>>();
   let investigators: InvestigatorTask[] = [];
   const usage: ChatGPTUsage = { input: 0, output: 0, cachedInput: 0 };
   const observations: StreamObservation[] = [];
@@ -130,6 +131,16 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
             capabilities.progress(text, activity);
           }
           if (contextBytes(original) > ceiling) throw new ContinuationError();
+          // Freeze eligibility from the request input, before generated tool calls
+          // can append results. Same-response reads cannot validate earlier claims.
+          const eligible = contextEvidenceIds(original);
+          // Explicit builds supply bounded results as application-owned initial
+          // input; they are eligible only while that exact payload is still present.
+          if (role === 'main' && job.build && buildResults && original.some(message => message.role === 'user' &&
+              (typeof message.content === 'string' ? message.content : message.content.filter(block => block.type === 'text').map(block => block.text).join('')).endsWith(buildResults))) {
+            for (const task of investigators) for (const evidence of task.result?.evidence ?? []) eligible.add(evidence.id);
+          }
+          requestEvidence.set(agent, eligible);
           return original;
         } catch (error) {
           if (!signal.aborted) continuationNotices.add(error instanceof ContinuationError ? error.message : new ContinuationError().message);
@@ -146,7 +157,10 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
       if (event.type === 'message_end' && event.message.role === 'assistant') {
         if (role === 'main' && ['stop', 'toolUse'].includes(event.message.stopReason)) {
           const finalized = event.message.content.filter(block => block.type === 'text').map(block => block.text).join('');
-          if (finalized) finalizedText.push(finalized);
+          if (finalized) {
+            finalizedText.push(finalized);
+            if ([...finalized.matchAll(/\[(E\d+)\]/g)].some(match => !requestEvidence.get(agent)?.has(match[1]!))) unsupportedCitations = true;
+          }
         }
       }
       if (event.type === 'message_update' && event.assistantMessageEvent.type === 'text_delta' && role === 'main') {
@@ -180,6 +194,7 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
     knowledge: scope => scope && buildLeads.has(scope) ? buildLeads.get(scope)! : retainedLeads,
     tasks: value => { investigators = value; capabilities.checkpoint?.({ investigators }); },
     createAgent: (tools, prompt) => createAgent('investigator', tools, prompt),
+    evidenceIds: agent => requestEvidence.get(agent) ?? new Set(),
     source: async (operation, input) => {
       const result = await capabilities.source(operation, input);
       environment.observe(result);
@@ -250,19 +265,10 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
   if (text.length > LIVE_LIMITS.answerCharacters) limited = true;
   const reason = observations.findLast(observation => observation.failure)?.failure;
   const anyCompleted = investigators.some(task => task.status === 'complete');
-  const activeIds = contextEvidenceIds(agent.state.messages as Message[]);
-  // Explicit builds supply their main-owned bounded results in the initial user
-  // input, not a model-invoked tool result. They grant eligibility only while that
-  // exact application-supplied payload remains present (never from arbitrary prose).
-  if (job.build && buildResults && agent.state.messages.some(message => message.role === 'user' &&
-      (typeof message.content === 'string' ? message.content : message.content.filter(block => block.type === 'text').map(block => block.text).join('')).endsWith(buildResults))) {
-    for (const task of investigators) for (const evidence of task.result?.evidence ?? []) activeIds.add(evidence.id);
-  }
-  const unsupportedCitations = [...text.matchAll(/\[(E\d+)\]/g)].some(match => !activeIds.has(match[1]!));
   const partial = unsupportedCitations || continuationNotices.size > 0 || exploration?.result.status === 'partial' || investigators.some(task => task.status !== 'complete');
   const outcomeNotice = (limited || !historyFits ? '\n\n' + (limitNotice || 'Local output/history limit reached. Start a new conversation.') : '') +
     (continuationNotices.size ? '\n\n' + [...continuationNotices].join('\n')
-      : unsupportedCitations ? '\n\nPartial: cited source excerpts are not in active model context. Reinspect retained evidence before citing it; summaries are not evidence. Narrow follow-up: inspect the cited IDs and answer one unresolved question.'
+      : unsupportedCitations ? '\n\nPartial: cited source excerpts were not in the input that generated a claim. Reinspect retained evidence in a prior request before citing it; summaries are not evidence. Narrow follow-up: inspect the cited IDs and answer one unresolved question.'
       : partial ? '\n\nPartial: some investigators did not complete. Successful findings are retained; missing results remain unknown.'
       : !success && anyCompleted ? '\n\nPartial: final synthesis failed. Successful findings remain available.' : '');
   const notice = outcomeNotice + (compactions ? `\n\nContext compacted ${compactions} time(s). Older source excerpts are no longer in model context; retained references require source reinspection. Summaries are guidance, not evidence.` : '');
