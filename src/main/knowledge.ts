@@ -28,6 +28,7 @@ interface Publication {
 }
 type Stored = Omit<KnowledgeRecord, 'owners' | 'relations'> & { derivation?: string };
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const physicalOwnership = (sources: SourceIdentity[]) => digest([...new Set(sources.map(source => JSON.stringify([source.folder, source.path])))].sort());
 
 /** Sole writer of rebuildable knowledge. Model output is data, never SQL or authority. */
 export class Knowledge {
@@ -273,7 +274,14 @@ export class Knowledge {
         evidence: ordered(evidence.map(({ citation, text }) => ({ ...sourceIdentity(citation), start: citation.start, end: citation.end, text }))),
         dependencies: ordered(dependencies.map(sourceIdentity)),
         scopes: ordered(scopes.map(scope => ({ ...sourceIdentity(scope), operation: scope.operation, query: scope.query }))) });
-      let id = 'K' + digest({ derivation, checkouts: checkouts.map(item => ({ scope: this.scope(item), identity: item.contentIdentity })).sort((a, b) => a.scope.localeCompare(b.scope)) });
+      // Repository names identify assertions, not revocable physical support.
+      // Fresh extraction after reconnection gets a separate owned contribution;
+      // otherwise an old grant's evidence would poison independent new support.
+      const ownership = physicalOwnership([...dependencies, ...scopes]);
+      const checkoutIdentity = (snapshots: SourceCheckout[]) => snapshots.map(item => ({ scope: this.scope(item), identity: item.contentIdentity })).sort((a, b) => a.scope.localeCompare(b.scope));
+      const compatible = existing.find(item => item.derivation === derivation && physicalOwnership([...item.dependencies, ...item.scopes]) === ownership && digest(checkoutIdentity(item.checkouts ?? [])) === digest(checkoutIdentity(checkouts)));
+      // Preserve pre-#19 IDs for repeated normalization of the same owned input.
+      let id = compatible?.id ?? 'K' + digest({ derivation, ownership, checkouts: checkoutIdentity(checkouts) });
       // Revalidation creates a new contribution; it cannot revive old shared ownership/edges.
       while (this.db.prepare('SELECT 1 FROM invalidations WHERE claim_id = ?').get(id)) id = 'K' + digest({ id, owner: input.owner });
       const supported = candidate.provenance === 'declared' && candidate.perspective !== 'current' && evidence.some(item => item.text.split(/\r?\n/).some(line => line.trim() === material.claim));

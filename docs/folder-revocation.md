@@ -8,7 +8,7 @@ Sources recheck current permission throughout IO and before releasing results. R
 
 Conversations remain local and carry **Revoked sources** labels. Source-associated conversations, including their later turns, are excluded from protocol replay, bounded historical reconstruction, retries and deferred title generation. New explicit questions can still use current settings without reusing the revoked history. Saved citations are historical, not current evidence.
 
-Jobs retain the authorized root catalogue they received at start. Because free-form text and uncheckpointed child work cannot reliably be attributed to individual files, the whole current job is stopped and conversations are conservatively associated with every folder made available to that job. Legacy conversations are associated by persisted citations, tool requests, checkout/build scopes and exploration envelopes. A source-free later turn does not erase earlier ownership.
+Jobs retain the authorized root catalogue they received at start. Because free-form text and uncheckpointed child work cannot reliably be attributed to individual files, the whole current job is stopped and conversations are conservatively associated with every folder made available to that job. Legacy conversations are associated by persisted citations, JSON-encoded tool results, checkout/build scopes and exploration envelopes. Legacy knowledge-only attempts that retained claim references but compacted away their source envelopes and have no root catalogue are conservatively associated with withdrawn folders rather than assumed source-free. A source-free later turn does not erase earlier ownership.
 
 Revocation cannot recall data already transmitted to providers or undo incurred usage.
 
@@ -24,7 +24,7 @@ Purge removes:
 - entire associated conversations, their titles, attempts, transcripts, evidence, later turns and in-memory ephemeral displays;
 - affected source exceptions and repository inventory metadata.
 
-Independently source-supported contributions remain even when their topic/claim wording matches a removed contribution. Identity reconciliation does not equate all claims about the same topic. Removing a required dependency removes the dependent assertion, not just its edge. Settings and unrelated conversations remain. Repository files are never written.
+Independently source-supported contributions remain even when their topic/claim wording matches a removed contribution. Fresh normalization after an explicit repository reconnection retains a separate physically owned contribution; it does not union the new evidence into the old grant's ownership. Repeated normalization of the same owned input preserves existing IDs, including pre-#19 IDs. Identity reconciliation does not equate all claims about the same topic. Removing a required dependency removes the dependent assertion, not just its edge. Settings and unrelated conversations remain. Repository files are never written.
 
 The minimal revoked-grant record remains to prevent resurrection. SQLite secure deletion is enabled, FTS secure-delete removes obsolete postings, and completed cleanup checkpoints/truncates WALs. This is application-level deletion, **not** a forensic-erasure guarantee for storage blocks, OS snapshots or external backups.
 

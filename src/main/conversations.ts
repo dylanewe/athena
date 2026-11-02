@@ -113,6 +113,11 @@ export class Conversations {
     if (!roots.length) return [];
     return [...new Set(this.db.prepare(`SELECT m.conversation_id, a.* FROM live_attempts a JOIN messages m ON m.id = a.message_id`).all().filter(row => {
       const grants = JSON.parse(String(row.source_roots)) as string[];
+      const result = row.result ? JSON.parse(String(row.result)) : {};
+      // Pre-#19 knowledge-only attempts may have compacted away every citation.
+      // A referenced interpretation without a recorded root catalogue cannot be
+      // proven independent of a withdrawn folder. Retain/purge it conservatively.
+      if (!grants.length && result.knowledgeReferences?.length) return true;
       return grants.some(grant => roots.some(root => overlaps(root, grant))) ||
         ['history', 'evidence', 'result', 'exploration', 'build_scope'].some(key => row[key] && associatedMaterial(JSON.parse(String(row[key])), roots));
     }).map(row => String(row.conversation_id)))];

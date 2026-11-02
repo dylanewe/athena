@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, renameSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
@@ -47,6 +47,34 @@ beforeEach(async () => {
   await inventory.designate(left, FOLDER_CONSENT); await inventory.designate(right, FOLDER_CONSENT); await inventory.scan();
 });
 afterEach(() => { vi.restoreAllMocks(); close(); rmSync(directory, { recursive: true, force: true }); });
+
+test.each(['serialized-knowledge', 'compacted-knowledge'] as const)('legacy %s history cannot escape withdrawal labels, context filtering or purge', async encoding => {
+  const observed = await evidence(left);
+  const history: LiveResult['history'] = encoding === 'serialized-knowledge'
+    ? [{ role: 'toolResult', toolCallId: 'lookup', toolName: 'retrieve_knowledge', timestamp: 0, isError: false, content: [{ type: 'text', text: JSON.stringify({ items: [{ claim: 'Private lead', evidence: [{ citation: observed[0].citation }] }] }) }] }]
+    : [{ role: 'user', timestamp: 0, content: 'Private compacted interpretation; source envelopes were discarded.' }];
+  // Pre-#19 attempts have no root catalogue and may never have acquired E evidence.
+  const job = conversations.beginLive(null, 'Legacy knowledge question', binding);
+  conversations.finishLive(job.messageId, { ...result, history, ...(encoding === 'compacted-knowledge' ? { knowledgeReferences: [{ id: 'K' + 'a'.repeat(64), topic: 'Private lead' }] } : {}) }, []);
+  access.revoke(left);
+  expect(conversations.workspace().selected?.revokedSources).toEqual([left]);
+  expect(conversations.resumeContext(job.conversationId).history).toEqual([]);
+  await access.purge(left, PURGE_CONFIRMATION);
+  expect(conversations.workspace().conversations).toEqual([]);
+});
+
+test('fresh support at a reconnected independently authorized location survives withdrawal and purge of the original grant', async () => {
+  const [original] = await publish(left);
+  const moved = join(right, 'relocated'); renameSync(left, moved);
+  await inventory.scan(); inventory.reconnect('left', moved);
+  const entry = (await sources.run('read', { root: right, path: 'relocated/source.ts', start: 1, end: 1 })).entries[0];
+  const [fresh] = await knowledge.publish({ owner: { conversationId: 'fresh', messageId: 'fresh' }, evidence: [{ id: 'E1', citation: entry.citation!, text: entry.text! }], candidates: [candidate('left')], completed: true, environmentExposed: false, signal: new AbortController().signal });
+  expect(fresh).not.toBe(original);
+  access.revoke(left);
+  expect((await knowledge.retrieve({ operation: 'evidence', id: fresh, index: 0 })).evidence?.citation.folder).toBe(right);
+  await access.purge(left, PURGE_CONFIRMATION);
+  expect((await knowledge.inspect()).map(record => record.id)).toEqual([fresh]);
+});
 
 test('withdrawal filters cached excerpts, history, annotations and dependent assertions but preserves independently supported shared knowledge', async () => {
   const [privateId] = await publish(left);
