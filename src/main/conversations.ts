@@ -1,3 +1,4 @@
+import { associatedMaterial, overlaps } from './source-ownership';
 import type { BuildCoverage, BuildScope } from '../shared/build';
 import { randomUUID } from 'node:crypto';
 import { checkBeforeModelSend, environmentValues } from './secret-check';
@@ -39,9 +40,10 @@ export class Conversations {
     if (inspect(material)) throw new Error('Known environment content withheld.');
   }
 
-  constructor(path: string) {
+  constructor(path: string, private readonly revokedRoots: () => string[] = () => []) {
     this.db = new DatabaseSync(path);
     this.db.exec(`
+      PRAGMA secure_delete = ON;
       PRAGMA foreign_keys = ON;
       PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS conversations (
@@ -78,6 +80,8 @@ export class Conversations {
     if (!attempts.includes('ephemeral')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN ephemeral INTEGER NOT NULL DEFAULT 0');
     if (!attempts.includes('build_scope')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN build_scope TEXT');
     if (!attempts.includes('exploration')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN exploration TEXT');
+    if (!attempts.includes('source_roots')) this.db.exec("ALTER TABLE live_attempts ADD COLUMN source_roots TEXT NOT NULL DEFAULT '[]'");
+    this.db.exec('CREATE TABLE IF NOT EXISTS revoked_sources (path TEXT PRIMARY KEY)');
     // Earlier releases pinned one binding per conversation. Backfill original
     // attempt identities and saved build scopes before allowing model changes.
     this.db.exec(`UPDATE live_attempts SET binding = (SELECT c.binding FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.id = message_id) WHERE binding IS NULL;
@@ -102,10 +106,44 @@ export class Conversations {
       WHERE json_extract(result, '$.status') = 'cancelled' AND json_extract(result, '$.investigation.status') = 'complete';`);
   }
 
+  private withdrawn(): string[] {
+    return [...new Set([...this.revokedRoots(), ...this.db.prepare('SELECT path FROM revoked_sources').all().map(row => String(row.path))])];
+  }
+  private associatedConversations(roots: string[]): string[] {
+    if (!roots.length) return [];
+    return [...new Set(this.db.prepare(`SELECT m.conversation_id, a.* FROM live_attempts a JOIN messages m ON m.id = a.message_id`).all().filter(row => {
+      const grants = JSON.parse(String(row.source_roots)) as string[];
+      return grants.some(grant => roots.some(root => overlaps(root, grant))) ||
+        ['history', 'evidence', 'result', 'exploration', 'build_scope'].some(key => row[key] && associatedMaterial(JSON.parse(String(row[key])), roots));
+    }).map(row => String(row.conversation_id)))];
+  }
+  revokedSources(id: string): string[] {
+    return this.withdrawn().filter(root => this.associatedConversations([root]).includes(id));
+  }
+  revoke(roots: string[]): void {
+    this.transaction(() => { for (const root of roots) this.db.prepare('INSERT OR IGNORE INTO revoked_sources VALUES (?)').run(root); });
+  }
+  /** Whole associated conversations are removed: free-form prose cannot safely be
+   * separated into source-owned fragments. This also removes their later turns. */
+  purge(roots: string[]): void {
+    const ids = this.associatedConversations(roots);
+    this.transaction(() => {
+      for (const id of ids) {
+        const messages = this.db.prepare('SELECT id FROM messages WHERE conversation_id = ?').all(id);
+        for (const message of messages) { this.ephemeral.delete(String(message.id)); this.db.prepare('DELETE FROM live_attempts WHERE message_id = ?').run(message.id!); }
+        this.db.prepare('DELETE FROM messages WHERE conversation_id = ?').run(id);
+        this.db.prepare('DELETE FROM conversations WHERE id = ?').run(id);
+      }
+    });
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  }
+
   workspace(): Workspace {
-    const conversations = this.db.prepare('SELECT id, title, binding, sealed, scope FROM conversations ORDER BY rowid').all().map(row => ({
-      id: String(row.id), title: String(row.title), ...(row.scope ? { scope: JSON.parse(String(row.scope)) as BuildScope } : {}), ...(row.sealed ? { sealed: true } : {}), ...(row.binding ? { kind: (JSON.parse(String(row.binding)) as ConversationBinding).apiKey ? 'api-key' as const : 'chatgpt' as const, model: (JSON.parse(String(row.binding)) as ConversationBinding).model } : {}),
-    })) as ConversationSummary[];
+    const conversations = this.db.prepare('SELECT id, title, binding, sealed, scope FROM conversations ORDER BY rowid').all().map(row => {
+      const revokedSources = this.revokedSources(String(row.id));
+      return {
+      id: String(row.id), title: String(row.title), ...(revokedSources.length ? { revokedSources } : {}), ...(row.scope ? { scope: JSON.parse(String(row.scope)) as BuildScope } : {}), ...(row.sealed ? { sealed: true } : {}), ...(row.binding ? { kind: (JSON.parse(String(row.binding)) as ConversationBinding).apiKey ? 'api-key' as const : 'chatgpt' as const, model: (JSON.parse(String(row.binding)) as ConversationBinding).model } : {}),
+    }; }) as ConversationSummary[];
     const selectedId = this.db.prepare("SELECT value FROM settings WHERE key = 'selected'").get()?.value;
     const summary = conversations.find(conversation => conversation.id === selectedId);
     const messages = summary ? this.db.prepare(
@@ -126,6 +164,7 @@ export class Conversations {
     const active = this.db.prepare("SELECT conversation_id FROM messages WHERE status = 'running'").get();
     return {
       conversations,
+      sourceAccessVersion: JSON.stringify(this.withdrawn().sort()),
       selected: summary ? { ...summary, messages } : null,
       activeConversationId: active ? String(active.conversation_id) : null,
       maxInvestigators: this.maxInvestigators(),
@@ -202,6 +241,7 @@ export class Conversations {
 
   naming(id: string): { needsTitle: boolean; titlePrompt?: string; messageId?: string } {
     this.requireConversation(id);
+    if (this.revokedSources(id).length) return { needsTitle: false };
     if (this.db.prepare('SELECT model_title FROM conversations WHERE id = ?').get(id)?.model_title) return { needsTitle: false };
     const first = this.db.prepare("SELECT id, text FROM messages WHERE conversation_id = ? AND role = 'user' ORDER BY rowid LIMIT 1").get(id);
     const attempt = first && this.db.prepare('SELECT message_id FROM live_attempts WHERE user_id = ? ORDER BY rowid LIMIT 1').get(first.id!);
@@ -210,6 +250,7 @@ export class Conversations {
 
   liveContext(id: string): { history: PiMessage[]; evidence: Evidence[]; checkouts?: SourceCheckout[]; sourceBacked?: boolean } {
     this.binding(id);
+    if (this.revokedSources(id).length) return { history: [], evidence: [], sourceBacked: true };
     if (this.db.prepare('SELECT sealed FROM conversations WHERE id = ?').get(id)?.sealed) return { history: [], evidence: [] };
     const row = this.db.prepare(`SELECT a.history, a.evidence, a.result FROM live_attempts a JOIN messages m ON m.id = a.message_id
       WHERE m.conversation_id = ? AND m.status = 'complete' ORDER BY m.rowid DESC LIMIT 1`).get(id);
@@ -225,6 +266,7 @@ export class Conversations {
    * incomplete answer text from that lookup must never be sent as context. */
   resumeContext(id: string, messageId?: string): ReturnType<Conversations['liveContext']> {
     this.binding(id);
+    if (this.revokedSources(id).length) return { history: [], evidence: [], sourceBacked: true };
     if (this.db.prepare('SELECT sealed FROM conversations WHERE id = ?').get(id)?.sealed) return { history: [], evidence: [] };
     const row = this.db.prepare(`SELECT substr(a.prompt, 1, 1024) AS prompt, substr(m.text, 1, 1024) AS answer, a.evidence,
       json_extract(a.result, '$.checkouts') AS checkouts,
@@ -236,7 +278,7 @@ export class Conversations {
       evidence: JSON.parse(String(row.evidence)), ...(row.checkouts ? { checkouts: JSON.parse(String(row.checkouts)) } : {}), ...(row.inspected && JSON.parse(String(row.inspected)).length ? { sourceBacked: true } : {}) };
   }
 
-  beginLive(id: string | null, prompt: string, binding: ConversationBinding, retryId?: string, build?: BuildScope): { conversationId: string; messageId: string; prompt: string } {
+  beginLive(id: string | null, prompt: string, binding: ConversationBinding, retryId?: string, build?: BuildScope, sourceRoots: string[] = []): { conversationId: string; messageId: string; prompt: string } {
     if (this.workspace().activeConversationId) throw new Error('A conversation is already running.');
     let userId: string = randomUUID();
     if (retryId) {
@@ -244,6 +286,7 @@ export class Conversations {
         JOIN live_attempts a ON a.message_id = m.id WHERE m.id = ?`).get(retryId);
       if (!previous || previous.status === 'complete' || previous.status === 'running') throw new Error('Attempt cannot be retried.');
       id = String(previous.conversation_id);
+      if (this.revokedSources(id).length) throw new Error('Revoked-source history cannot be retried. Start a fresh question.');
       const last = this.db.prepare('SELECT id FROM messages WHERE conversation_id = ? ORDER BY rowid DESC LIMIT 1').get(id);
       if (last?.id !== retryId) throw new Error('Only the latest incomplete attempt can be retried.');
       prompt = String(previous.prompt); userId = String(previous.user_id);
@@ -263,7 +306,7 @@ export class Conversations {
       const insert = this.db.prepare('INSERT INTO messages(id, conversation_id, role, text, status) VALUES (?, ?, ?, ?, ?)');
       if (!retryId) insert.run(userId, id, 'user', prompt.trim(), 'complete');
       insert.run(messageId, id, 'assistant', '', 'running');
-      this.db.prepare('INSERT INTO live_attempts(message_id, user_id, prompt, build_scope, binding) VALUES (?, ?, ?, ?, ?)').run(messageId, userId, prompt.trim(), build ? JSON.stringify(build) : null, JSON.stringify(binding));
+      this.db.prepare('INSERT INTO live_attempts(message_id, user_id, prompt, build_scope, binding, source_roots) VALUES (?, ?, ?, ?, ?, ?)').run(messageId, userId, prompt.trim(), build ? JSON.stringify(build) : null, JSON.stringify(binding), JSON.stringify(sourceRoots));
     });
     return { conversationId: id!, messageId, prompt: prompt.trim() };
   }
@@ -323,6 +366,7 @@ export class Conversations {
   }
 
   finishLive(messageId: string, result: LiveResult, evidence: Evidence[]): void {
+    if (!this.db.prepare('SELECT 1 FROM live_attempts WHERE message_id = ?').get(messageId)) return; // Purged attempts never return via late/save-retry events.
     if (this.protect(messageId, { result, evidence })) {
       const status = result.status;
       this.ephemeral.set(messageId, { text: result.text, status, ephemeral: true, requests: result.requests, usage: result.usage, usageComplete: result.usageComplete, activity: undefined });

@@ -69,6 +69,10 @@ Hidden directories, dependencies (`node_modules`, `vendor`, `vendors`, `bower_co
 
 Repository inventory organizes knowledge; it is not per-repository authorization. No manifest or cross-repository opaque ID is required. Discovery reads directory entries and bounded Git pointer files, never invokes Git or executes repository code, and never writes investigated repositories. Boundary checks reject symlink paths and recheck persisted roots; this is trusted application filesystem traversal, **not an OS sandbox against hostile concurrent filesystem mutation**. Future investigation must validate permissions again when opening material; this inventory is not a reusable filesystem-access capability.
 
+## Revoke a folder or purge local data (#19)
+
+In **Repositories → Designated folders**, **Revoke folder access** immediately stops current/queued work and withdraws all connected overlapping grants. Aliases cannot restore the revoked evidence. Local conversations remain with **Revoked sources** labels, excluded from future model context; previously transmitted provider data cannot be recalled. **Purge associated local data…** separately requires destructive confirmation and removes associated evidence, knowledge/dependent assertions, annotations and whole conversations. Independently supported knowledge and unrelated settings remain. Interrupted purges resume before the window opens on restart. Revoked grants cannot be implicitly restored by selecting an overlapping folder again. See [ownership, conservative conversation association, overlap policy and purge recovery](docs/folder-revocation.md).
+
 ## Exceptional environment-file access (#7)
 
 A denied investigator environment-file read offers separate **Approve local inspection** and **Approve external processing** controls for the exact file and current job. Local previews never enter model context. External approval seals the conversation before content release: derived answers are visibly ephemeral, never saved or replayed. **Revoke and stop investigation** expires permissions and stops affected work, but cannot recall data already sent. Start a new conversation after an exposed investigation; restart retains only a safe placeholder. Examples/templates keep ordinary file and secret checks. See [permissions, conservative persistence policy, and deterministic tests](docs/environment-access.md).
@@ -141,6 +145,7 @@ No provider account or live API key is required. Desktop tests use real SQLite, 
 | --- | --- |
 | `src/main/knowledge.ts`, `knowledge-retrieval.ts`, `knowledge-bridge.ts`, `src/shared/knowledge.ts` | Transactional normalization/publication, freshness/identity reconciliation, SQLite FTS/name retrieval and bounded read-only inspection IPC |
 | `src/main/operation-flows.ts`, `src/renderer/Flows.svelte` | Named-operation candidate reference validation inside central publication and read-only ordered flow navigation |
+| `src/main/folder-access.ts`, `source-ownership.ts` | Durable folder withdrawal, original physical ownership, explicit purge and restart-safe cleanup orchestration |
 | `src/main/conversations.ts` | Durable conversation transactions and interruption recovery |
 | `src/main/bridge.ts` | Caller authorization and conversation request validation |
 | `src/main/inventory.ts` | Local discovery, filesystem boundaries, stable repository identities, consent and inventory persistence |

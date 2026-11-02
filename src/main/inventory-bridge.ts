@@ -1,3 +1,4 @@
+import type { FolderAccess } from './folder-access';
 import { lstat, realpath } from 'node:fs/promises';
 import { authorize, noPayload, object, text, type Caller } from './bridge';
 import type { Inventory } from './inventory';
@@ -24,6 +25,7 @@ export class InventoryGateway {
     private readonly inventory: Inventory,
     private readonly owner: { webContentsId: number; url: string },
     private readonly chooseDirectory: () => Promise<string | undefined>,
+    private readonly access?: FolderAccess,
   ) {}
 
   async dispatch(caller: Caller, operation: unknown, payload: unknown): Promise<InventoryWorkspace> {
@@ -35,6 +37,15 @@ export class InventoryGateway {
     if (operation === 'cancel') {
       noPayload(payload);
       this.inventory.cancel();
+      return this.workspace();
+    }
+    if (operation === 'revoke' || operation === 'purge') {
+      const input = object(payload, operation === 'purge' ? ['path', 'confirmation'] : ['path']);
+      if (!this.access) throw new Error('Folder access service unavailable.');
+      const path = pathText(input.path);
+      this.pendingFolder = null;
+      if (operation === 'revoke') this.access.revoke(path);
+      else await this.access.purge(path, text(input.confirmation, 100));
       return this.workspace();
     }
     if (this.changing || this.inventory.snapshot().discovery.status === 'running') throw new Error('Wait for discovery or cancel it first.');

@@ -60,6 +60,32 @@ test('resolve a collision, reconnect a renamed repository, and explicitly includ
   await expect(page.getByRole('heading', { name: 'legacy', exact: true })).toBeVisible();
 });
 
+test('revoke folder access immediately, retain an explicit tombstone on restart, and confirm local purge', async () => {
+  await chooseRoot();
+  await page.getByLabel('I understand the folder permission').check();
+  await page.getByRole('button', { name: 'Save consent and discover' }).click();
+  await expect(page.getByRole('status')).toContainText('Discovery complete');
+  await page.getByRole('button', { name: 'Revoke folder access', exact: true }).click();
+  await expect(page.getByText('Folder access revoked.', { exact: false })).toBeVisible();
+  expect(await page.evaluate(async path => {
+    try { await window.athena.sources.run('read', { root: path, path: 'notes.md' }); return false; } catch { return true; }
+  }, root)).toBe(true);
+  await page.getByRole('button', { name: 'Purge associated local data…' }).click();
+  await expect(page.getByRole('button', { name: 'Confirm permanent purge' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Keep local history' }).click();
+  expect(await page.evaluate(async () => (await window.athena.inventory.snapshot()).roots[0].purgedAt)).toBeUndefined();
+  await application.close(); await launch();
+  await expect(page.getByText('Folder access revoked.', { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: 'Purge associated local data…' }).click();
+  await page.getByLabel('Permanently delete associated local data', { exact: true }).check();
+  await page.getByRole('button', { name: 'Confirm permanent purge' }).click();
+  await expect(page.getByText('Associated local data purged', { exact: false })).toBeVisible();
+  expect(await page.evaluate(async () => (await window.athena.inventory.snapshot()).repositories)).toEqual([]);
+  await page.getByRole('button', { name: 'Sources', exact: true }).click();
+  await expect(page.getByText('Choose and approve a folder in Repositories before browsing.')).toBeVisible();
+  expect(await application.evaluate(({ app }) => app.getAppMetrics().some(metric => metric.name === 'Athena ChatGPT conversation'))).toBe(false);
+});
+
 test('repository names that match JavaScript property names still display editable documentation hints', async () => {
   const path = join(root, 'constructor');
   mkdirSync(path);

@@ -654,6 +654,57 @@ test('streamed partial text is retained on Stop but never becomes future model c
   expect(db.liveContext(conversation.id).history).toEqual([]);
 });
 
+test('revoked historical source text and deferred title context are not reconstructed for a fresh follow-up', async () => {
+  scripted(investigationScripts(root)); jobs.start(null, 'Original private source question'); await idle();
+  const conversation = db.workspace().selected!;
+  snapshot.roots[0].revokedAt = 'now'; db.revoke([root]); jobs.revokeFolderAccess();
+  const count = requests.length;
+  scripted([textResponse('A fresh unrelated answer')]);
+  jobs.start(conversation.id, 'A fresh unrelated question'); await idle();
+  const outbound = JSON.stringify(requests.slice(count));
+  expect(outbound).not.toContain('Original private source question');
+  expect(outbound).not.toContain('The value is 42');
+  expect(outbound).not.toContain('export const answer');
+  expect(db.workspace().selected!.messages.at(-1)?.contextNotice).toContain('Historical context withheld');
+  expect(db.workspace().selected!.messages.find(message => message.id === conversation.messages.at(-1)!.id)?.evidence).toHaveLength(1);
+});
+
+test('folder revocation cancels running and queued children and ignores late child checkpoints and publication', async () => {
+  http = async (_url, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    if (requests.length === 1) return new Response(new TextEncoder().encode(functionResponse('investigate', { tasks: ['one', 'two', 'three', 'queued'].map(scope => ({ scope, question: `Inspect ${scope}` })) })));
+    return new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
+  };
+  jobs.start(null, 'Inspect in parallel');
+  await expect.poll(() => requests.length).toBe(4);
+  snapshot.roots[0].revokedAt = 'now'; db.revoke([root]); jobs.revokeFolderAccess();
+  await idle();
+  expect(db.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'cancelled', investigators: Array.from({ length: 4 }, () => ({ status: 'cancelled' })), text: expect.stringContaining('Folder access revoked') });
+  expect(workers[0].killed).toBe(true);
+  const saved = JSON.stringify(db.workspace());
+  workers[0].emit('message', { type: 'checkpoint', checkpoint: { title: 'Late revoked title', investigators: [] } });
+  workers[0].emit('message', { type: 'result', result: { status: 'complete', text: 'Late revoked answer', history: [] } });
+  await new Promise(resolve => setImmediate(resolve));
+  expect(JSON.stringify(db.workspace())).toBe(saved);
+  expect(await knowledge.inspect()).toEqual([]);
+  expect(requests).toHaveLength(4);
+});
+
+test('revocation during request authority preparation never releases the next cached-excerpt request', async () => {
+  const record = store.read()!;
+  let rotate!: () => void;
+  oauth.refresh = vi.fn(() => new Promise<Registration>(resolve => { rotate = () => resolve({ ...record.registration!, tokens: { ...record.registration!.tokens!, accessToken: 'rotated', expiresAt: Date.now() + 3600_000 } }); }));
+  scripted(investigationScripts(root), count => { if (count === 2) { record.registration!.tokens!.expiresAt = 0; store.write(record); } });
+  jobs.start(null, 'Read source then prepare a follow-up');
+  await expect.poll(() => vi.mocked(oauth.refresh).mock.calls.length).toBe(1);
+  snapshot.roots[0].revokedAt = 'now'; db.revoke([root]); jobs.revokeFolderAccess();
+  rotate(); await idle();
+  await expect.poll(() => chatgpt.snapshot().activity).toBe('idle');
+  expect(requests).toHaveLength(2);
+  expect(JSON.stringify(requests)).not.toContain('export const answer = 42');
+  expect(db.workspace().selected?.revokedSources).toEqual([root]);
+});
+
 test('all parallel children and the queued tail share the original job wall-clock deadline', async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
   http = async (_url, init) => {

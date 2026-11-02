@@ -36,6 +36,7 @@ export interface Message {
   knowledgeReferences?: { id: string; topic: string }[];
 }
 export interface ConversationSummary {
+  revokedSources?: string[];
   scope?: import('./build').BuildScope;
   id: string;
   title: string;
@@ -47,6 +48,7 @@ export interface Conversation extends ConversationSummary {
   messages: Message[];
 }
 export interface Workspace {
+  sourceAccessVersion?: string;
   conversations: ConversationSummary[];
   selected: Conversation | null;
   activeConversationId: string | null;

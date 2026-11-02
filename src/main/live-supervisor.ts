@@ -41,6 +41,7 @@ interface Active {
   coverage?: BuildCoverage;
   buildGeneration?: string;
   reuseReceipts?: Map<string, ReturnType<Conversations['buildReceipts']>[number]>;
+  sourceRoots: string[];
   checkouts: SourceCheckout[];
   retainedCheckouts: SourceCheckout[];
   apiKey?: boolean; text: string; evidence: Evidence[]; dependencies: SourceIdentity[]; scopes: SourceScope[]; dependencyCoverageComplete: boolean; exploration?: Exploration; title?: string; requests: number; usage?: ChatGPTUsage; stop?: () => void;
@@ -67,7 +68,7 @@ export class LiveSupervisor {
     const snapshot = this.inventory.snapshot();
     return { repositories: names.map(name => {
       const repo = snapshot.repositories.find(repo => repo.name === name && repo.presence === 'present');
-      const root = repo && snapshot.roots.filter(root => root.consent === FOLDER_CONSENT && root.acceptedAt && (repo.path === root.path || repo.path.startsWith(root.path + '/'))).sort((a, b) => b.path.length - a.path.length)[0];
+      const root = repo && snapshot.roots.filter(root => !root.revokedAt && root.consent === FOLDER_CONSENT && root.acceptedAt && (repo.path === root.path || repo.path.startsWith(root.path + '/'))).sort((a, b) => b.path.length - a.path.length)[0];
       if (!repo || !root) throw new LiveError('Selected repository is unavailable or lacks folder consent. Rescan and select again.');
       return { name: repo.name, path: repo.path, root: root.path, documentationRoots: [...repo.documentationRoots] };
     }) };
@@ -101,10 +102,10 @@ export class LiveSupervisor {
       throw new LiveError('Local demonstrations are read-only. Start a new conversation.');
     }
     const maxInvestigators = this.conversations.maxInvestigators();
-    const job = this.conversations.beginLive(id, prompt, binding, retryId, build);
+    const job = this.conversations.beginLive(id, prompt, binding, retryId, build, this.inventory.snapshot().roots.filter(root => !root.revokedAt).map(root => root.path));
     const controller = new AbortController();
     const environment = new EnvironmentPermissions(this.sources, controller.signal, () => this.conversations.markEphemeral(job.messageId), () => this.cancel(), this.changed, content => this.conversations.rememberEnvironment(content));
-    const active: Active = { ...job, apiKey: !!binding.apiKey, controller, environment, knowledgeReferences: [], checkouts: [], retainedCheckouts: [], text: '', evidence: [], dependencies: [], scopes: [], dependencyCoverageComplete: true, requests: 0 };
+    const active: Active = { ...job, sourceRoots: this.inventory.snapshot().roots.filter(root => !root.revokedAt).map(root => root.path), apiKey: !!binding.apiKey, controller, environment, knowledgeReferences: [], checkouts: [], retainedCheckouts: [], text: '', evidence: [], dependencies: [], scopes: [], dependencyCoverageComplete: true, requests: 0 };
     if (build) {
       active.build = build; active.buildGeneration = this.knowledge?.generation();
       active.coverage = { repositories: build.repositories.map(repo => repo.name), reusedRepositories: [], reusedFrom: [], inspected: [], unsupported: [], failures: [], unresolved: [], truncated: false,
@@ -148,7 +149,7 @@ export class LiveSupervisor {
         if (this.active !== active) return;
         const work = async (access: (role?: ModelRole, bytes?: number) => Promise<string | ApiGrant>, signal: AbortSignal) => {
           const snapshot = this.inventory.snapshot();
-          const roots = snapshot.roots.filter(root => root.consent === FOLDER_CONSENT && root.acceptedAt).map(root => ({ path: root.path, repositories: snapshot.repositories.filter(repo => repo.presence === 'present' && (repo.path === root.path || repo.path.startsWith(root.path + '/'))).map(repo => ({ name: repo.name, path: repo.path })) }));
+          const roots = snapshot.roots.filter(root => !root.revokedAt && root.consent === FOLDER_CONSENT && root.acceptedAt).map(root => ({ path: root.path, repositories: snapshot.repositories.filter(repo => repo.presence === 'present' && (repo.path === root.path || repo.path.startsWith(root.path + '/'))).map(repo => ({ name: repo.name, path: repo.path })) }));
           signal.throwIfAborted();
           this.conversations.assertClean({ history: previous.history, roots });
           const scope = this.conversations.scope(job.conversationId)?.repositories
@@ -221,6 +222,11 @@ export class LiveSupervisor {
     if (!this.active) throw new LiveError('Environment permission expired.');
     this.active.environment.act(id, action);
   }
+  /** A worker sees the root catalogue from start, and may hold uncheckpointed
+   * excerpts. Stop the whole job rather than guessing which child is unaffected. */
+  revokeFolderAccess(): void {
+    if (this.active) this.end(this.active, { status: 'cancelled', text: this.active.text + '\n\nFolder access revoked. Active and queued work stopped. Local history is retained with revoked-source labels and excluded from future context. Data already transmitted to a provider cannot be recalled; incurred usage remains.', history: [], requests: this.active.requests, usageComplete: false });
+  }
   revokeApiAuthority(): void { if (this.active?.apiKey) this.cancel(); }
   retry(messageId: string): void { this.start(null, '', messageId); }
   lifecycle(event: 'window-close' | 'quit' | 'minimize'): void { if (event !== 'minimize') this.cancel(); }
@@ -232,10 +238,15 @@ export class LiveSupervisor {
   private usedCheckouts(active: Active): SourceCheckout[] {
     return [...new Map([...this.checkouts.select(this.checkoutIdentities(active), active.checkouts), ...active.retainedCheckouts].map(snapshot => [JSON.stringify(snapshot), snapshot])).values()];
   }
+  private accessValid(active: Active): boolean {
+    const roots = this.inventory.snapshot().roots;
+    return active.sourceRoots.every(path => roots.some(root => root.path === path && !root.revokedAt && root.consent === FOLDER_CONSENT && root.acceptedAt));
+  }
   private async checkoutValid(active: Active): Promise<boolean> {
+    if (!this.accessValid(active)) return false;
     const identities = this.checkoutIdentities(active);
     const snapshots = this.checkouts.select(identities, active.checkouts);
-    return this.checkouts.covers(identities, snapshots) && await this.checkouts.fresh(this.usedCheckouts(active), active.controller.signal);
+    return this.checkouts.covers(identities, snapshots) && await this.checkouts.fresh(this.usedCheckouts(active), active.controller.signal) && this.accessValid(active);
   }
   private checkoutPartial(active: Active, result?: LiveResult): LiveResult {
     return { ...(result ?? { requests: active.requests, usageComplete: false }), status: 'partial', history: [],
@@ -288,6 +299,7 @@ export class LiveSupervisor {
         worker.on('exit', () => finish(failure()));
         worker.on('message', value => {
           if (settled || this.active !== active) return;
+          if (!this.accessValid(active)) { this.revokeFolderAccess(); return; }
           try {
             if (!value || typeof value !== 'object') throw new Error();
             const message = value as Record<string, unknown>;
@@ -348,7 +360,8 @@ export class LiveSupervisor {
                   if (job.apiKey && (!['conversation', 'investigator'].includes(String(message.role)) || !Number.isSafeInteger(message.contextBytes))) throw new ApiSettingsError('Invalid model role or bounded request.');
                   authority = access(message.role as ModelRole, message.contextBytes as number);
                   const credential = await authority;
-                  if (!settled && this.active === active && !signal.aborted) { active.requests++; worker!.postMessage({ type: 'reply', id: requestId, ...(typeof credential === 'string' ? { token: credential } : { grant: credential }) }); }
+                  if (!this.accessValid(active)) { this.revokeFolderAccess(); return; }
+                  if (!settled && this.active === active && !signal.aborted && this.accessValid(active)) { active.requests++; worker!.postMessage({ type: 'reply', id: requestId, ...(typeof credential === 'string' ? { token: credential } : { grant: credential }) }); }
                 } else if (message.type === 'knowledge') {
                   if ((!active.requests && !job.build) || !this.knowledge || ++knowledgeCalls > KNOWLEDGE_LIMITS.calls) throw new Error('Knowledge request limit.');
                   this.conversations.assertClean(message.input);

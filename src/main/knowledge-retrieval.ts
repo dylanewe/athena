@@ -42,7 +42,8 @@ export class KnowledgeRetrieval {
     private readonly fresh: (identities: (SourceIdentity | SourceScope)[], signal: AbortSignal) => Promise<boolean>,
     private readonly currentEvidence: (evidence: Evidence, signal: AbortSignal) => Promise<Evidence | undefined>,
     private readonly checkoutFresh: (snapshots: SourceCheckout[], signal: AbortSignal) => Promise<boolean>,
-    private readonly invalidate: (ids: string[], affectedSources: SourceIdentity[]) => void) {
+    private readonly invalidate: (ids: string[], affectedSources: SourceIdentity[]) => void,
+    private readonly eligible: (source: SourceIdentity) => boolean) {
     db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(id UNINDEXED, topic, aliases, summary, claim, evidence, tokenize='unicode61 remove_diacritics 2');
       CREATE TABLE IF NOT EXISTS knowledge_names (scope TEXT NOT NULL, name TEXT NOT NULL, id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE, PRIMARY KEY(scope, name, id));
       CREATE TRIGGER IF NOT EXISTS knowledge_delete AFTER DELETE ON claims BEGIN DELETE FROM knowledge_fts WHERE id = OLD.id; END;
@@ -53,6 +54,7 @@ export class KnowledgeRetrieval {
       CREATE TABLE IF NOT EXISTS operation_flows (id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE, service TEXT NOT NULL REFERENCES claims(id), PRIMARY KEY(id, service));
       CREATE INDEX IF NOT EXISTS operation_flow_services ON operation_flows(service);
       CREATE TABLE IF NOT EXISTS knowledge_index_version (version INTEGER PRIMARY KEY);`);
+    db.exec("INSERT INTO knowledge_fts(knowledge_fts, rank) VALUES ('secure-delete', 1)");
     if (!db.prepare('SELECT version FROM knowledge_index_version WHERE version = 1').get()) {
       db.exec('BEGIN IMMEDIATE');
       try {
@@ -183,6 +185,11 @@ export class KnowledgeRetrieval {
   /** Finalize again after annotation attachment under the same opaque read context. */
   completeResult(result: KnowledgeResult): KnowledgeResult {
     const budget = this.contexts.get(result);
+    if (budget && [...budget.records.values()].some(record => record && ![...record.dependencies, ...record.scopes, ...(record.checkouts ?? [])].every(source => this.eligible(source)))) {
+      result.items = []; delete result.edges; delete result.evidence; delete result.evidenceId; delete result.derivation;
+      result.notice = NOTICE + ' Source access revoked during retrieval.';
+      return result;
+    }
     if (!budget?.coverage.required) return result;
     result.derivation = budget.coverage.derivation;
     if (Buffer.byteLength(JSON.stringify(result)) > L.bytes) {
@@ -332,6 +339,7 @@ export class KnowledgeRetrieval {
     coverage.files = merge(coverage.files, derivation.files);
     coverage.scopes = merge(coverage.scopes, derivation.scopes);
     coverage.checkouts = merge(coverage.checkouts, derivation.checkouts);
+    if (!unique.every(source => this.eligible(source)) || !checkouts.every(source => this.eligible(source))) return;
     return { record, stale, derivation };
   }
 }

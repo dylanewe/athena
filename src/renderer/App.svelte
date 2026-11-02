@@ -65,6 +65,7 @@
         for (const conversation of next.conversations) if (conversation.sealed && !sealedSeen.has(conversation.id)) {
           sealedSeen.add(conversation.id); drafts = { new: '' }; inspected = {};
         }
+        if (workspace && next.sourceAccessVersion !== workspace.sourceAccessVersion) { drafts = { new: '' }; inspected = {}; }
         workspace = next; defaultModel = api.route === 'api-key' ? 'API key · ' + api.conversation : settings.selectedModel; }
     } catch { error = 'Could not load conversations. Restart Athena to try again.'; }
   }
@@ -160,7 +161,7 @@
           aria-current={selected?.id === conversation.id ? 'page' : undefined}
           disabled={busy} onclick={() => select(conversation.id)}>
           <span class="conversation-icon" aria-hidden="true">↳</span>
-          <span>{conversation.title}</span>
+          <span>{conversation.title}{conversation.revokedSources?.length ? ' · Revoked sources' : ''}</span>
           {#if active === conversation.id}<span class="running-dot" aria-label={workspace?.saveError ? 'Not saved' : 'Running'}></span>{/if}
         </button>
       {/each}
@@ -174,13 +175,13 @@
       else throw new Error(error);
     }} />
   {:else if section === 'sources'}
-    <SourcesView />
+    {#key workspace?.sourceAccessVersion}<SourcesView />{/key}
   {:else if section === 'knowledge'}
-    <KnowledgeView openFlow={id => openFlows({ recordId: id })} returnToFlow={flowOrigin.recordId ? () => openFlows(flowOrigin) : undefined} openExplorer={id => openExplorer(id)} ask={record => { void askAbout(record); }} writable={!active && !workspace?.selected?.sealed} messageId={knowledgeMessage} recordId={knowledgeRecord} openConversation={id => { void select(id); }} prepareRefresh={record => { void prepareRefresh(record); }} />
+    {#key workspace?.sourceAccessVersion}<KnowledgeView openFlow={id => openFlows({ recordId: id })} returnToFlow={flowOrigin.recordId ? () => openFlows(flowOrigin) : undefined} openExplorer={id => openExplorer(id)} ask={record => { void askAbout(record); }} writable={!active && !workspace?.selected?.sealed} messageId={knowledgeMessage} recordId={knowledgeRecord} openConversation={id => { void select(id); }} prepareRefresh={record => { void prepareRefresh(record); }} />{/key}
   {:else if section === 'explorer'}
-    <ExplorerView openFlows={service => openFlows({ messageId: explorerMessage, serviceId: service })} returnToFlow={flowOrigin.recordId ? () => openFlows(flowOrigin) : undefined} messageId={explorerMessage} recordId={explorerRecord} {openKnowledge} ask={record => { void askAbout(record); }} />
+    {#key workspace?.sourceAccessVersion}<ExplorerView openFlows={service => openFlows({ messageId: explorerMessage, serviceId: service })} returnToFlow={flowOrigin.recordId ? () => openFlows(flowOrigin) : undefined} messageId={explorerMessage} recordId={explorerRecord} {openKnowledge} ask={record => { void askAbout(record); }} />{/key}
   {:else if section === 'flows'}
-    {#key flowNavigation}<FlowsView {...flowOrigin} {openKnowledge} openExplorer={id => openExplorer(id)} openConversation={id => { void select(id); }} remember={id => flowOrigin = { ...flowOrigin, recordId: id }} />{/key}
+    {#key `${flowNavigation}:${workspace?.sourceAccessVersion}`}<FlowsView {...flowOrigin} {openKnowledge} openExplorer={id => openExplorer(id)} openConversation={id => { void select(id); }} remember={id => flowOrigin = { ...flowOrigin, recordId: id }} />{/key}
   {:else if section === 'models'}
     <ModelSettingsView maxInvestigators={workspace?.maxInvestigators ?? 3} concurrencyBusy={busy} setConcurrency={maximum => { void change(() => window.athena.setMaxInvestigators(maximum)); }} />
   {:else}
@@ -200,6 +201,7 @@
                   {#if message.role === 'assistant'}<span class:problem={!['running', 'complete'].includes(message.status)}>{message.status === 'running' && workspace.saveError ? 'Not saved' : message.status === 'complete' && !selected.model ? 'Local demo' : message.status === 'limit' ? 'limit-paused' : message.status}</span>{/if}
                 </div>
                 {#if message.role === 'assistant' && message.status !== 'running' && selected.model}<p class="draft-note">Historical answer · Not current verification{message.provider ? ` · ${message.provider} / ${message.model}` : ''}</p>{/if}
+                {#if selected.revokedSources?.length}<p class="draft-note">Revoked-source local history: {selected.revokedSources.join(', ')}. Retained for inspection only, excluded from future model context. Previously sent provider data cannot be recalled.</p>{/if}
                 {#if message.contextNotice}<p class="draft-note">{message.contextNotice}</p>{/if}
                 {#if message.interrupted}<p class="draft-note">Interrupted after restart · Partial work · No automatic continuation. Retry explicitly starts a new accounted job using current model settings.</p>{/if}
                 {#if message.ephemeral}<p class="draft-note">Ephemeral · Not saved · May contain sensitive values</p>{/if}
@@ -252,7 +254,7 @@
                     {/each}
                   </details>
                 {/if}
-                {#if !selected.sealed && (selected.kind === 'chatgpt' || selected.kind === 'api-key') && message.role === 'assistant' && !['running', 'complete'].includes(message.status) && selected.messages.at(-1)?.id === message.id}
+                {#if !selected.sealed && !selected.revokedSources?.length && (selected.kind === 'chatgpt' || selected.kind === 'api-key') && message.role === 'assistant' && !['running', 'complete'].includes(message.status) && selected.messages.at(-1)?.id === message.id}
                   <button type="button" disabled={busy || !!active} onclick={() => change(() => window.athena.retry(message.id))}>Retry</button>
                 {/if}
               </article>

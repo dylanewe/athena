@@ -1,7 +1,11 @@
+export const PURGE_CONFIRMATION = 'Permanently delete associated local data';
 export const FOLDER_CONSENT = 'Eligible material throughout this folder, including future repositories and non-Git documents, may be investigated and sent to providers you explicitly approve. Repository inventory and documentation starting directories organize knowledge; they do not restrict access. Folder consent does not approve a provider, secret access, environment access, or paid work.';
 
 export interface DesignatedRoot {
   path: string;
+  revokedAt?: string;
+  purgePending?: boolean;
+  purgedAt?: string;
   consent: string;
   acceptedAt: string;
   includedLocations: string[];
@@ -33,6 +37,8 @@ export interface InventoryBridge {
   chooseFolder(): Promise<InventoryWorkspace>;
   consentFolder(path: string, consent: string): Promise<InventoryWorkspace>;
   dismissFolder(): Promise<InventoryWorkspace>;
+  revoke(path: string): Promise<InventoryWorkspace>;
+  purge(path: string, confirmation: string): Promise<InventoryWorkspace>;
   scan(): Promise<InventoryWorkspace>;
   cancel(): Promise<InventoryWorkspace>;
   include(root: string, location: string): Promise<InventoryWorkspace>;

@@ -1,3 +1,4 @@
+import { overlaps } from './source-ownership';
 import { DatabaseSync } from 'node:sqlite';
 import { constants } from 'node:fs';
 import { lstat, readdir, realpath, open } from 'node:fs/promises';
@@ -65,7 +66,7 @@ export class Inventory {
 
   constructor(path: string, private readonly changed: () => void = () => {}) {
     this.db = new DatabaseSync(path);
-    this.db.exec(`PRAGMA journal_mode = WAL;
+    this.db.exec(`PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS inventory (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), value TEXT NOT NULL);`);
     const row = this.db.prepare('SELECT value FROM inventory WHERE singleton = 1').get();
     this.state = row ? JSON.parse(String(row.value)) as DurableInventory : { roots: [], repositories: [], candidates: [] };
@@ -81,14 +82,48 @@ export class Inventory {
     // Consent applies to the canonical path displayed by the native picker, never a new symlink target.
     const canonical = await safeDirectory(path);
     this.requireIdle();
+    if (this.state.roots.some(root => root.revokedAt && overlaps(root.path, canonical))) throw new Error('This folder overlaps a revoked grant. Revoked grants cannot be restored implicitly.');
     if (this.state.roots.some(root => root.path === canonical)) return;
     this.save({ ...this.state, roots: [...this.state.roots, { path: canonical, consent, acceptedAt: new Date().toISOString(), includedLocations: [] }] });
+  }
+
+  /** Durable deny first, even during discovery. Overlapping grants are withdrawn
+   * together so neither an outer grant nor an alias can silently retain access. */
+  revoke(path: string): string[] {
+    if (!this.state.roots.some(root => root.path === path)) throw new Error('Unknown designated root.');
+    const affected = [path];
+    // Withdraw the connected overlap set, including siblings authorized by an
+    // overlapping ancestor. There is no hidden remaining route through that grant.
+    for (let index = 0; index < affected.length; index++) for (const root of this.state.roots) {
+      if (!affected.includes(root.path) && overlaps(root.path, affected[index])) affected.push(root.path);
+    }
+    affected.sort((a, b) => a.length - b.length || a.localeCompare(b));
+    this.cancel();
+    const now = new Date().toISOString();
+    this.save({ ...this.state,
+      roots: this.state.roots.map(root => affected.includes(root.path) ? { ...root, revokedAt: root.revokedAt ?? now } : root),
+      repositories: this.state.repositories.map(repo => affected.some(root => within(root, repo.path)) ? { ...repo, presence: 'unknown' } : repo),
+      candidates: this.state.candidates.filter(repo => !affected.some(root => within(root, repo.path))),
+    });
+    return affected;
+  }
+  purgeState(paths: string[], pending: boolean): void {
+    if (paths.some(path => !this.state.roots.some(root => root.path === path && root.revokedAt))) throw new Error('Revoke before purging.');
+    this.save({ ...this.state,
+      roots: this.state.roots.map(root => paths.includes(root.path) ? { ...root, purgePending: pending, ...(pending ? {} : { purgedAt: new Date().toISOString(), includedLocations: [] }) } : root),
+      repositories: pending ? this.state.repositories : this.state.repositories.filter(repo => !paths.some(path => within(path, repo.path))),
+      candidates: pending ? this.state.candidates : this.state.candidates.filter(repo => !paths.some(path => within(path, repo.path))),
+    });
+    if (!pending) {
+      this.discovery = { status: 'idle', visited: 0, current: '', nonGitFiles: 0, failures: [] };
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    }
   }
 
   async include(rootPath: string, location: string): Promise<void> {
     this.requireIdle();
     const root = this.state.roots.find(item => item.path === rootPath);
-    if (!root) throw new Error('Unknown designated root.');
+    if (!root || root.revokedAt) throw new Error('Unknown or revoked designated root.');
     const path = await safeDirectory(root.path, location);
     this.requireIdle();
     const normalized = relative(root.path, path) || '.';
@@ -104,7 +139,7 @@ export class Inventory {
     const repositories: Repository[] = [];
     const visited = new Set<string>();
     const examined = new Set<string>();
-    const includes = this.state.roots.flatMap(root => [root.path, ...root.includedLocations.map(location => join(root.path, location))]);
+    const includes = this.state.roots.filter(root => !root.revokedAt).flatMap(root => [root.path, ...root.includedLocations.map(location => join(root.path, location))]);
     const visit = async (root: DesignatedRoot, path: string, owner?: Repository, transit = false): Promise<void> => {
       if (this.cancelled || visited.has(path)) return;
       visited.add(path);
@@ -146,7 +181,7 @@ export class Inventory {
     };
     try {
       // Outer roots first: overlapping designations must not count files twice or lose ownership.
-      for (const root of [...this.state.roots].sort((a, b) => a.path.length - b.path.length)) await visit(root, root.path);
+      for (const root of this.state.roots.filter(root => !root.revokedAt).sort((a, b) => a.path.length - b.path.length)) await visit(root, root.path);
       if (this.closed) return;
       await this.reconcile(repositories, examined);
       this.discovery.status = this.cancelled ? 'cancelled' : 'complete';
@@ -196,6 +231,7 @@ export class Inventory {
   }
 
   private async reconcile(found: Repository[], examinedPaths: Set<string>): Promise<void> {
+    found = found.filter(repo => !this.state.roots.some(root => root.revokedAt && within(root.path, repo.path)));
     const repositories: Repository[] = [];
     for (const previous of this.state.repositories) {
       const current = found.find(repo => repo.path === previous.path);
@@ -226,7 +262,10 @@ export class Inventory {
         if (!candidates.some(item => item.path === candidate.path)) candidates.push({ ...candidate, presence: 'unknown' });
       }
     }
-    if (!this.closed) this.save({ ...this.state, repositories, candidates });
+    if (!this.closed) this.save({ ...this.state,
+      repositories: repositories.map(repo => this.state.roots.some(root => root.revokedAt && within(root.path, repo.path)) ? { ...repo, presence: 'unknown' } : repo),
+      candidates: candidates.filter(repo => !this.state.roots.some(root => root.revokedAt && within(root.path, repo.path))),
+    });
   }
 
   close(): void {

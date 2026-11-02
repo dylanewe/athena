@@ -1,3 +1,4 @@
+import { affectedSource } from './source-ownership';
 import { randomUUID, createHash } from 'node:crypto';
 import { SourceCheckouts } from './source-checkouts';
 import { resolveOperationFlow } from './operation-flows';
@@ -39,7 +40,7 @@ export class Knowledge {
     this.checkouts = new SourceCheckouts(sources, inventory);
     this.db = new DatabaseSync(path);
     const checkoutIndexMissing = !this.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'checkout_index_version'").get();
-    this.db.exec(`PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;
+    this.db.exec(`PRAGMA secure_delete = ON; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS claims (id TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS invalidations (claim_id TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE CASCADE, reason TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS checkout_dependencies (claim_id TEXT NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
@@ -72,10 +73,10 @@ export class Knowledge {
     }
     this.db.exec('CREATE TABLE IF NOT EXISTS knowledge_generation (id TEXT PRIMARY KEY)');
     if (!this.db.prepare('SELECT id FROM knowledge_generation').get()) this.db.prepare('INSERT INTO knowledge_generation VALUES (?)').run(randomUUID());
-    this.retrieval = new KnowledgeRetrieval(this.db, id => this.records(id)[0],
+    this.retrieval = new KnowledgeRetrieval(this.db, id => this.records(id).find(record => this.eligible(record)),
       (identity, signal) => this.permitted(identity, signal), (identities, signal) => this.fresh(identities, signal),
       (evidence, signal) => this.currentEvidence(evidence, signal),
-      (snapshots, signal) => this.checkouts.fresh(snapshots, signal), (ids, affected) => this.invalidate(ids, affected));
+      (snapshots, signal) => this.checkouts.fresh(snapshots, signal), (ids, affected) => this.invalidate(ids, affected), source => this.sources.eligible(source));
   }
   retrieve(request: KnowledgeRequest, signal?: AbortSignal, options: { persistInvalidations?: boolean; canPersistInvalidations?: () => boolean } = {}): Promise<KnowledgeResult> {
     return this.serial(() => this.retrieval.retrieve(request, signal, () => options.persistInvalidations !== false && (options.canPersistInvalidations?.() ?? true)));
@@ -134,7 +135,7 @@ export class Knowledge {
   }
   async inspect(signal?: AbortSignal): Promise<KnowledgeRecord[]> {
     await this.scan(signal);
-    return this.serial(async () => { signal?.throwIfAborted(); return this.records(); });
+    return this.serial(async () => { signal?.throwIfAborted(); return this.allowedRecords(); });
   }
   generation(): string { return String(this.db.prepare('SELECT id FROM knowledge_generation').get()!.id); }
   /** Main-only access-checked binding. Model-local C/E IDs never establish annotation identity. */
@@ -163,9 +164,44 @@ export class Knowledge {
       return { connected: !!current, freshness: checked.retained.stale || checked.current?.stale || changed ? 'stale' as const : 'current' as const };
     });
   }
+  targetEligible(target: ResolutionTarget): boolean { return this.eligible(target.record); }
   private resolutionVersion(record: KnowledgeRecord, derivation: NonNullable<KnowledgeResult['derivation']>): string {
     return digest({ id: record.id, evidence: record.evidence, dependencies: derivation.files, scopes: derivation.scopes, checkouts: derivation.checkouts });
   }
+  private eligible(record: Pick<KnowledgeRecord, 'dependencies' | 'scopes' | 'evidence' | 'checkouts'>): boolean {
+    return [...record.dependencies, ...record.scopes, ...record.evidence.map(item => item.citation), ...(record.checkouts ?? [])].every(source => this.sources.eligible(source));
+  }
+  private affectedClaims(roots: string[]): Set<string> {
+    const records = this.records();
+    const affected = new Set(records.filter(record => [...record.dependencies, ...record.scopes, ...record.evidence.map(item => item.citation), ...(record.checkouts ?? [])].some(source => affectedSource(source, roots))).map(record => record.id));
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const record of records) if (!affected.has(record.id) && record.relations.some(edge => edge.kind === 'depends-on' && affected.has(edge.target))) {
+        affected.add(record.id); changed = true;
+      }
+    }
+    return affected;
+  }
+  private allowedRecords() {
+    const denied = this.affectedClaims(this.inventory.snapshot().roots.filter(root => root.revokedAt).map(root => root.path));
+    return this.records().filter(record => !denied.has(record.id));
+  }
+  /** Delete contributions, not topic/name buckets: independently supported claims
+   * survive. Explicitly dependent assertions are removed transitively. */
+  purge(roots: string[]): Promise<void> { return this.serial(async () => {
+    const ids = this.affectedClaims(roots);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const id of ids) {
+        this.db.prepare('DELETE FROM operation_flows WHERE id = ? OR service = ?').run(id, id);
+        this.db.prepare('DELETE FROM architecture_connections WHERE id = ? OR source = ? OR target = ?').run(id, id, id);
+      }
+      for (const id of ids) this.db.prepare('DELETE FROM claims WHERE id = ?').run(id);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  }); }
   clear(): Promise<void> { return this.serial(async () => {
     this.db.exec('BEGIN IMMEDIATE');
     try { this.db.exec('DELETE FROM claims; DELETE FROM knowledge_generation'); this.db.prepare('INSERT INTO knowledge_generation VALUES (?)').run(randomUUID()); this.db.exec('COMMIT'); }
@@ -184,6 +220,8 @@ export class Knowledge {
       if (!input.completed || input.environmentExposed) throw new Error('Only completed, unexposed investigations can publish knowledge.');
       input.assertPublishable?.();
       this.assertClean({ candidates: input.candidates, evidence: input.evidence, inspectedFiles: input.inspectedFiles, inspectedScopes: input.inspectedScopes });
+      input.signal.throwIfAborted();
+      if (![...input.evidence.map(item => item.citation), ...(input.inspectedFiles ?? []), ...(input.inspectedScopes ?? []), ...(input.checkouts ?? [])].every(source => this.sources.eligible(source))) throw new Error('Knowledge source access revoked.');
     };
     guard();
     if (!Check(knowledgeCandidatesSchema, input.candidates)) throw new Error('Malformed knowledge candidates.');
@@ -200,7 +238,7 @@ export class Knowledge {
     if (dependencies.length + scopes.length > 1000) throw new Error('Inspected dependency limit reached.');
     const checkouts = this.checkouts.select([...dependencies, ...scopes], input.checkouts ?? await this.checkouts.capture(input.signal, [...dependencies, ...scopes]));
     if (!this.checkouts.covers([...dependencies, ...scopes], checkouts) || input.checkouts && !await this.checkouts.fresh(checkouts, input.signal)) throw new Error('Checkout changed or scan coverage incomplete before publication.');
-    const existing = this.records();
+    const existing = this.allowedRecords();
     const built = new Map<string, { candidate: KnowledgeCandidate; record: Stored }>();
     // Endpoints are explicit claim references, never name-based guesses. Build entities first.
     const phase = (candidate: KnowledgeCandidate) => candidate.flow ? 2 : candidate.kind === 'relationship' ? 1 : 0;
@@ -333,6 +371,7 @@ export class Knowledge {
     return `folder:${citation.folder}`;
   }
   private resolve(c: SourceIdentity): { root: string; path: string; repository: SourceIdentity['repository'] } | undefined {
+    if (!this.sources.eligible(c)) return;
     if (!c.repository) return { root: c.folder, path: c.path, repository: null };
     const snapshot = this.inventory.snapshot();
     const repo = snapshot.repositories.find(repo => nameKey(repo.name) === nameKey(c.repository!.name) && repo.presence === 'present');

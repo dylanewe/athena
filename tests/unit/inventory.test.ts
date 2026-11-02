@@ -261,3 +261,38 @@ test('folder consent and ordinary repositories survive restart; loose documents 
   expect(inventory.snapshot().repositories[0].name).toBe('atlas');
   await expect(inventory.designate(root, 'different permission')).rejects.toThrow();
 });
+
+
+test('revoking a nested grant also withdraws sibling grants reached through the same outer authorization', async () => {
+  await repository(join(root, 'atlas')); await repository(join(root, 'other'));
+  for (const path of [root, join(root, 'atlas'), join(root, 'other')]) await inventory.designate(path, FOLDER_CONSENT);
+  expect(inventory.revoke(join(root, 'atlas'))).toEqual([root, join(root, 'atlas'), join(root, 'other')]);
+  expect(inventory.snapshot().roots.every(item => !!item.revokedAt)).toBe(true);
+});
+
+test('revoking during discovery cannot restore a revoked repository from late reconciliation', async () => {
+  await repository(join(root, 'atlas')); await inventory.designate(root, FOLDER_CONSENT);
+  inventory.close();
+  let withdrawn = false;
+  inventory = new Inventory(join(directory, 'inventory.sqlite'), () => {
+    if (!withdrawn && inventory.snapshot().discovery.visited === 2) { withdrawn = true; inventory.revoke(root); inventory.purgeState([root], true); inventory.purgeState([root], false); }
+  });
+  await inventory.scan();
+  expect(withdrawn).toBe(true);
+  expect(inventory.snapshot().repositories).toEqual([]);
+  expect(inventory.snapshot().roots[0].revokedAt).toBeTruthy();
+});
+
+test('revocation persists and withdraws every overlapping grant across restart', async () => {
+  await repository(join(root, 'atlas'));
+  await inventory.designate(root, FOLDER_CONSENT);
+  await inventory.designate(join(root, 'atlas'), FOLDER_CONSENT);
+  await inventory.scan();
+  expect(inventory.revoke(join(root, 'atlas'))).toEqual([root, join(root, 'atlas')]);
+  expect(inventory.snapshot().roots.every(item => !!item.revokedAt)).toBe(true);
+  inventory.close();
+  inventory = new Inventory(join(directory, 'inventory.sqlite'));
+  await inventory.scan();
+  expect(inventory.snapshot().repositories.every(repo => repo.presence !== 'present')).toBe(true);
+  await expect(inventory.designate(root, FOLDER_CONSENT)).rejects.toThrow(/revoked/i);
+});

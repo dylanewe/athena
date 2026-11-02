@@ -14,7 +14,7 @@
   let busy = $state(false);
   onMount(() => {
     void Promise.all([window.athena.inventory.snapshot(), window.athena.sources.exceptions()]).then(([inventory, saved]) => {
-      roots = inventory.roots.map(item => item.path);
+      roots = inventory.roots.filter(item => !item.revokedAt).map(item => item.path);
       root = roots[0] ?? '';
       exceptions = saved;
     }).catch(() => error = 'Could not load folders. Open Repositories to check folder permission.');

@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, safeStorage, se
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { FolderAccess } from './folder-access';
 import { Conversations } from './conversations';
 import { Resolutions } from './resolutions';
 import { ResolutionGateway } from './resolution-bridge';
@@ -44,6 +45,7 @@ let resolutions: Resolutions | undefined;
 let resolutionGateway: ResolutionGateway | undefined;
 let jobs: LiveSupervisor | undefined;
 let gateway: DesktopGateway | undefined;
+let folderAccess: FolderAccess | undefined;
 let inventory: Inventory | undefined;
 let inventoryGateway: InventoryGateway | undefined;
 let modelSettings: ModelSettings | undefined;
@@ -90,7 +92,7 @@ function createWindow() {
     if (!window || window.isDestroyed()) return;
     const result = await dialog.showOpenDialog(window, { title: 'Choose a folder for Athena', properties: ['openDirectory'], buttonLabel: 'Review permission' });
     return result.canceled ? undefined : result.filePaths[0];
-  });
+  }, folderAccess);
   modelGateway = new ModelGateway(modelSettings!, { webContentsId: window.webContents.id, url: documentURL });
   apiGateway = new ApiModelGateway(apiSettings!, { webContentsId: window.webContents.id, url: documentURL }, async () => {
     if (!window || window.isDestroyed()) return;
@@ -134,11 +136,11 @@ if (!app.requestSingleInstanceLock()) {
   });
   app.on('window-all-closed', () => app.quit());
   app.on('will-quit', () => { resolutions?.close(); knowledge?.close(); conversations?.close(); inventory?.close(); modelSettings?.close(); apiSettings?.close(); sources?.close(); });
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
     const stateDirectory = join(app.getPath('userData'), 'state');
     mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
     const database = join(stateDirectory, 'conversations.sqlite');
-    conversations = new Conversations(database);
+    conversations = new Conversations(database, () => inventory?.snapshot().roots.filter(root => root.revokedAt).map(root => root.path) ?? []);
     chmodSync(database, 0o600);
     const inventoryDatabase = join(stateDirectory, 'inventory.sqlite');
     inventory = new Inventory(inventoryDatabase, notify);
@@ -183,6 +185,8 @@ if (!app.requestSingleInstanceLock()) {
     jobs = new LiveSupervisor(conversations, chatgpt, sources, inventory, () => utilityProcess.fork(join(output, 'live.js'), [], {
       serviceName: 'Athena ChatGPT conversation', env: {}, stdio: 'ignore', cwd: stateDirectory,
     }), notify, apiSettings, knowledge, resolutions);
+    folderAccess = new FolderAccess(inventory, conversations, sources, knowledge, resolutions, () => { jobs?.revokeFolderAccess(); sourceGateway?.cancel(); }, notify);
+    await folderAccess.recover(); // Finish interrupted destructive cleanup before exposing any local views.
     ipcMain.handle('athena:resolutions', async (event, operation: unknown, payload: unknown) => {
       try {
         if (!resolutionGateway || quitting) throw new Error();

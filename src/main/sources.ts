@@ -1,3 +1,5 @@
+import { affectedSource } from './source-ownership';
+import type { SourceIdentity } from '../shared/sources';
 import { constants } from 'node:fs';
 import { lstat, open, opendir, realpath } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, sep } from 'node:path';
@@ -48,9 +50,17 @@ export class Sources {
   private includes: SourceException[];
   constructor(path: string, private readonly inventory: Pick<Inventory, 'snapshot'>) {
     this.db = new DatabaseSync(path);
-    this.db.exec('PRAGMA journal_mode = WAL; CREATE TABLE IF NOT EXISTS source_policy (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), value TEXT NOT NULL)');
+    this.db.exec('PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL; CREATE TABLE IF NOT EXISTS source_policy (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), value TEXT NOT NULL)');
     const row = this.db.prepare('SELECT value FROM source_policy WHERE singleton = 1').get();
     this.includes = row ? JSON.parse(String(row.value)) as SourceException[] : [];
+  }
+  eligible(identity: SourceIdentity): boolean {
+    return !affectedSource(identity, this.inventory.snapshot().roots.filter(root => root.revokedAt).map(root => root.path));
+  }
+  purge(roots: string[]): void {
+    this.includes = this.includes.filter(item => !roots.includes(item.root));
+    this.db.prepare('INSERT OR REPLACE INTO source_policy VALUES (1, ?)').run(JSON.stringify(this.includes));
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
   }
   exceptions(): SourceException[] { return structuredClone(this.includes); }
   close(): void { this.db.close(); }
@@ -59,6 +69,7 @@ export class Sources {
     this.root(root); location(path);
     if (protectedName(`${root}/${path}`)) throw new Denied('Credential files and Git internals cannot be included.');
     await this.safePath(root, path);
+    this.root(root); // A revoke/purge may have completed while path validation awaited IO.
     const next = this.includes.filter(item => item.root !== root || item.path !== path);
     if (include) next.push({ root, path });
     this.db.prepare('INSERT OR REPLACE INTO source_policy VALUES (1, ?)').run(JSON.stringify(next));
@@ -85,10 +96,11 @@ export class Sources {
     const start = input.start ?? 1, end = input.end ?? start + L.lines - 1;
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start || end - start >= L.lines || end > 1_000_000) throw new Denied('Read at most 200 lines, using positive line numbers.');
     let timedOut = false;
+    const authorized = () => this.inventory.snapshot().roots.some(item => item.path === root && !item.revokedAt && item.consent === FOLDER_CONSENT && item.acceptedAt);
     const budget: Budget = {
       deadline: performance.now() + L.milliseconds, signal, scanned: 0, bytes: 0, output: 1024,
       check() {
-        if (this.signal?.aborted || (permission && !permission.valid())) throw new Stopped('cancelled');
+        if (!authorized() || this.signal?.aborted || (permission && !permission.valid())) throw new Stopped('cancelled');
         if (timedOut || performance.now() >= this.deadline) throw new Stopped('Time limit reached.');
       },
     };
@@ -197,6 +209,7 @@ export class Sources {
       result.status = error instanceof Stopped && error.reason === 'cancelled' ? 'cancelled' : 'truncated';
       result.reason = error instanceof Stopped ? error.reason : 'Some paths could not be inspected safely.';
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+    if (!authorized()) return { entries: [], status: 'cancelled', scanned: 0, bytesRead: 0, warning: SOURCE_WARNING, reason: 'Folder access revoked.' };
     result.scanned = Math.min(budget.scanned, L.entries);
     result.bytesRead = budget.bytes;
     if (scope && result.status === 'complete') {
@@ -211,7 +224,7 @@ export class Sources {
   }
 
   private root(path: string): string {
-    if (!this.inventory.snapshot().roots.some(root => root.path === path && root.consent === FOLDER_CONSENT && root.acceptedAt)) throw new Denied('Folder permission required.');
+    if (!this.inventory.snapshot().roots.some(root => root.path === path && !root.revokedAt && root.consent === FOLDER_CONSENT && root.acceptedAt)) throw new Denied('Folder permission required.');
     return path;
   }
   private included(root: string, path: string): boolean {

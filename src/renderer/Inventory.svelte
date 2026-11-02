@@ -11,7 +11,7 @@
     catch (failure) { error = failure instanceof Error ? failure.message : 'Build could not start. Review model settings and retry explicitly.'; }
     finally { busy = false; }
   }
-  import { FOLDER_CONSENT, type InventoryWorkspace } from '../shared/inventory';
+  import { FOLDER_CONSENT, PURGE_CONFIRMATION, type InventoryWorkspace } from '../shared/inventory';
 
   let inventory = $state<InventoryWorkspace | null>(null);
   const selectedRepositories = $derived(inventory?.repositories.filter(repo => repo.presence === 'present' && buildSelected.includes(repo.name)) ?? []);
@@ -22,6 +22,8 @@
   let aliases = $state<Record<string, string>>({});
   let connections = $state<Record<string, string>>({});
   let documentation = $state<Record<string, string>>(Object.create(null));
+  let purgePath = $state<string | null>(null);
+  let purgeAccepted = $state(false);
   let requestNumber = 0;
   const scanning = $derived(inventory?.discovery.status === 'running');
   const missing = $derived(inventory?.repositories.filter(repo => repo.presence === 'missing') ?? []);
@@ -116,6 +118,15 @@
         {#each inventory.roots as root (root.path)}
           <article class="root">
             <p class="path">{root.path}</p>
+            {#if root.revokedAt}
+              <p role="status">Folder access revoked. Local history is retained with revoked-source labels; it is not reused as model context.</p>
+              <p class="meta">All overlapping grants were withdrawn too. Aliases and reconnections do not restore old evidence. Revoked grants cannot be implicitly restored by choosing the folder again.</p>
+              {#if root.purgedAt}<p class="meta">Associated local data purged {new Date(root.purgedAt).toLocaleDateString()}.</p>{/if}
+              {#if root.purgePending}<p role="alert">Purge incomplete. Access remains revoked. Retry purge; Athena also retries on restart.</p>{/if}
+              <button disabled={busy} onclick={() => { purgePath = root.path; purgeAccepted = false; }}>Purge associated local data…</button>
+            {:else}
+              <p class="meta">Revoking also withdraws every overlapping designated grant and stops the current job, including queued children. Local history is kept by default. Data already transmitted to a provider cannot be recalled; incurred usage remains.</p>
+              <button disabled={busy} onclick={() => change(() => window.athena.inventory.revoke(root.path))}>Revoke folder access</button>
             <p class="meta">Consent saved {new Date(root.acceptedAt).toLocaleDateString()}. Includes future repositories and non-Git material.</p>
             <details><summary>Saved permission</summary><p>{root.consent}</p></details>
             <p class="meta">Hidden directories, dependencies, vendor directories, and build outputs are skipped by default. Directory symlinks are never followed. Git metadata cannot be included.</p>
@@ -131,6 +142,17 @@
               <label for={`include-${root.path}`}>Include a skipped location within {root.path}</label>
               <div class="inline-form"><input id={`include-${root.path}`} bind:value={includes[root.path]} placeholder="e.g. .archive/service" maxlength="4096" /><button disabled={busy || scanning || !includes[root.path]}>Include and rescan</button></div>
             </form>
+            {/if}
+            {#if purgePath === root.path}
+              <section class="consent" aria-label="Confirm local purge">
+                <h3>Permanently delete associated local data?</h3>
+                <p>Deletes cached evidence, source-owned knowledge and dependent assertions, associated annotations, and entire associated conversations (including later turns and titles). Independently supported knowledge remains. Conversations may be associated conservatively with every folder available to that job. Other local settings are kept. Your repository files are never changed.</p>
+                <p>This cannot be undone. It does not recall provider data or erase external backups, OS snapshots, or guarantee forensic erasure of disk blocks. The minimal revoked-folder permission record remains to prevent resurrection.</p>
+                <label class="check"><input type="checkbox" bind:checked={purgeAccepted} /> {PURGE_CONFIRMATION}</label>
+                <button disabled={busy || !purgeAccepted} onclick={async () => { await change(() => window.athena.inventory.purge(root.path, PURGE_CONFIRMATION)); purgePath = null; purgeAccepted = false; }}>Confirm permanent purge</button>
+                <button disabled={busy} onclick={() => { purgePath = null; purgeAccepted = false; }}>Keep local history</button>
+              </section>
+            {/if}
           </article>
         {/each}
       </section>

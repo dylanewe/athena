@@ -11,7 +11,7 @@ export class SourceCheckouts {
   constructor(private readonly sources: Sources, private readonly inventory: Pick<Inventory, 'snapshot'>) {}
   async capture(signal?: AbortSignal, identities?: SourceIdentity[]): Promise<SourceCheckout[]> {
     const snapshot = this.inventory.snapshot();
-    const locations = snapshot.roots.flatMap(root => [
+    const locations = snapshot.roots.filter(root => !root.revokedAt).flatMap(root => [
       { root: root.path, path: '.', repository: null as SourceIdentity['repository'] },
       ...snapshot.repositories.filter(repo => repo.presence === 'present' && (repo.path === root.path || repo.path.startsWith(root.path + '/')))
         .map(repo => ({ root: root.path, path: relative(root.path, repo.path) || '.', repository: { name: repo.name, path: relative(root.path, repo.path) || '.' } })),
@@ -42,10 +42,10 @@ export class SourceCheckouts {
     const unique = [...new Map(snapshots.map(snapshot => [JSON.stringify(snapshot), snapshot])).values()];
     for (const snapshot of unique) {
       signal?.throwIfAborted();
-      if (!snapshot.complete) return false;
+      if (!snapshot.complete || !this.sources.eligible(snapshot)) return false;
       const inventory = this.inventory.snapshot();
       const repo = snapshot.repository && inventory.repositories.find(repo => name(repo.name) === name(snapshot.repository!.name) && repo.presence === 'present');
-      const root = repo ? inventory.roots.find(root => repo.path === root.path || repo.path.startsWith(root.path + '/'))?.path : snapshot.repository ? undefined : snapshot.folder;
+      const root = repo ? inventory.roots.find(root => !root.revokedAt && (repo.path === root.path || repo.path.startsWith(root.path + '/')))?.path : snapshot.repository ? undefined : snapshot.folder;
       if (!root) return false;
       try {
         const current = await this.sources.checkout(root, repo ? relative(root, repo.path) || '.' : snapshot.path, signal);

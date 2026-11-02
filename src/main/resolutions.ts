@@ -1,3 +1,4 @@
+import { associatedMaterial } from './source-ownership';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { Check } from 'typebox/value';
@@ -18,12 +19,25 @@ export class Resolutions {
   constructor(path: string, private readonly knowledge: Knowledge, private readonly assertClean: (material: unknown) => void,
     private readonly assertWritable: () => void) {
     this.db = new DatabaseSync(path);
-    this.db.exec(`PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;
+    this.db.exec(`PRAGMA secure_delete = ON; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS annotations (id TEXT PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS revisions (annotation_id TEXT NOT NULL REFERENCES annotations(id), revision INTEGER NOT NULL, value TEXT NOT NULL, reconsider INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(annotation_id, revision));
       CREATE TABLE IF NOT EXISTS links (annotation_id TEXT NOT NULL REFERENCES annotations(id), revision INTEGER NOT NULL, generation TEXT NOT NULL, claim_id TEXT NOT NULL, PRIMARY KEY(annotation_id, revision, generation, claim_id));
       CREATE INDEX IF NOT EXISTS related_annotations ON links(generation, claim_id);`);
   }
+  purge(roots: string[]): Promise<void> { return this.serial(async () => {
+    const ids = new Set(this.db.prepare('SELECT annotation_id, value FROM revisions').all().filter(row => associatedMaterial(JSON.parse(String(row.value)), roots)).map(row => String(row.annotation_id)));
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const id of ids) {
+        this.db.prepare('DELETE FROM links WHERE annotation_id = ?').run(id);
+        this.db.prepare('DELETE FROM revisions WHERE annotation_id = ?').run(id);
+        this.db.prepare('DELETE FROM annotations WHERE id = ?').run(id);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  }); }
   close(): void { this.db.close(); }
   private serial<T>(action: () => Promise<T>): Promise<T> {
     const result = this.pending.then(action); this.pending = result.catch(() => {}); return result;
@@ -75,6 +89,7 @@ export class Resolutions {
       }
       if (previous && !await this.view(stored, undefined, signal, false, budget)) throw new Error('Annotation access changed before reconnection.');
       guard({ stored, value }); signal.throwIfAborted();
+      if (!targets.every(target => this.knowledge.targetEligible(target))) throw new Error('Annotation source access revoked.');
       this.db.exec('BEGIN IMMEDIATE');
       try {
         if (!previous) this.db.prepare('INSERT INTO annotations VALUES (?, ?, ?, ?)').run(stored.id, stored.kind, stored.text, stored.createdAt);

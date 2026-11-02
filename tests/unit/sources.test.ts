@@ -31,6 +31,15 @@ beforeEach(async () => {
 });
 afterEach(async () => { vi.restoreAllMocks(); sources.close(); inventory.close(); await rm(directory, { recursive: true, force: true }); });
 
+test('revocation during an in-flight read discards excerpts and future tool reads fail closed', async () => {
+  await file('notes.md', 'withdraw this cached material');
+  const pending = read('notes.md');
+  inventory.revoke(root);
+  expect(await pending).toMatchObject({ status: 'cancelled', entries: [] });
+  await expect(read('notes.md')).rejects.toThrow(/permission/i);
+  await expect(sourceTools(sources)[2].execute('read-id', { root, path: 'notes.md', start: 1, end: 1 })).resolves.toMatchObject({ isError: true });
+});
+
 test('lists and searches non-Git heterogeneous text and cites bounded UTF-8 ranges without repository requirements', async () => {
   for (const path of ['notes.md', 'guide.txt', 'config.json', 'settings.yaml', 'src/main.ts', 'README']) await file(path);
   const listed = await sources.run('list', { root, path: '.' });
