@@ -668,6 +668,32 @@ test('explicit follow-up role/provider changes use new accounted grants, not his
   expect(conversations.workspace().selected!.messages.filter(message => message.role === 'assistant').map(message => [message.provider, message.model])).toEqual([['main', 'main-one'], ['investigator', 'investigator-one']]);
 });
 
+test('switching through the API route cannot launder another ChatGPT registration into saved history', async () => {
+  const first = conversations.beginLive(null, 'Original account question', { model: 'fixture', registration: 'original-account' });
+  conversations.finishLive(first.messageId, { status: 'complete', text: 'Original account answer', history: [], requests: 1, usageComplete: false }, []);
+  supervisor.start(first.conversationId, 'Use the approved API route'); await idle();
+  expect(workers).toHaveLength(1);
+  conversations.close(); conversations = new Conversations(join(directory, 'conversations.sqlite'));
+  expect(conversations.chatgptRegistration(first.conversationId)).toBe('original-account');
+  settings.select('chatgpt', 'main/main-one', 'investigator/investigator-one');
+  const otherAccount = { snapshot: () => ({ activity: 'idle' }), conversationBinding: () => ({ model: 'fixture', registration: 'another-account' }) } as unknown as ChatGPTSettings;
+  supervisor = new LiveSupervisor(conversations, otherAccount, sources, { snapshot: () => snapshot }, () => { const worker = new Worker(); workers.push(worker); return worker; }, () => {}, settings, knowledge);
+  expect(() => supervisor.start(first.conversationId, 'Transfer historical context')).toThrow('authorization');
+  expect(workers).toHaveLength(1);
+});
+
+test('unavailable repositories are omitted from restored scope and current model metadata', async () => {
+  registerBuildRepository();
+  const scope = { repositories: [{ name: 'repo', path: root, root, documentationRoots: ['notes'] }] };
+  const first = conversations.beginLive(null, 'Original question', { model: 'main-one', registration: '', apiKey: settings.conversationConfig() }, undefined, scope);
+  conversations.finishLive(first.messageId, { status: 'complete', text: 'Historical answer', history: [], requests: 1, usageComplete: false }, []);
+  snapshot.repositories[0].presence = 'missing';
+  supervisor.start(first.conversationId, 'What is available?'); await idle();
+  expect(workers[0].job!.scope).toEqual([]);
+  expect(workers[0].job!.roots[0].repositories).toEqual([]);
+  expect(conversations.workspace().selected!.scope).toEqual(scope);
+});
+
 test('revoked consent/credentials block old transcripts and retry without starting a provider worker', async () => {
   supervisor.start(null, 'Question'); await idle(); const id = conversations.workspace().selected!.id;
   settings.approveDestination(settings.snapshot().destinations.find(d => d.provider === 'main')!.id, false);

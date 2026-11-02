@@ -422,6 +422,32 @@ test('a failed naming attempt keeps the local fallback and later naming still us
   expect(db.workspace().selected!.title).toBe('Architecture overview');
 });
 
+test('deferred naming uses the original question only under current provenance, never an unrelated follow-up', async () => {
+  scripted([textResponse('First completed answer without naming')]);
+  jobs.start(null, 'Original naming question'); await idle();
+  const id = db.workspace().selected!.id;
+  scripted([functionResponse('set_conversation_title', { title: 'Original topic' }), textResponse('Follow-up answer')]);
+  jobs.start(id, 'Unrelated follow-up question'); await idle();
+  const instructions = JSON.stringify((requests[1].input as { role: string }[]).filter(item => ['system', 'developer'].includes(item.role)));
+  expect(instructions).toContain('Original naming question');
+  expect(instructions).not.toContain('Unrelated follow-up question');
+  expect(db.workspace().selected!.title).toBe('Original topic');
+});
+
+test('deferred naming cannot resend an older revoked question even when the latest completed turn is current', async () => {
+  scripted(knowledgeScripts()); jobs.start(null, 'Original source-bound naming question'); await idle();
+  const id = db.workspace().selected!.id;
+  snapshot.roots = [];
+  scripted([textResponse('No current source support.'), textResponse('Still no current source support.')]);
+  jobs.start(id, 'Ordinary follow-up'); await idle();
+  jobs.start(id, 'Another ordinary follow-up'); await idle();
+  for (const request of requests.slice(4)) {
+    expect(JSON.stringify(request.input)).not.toContain('Original source-bound naming question');
+    expect((request.tools as { name: string }[]).map(tool => tool.name)).not.toContain('set_conversation_title');
+  }
+  expect(db.workspace().selected!.title).toBe('Original source-bound naming question');
+});
+
 test('real Pi agent follow-ups use the explicit current model and bounded historical context', async () => {
   jobs.start(null, 'Hello'); await idle();
   const first = db.workspace().selected!;

@@ -47,9 +47,10 @@ test('pre-#18 profiles migrate original model identities and selected build scop
     const first = db.beginLive(null, 'Question', binding, undefined, scope); db.finishLive(first.messageId, answer, [evidence]);
     db.close();
     const legacy = new DatabaseSync(path);
-    legacy.exec('ALTER TABLE live_attempts DROP COLUMN binding; ALTER TABLE conversations DROP COLUMN scope;'); legacy.close();
+    legacy.exec('ALTER TABLE live_attempts DROP COLUMN binding; ALTER TABLE conversations DROP COLUMN scope; ALTER TABLE conversations DROP COLUMN chatgpt_registration;'); legacy.close();
     db = new Conversations(path);
     expect(db.workspace().selected!.scope).toEqual(scope);
+    expect(db.chatgptRegistration(first.conversationId)).toBe('fixture-registration');
     const next = db.beginLive(first.conversationId, 'Next', { ...binding, model: 'new-model' }); db.finishLive(next.messageId, answer, []);
     expect(db.workspace().selected!.messages.find(message => message.id === first.messageId)).toMatchObject({ model: 'first-model', evidence: [evidence] });
   } finally { db.close(); rmSync(directory, { recursive: true, force: true }); }

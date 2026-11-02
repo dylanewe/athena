@@ -83,7 +83,7 @@ export class LiveSupervisor {
     try { this.conversations.assertClean({ prompt, build }); } catch { throw new LiveError('Message withheld by secret checks. Remove suspected credentials before sending.'); }
     let binding;
     try {
-      const historicalBinding = id ? this.conversations.binding(id) : undefined; // Demos stay read-only.
+      if (id) this.conversations.binding(id); // Demos stay read-only.
       if (this.apiSettings?.route() === 'api-key') {
         const apiKey = this.apiSettings.conversationConfig();
         this.apiSettings!.assertApproved(apiKey.conversation); this.apiSettings!.assertApproved(apiKey.investigator);
@@ -93,7 +93,8 @@ export class LiveSupervisor {
         binding = this.chatgpt.conversationBinding();
         // Model changes do not silently transfer a saved ChatGPT transcript to
         // another account/registration. Existing reconnect isolation still applies.
-        if (historicalBinding && !historicalBinding.apiKey && historicalBinding.registration !== binding.registration) throw new ChatGPTError('authentication');
+        const registration = id ? this.conversations.chatgptRegistration(id) : undefined;
+        if (registration && registration !== binding.registration) throw new ChatGPTError('authentication');
       }
     } catch (error) {
       if (error instanceof ChatGPTError || error instanceof ApiSettingsError || error instanceof LiveError) throw error;
@@ -135,9 +136,7 @@ export class LiveSupervisor {
           }
         }
         const previous = this.conversations.resumeContext(job.conversationId);
-        const historicalCurrent = await this.verify(previous.evidence, active.controller.signal) &&
-          (!(previous.evidence.length || previous.sourceBacked || previous.checkouts?.length) ||
-            !!previous.checkouts?.length && await this.checkouts.fresh(previous.checkouts, active.controller.signal));
+        const historicalCurrent = await this.historicalCurrent(previous, active.controller.signal);
         if (!historicalCurrent) previous.history = [];
         // Historical citations are navigation identities, never this job's evidence.
         // Even unchanged historical text must acquire current evidence via retrieval.
@@ -149,15 +148,24 @@ export class LiveSupervisor {
         if (this.active !== active) return;
         const work = async (access: (role?: ModelRole, bytes?: number) => Promise<string | ApiGrant>, signal: AbortSignal) => {
           const snapshot = this.inventory.snapshot();
-          const roots = snapshot.roots.filter(root => root.consent === FOLDER_CONSENT && root.acceptedAt).map(root => ({ path: root.path, repositories: snapshot.repositories.filter(repo => repo.path === root.path || repo.path.startsWith(root.path + '/')).map(repo => ({ name: repo.name, path: repo.path })) }));
+          const roots = snapshot.roots.filter(root => root.consent === FOLDER_CONSENT && root.acceptedAt).map(root => ({ path: root.path, repositories: snapshot.repositories.filter(repo => repo.presence === 'present' && (repo.path === root.path || repo.path.startsWith(root.path + '/'))).map(repo => ({ name: repo.name, path: repo.path })) }));
           signal.throwIfAborted();
           this.conversations.assertClean({ history: previous.history, roots });
           const scope = this.conversations.scope(job.conversationId)?.repositories
             .filter(repo => roots.some(root => root.path === repo.root && root.repositories.some(current => current.name === repo.name && current.path === repo.path)))
             .map(repo => repo.name);
+          const { messageId: namingMessageId, ...naming } = this.conversations.naming(job.conversationId);
+          if (id && naming.needsTitle) {
+            // Naming has its own original-turn provenance; the latest turn's
+            // freshness must not authorize an older revoked question.
+            const origin = namingMessageId ? this.conversations.resumeContext(job.conversationId, namingMessageId) : undefined;
+            if (!origin?.history.length || !await this.historicalCurrent(origin, signal)) {
+              naming.needsTitle = false; delete naming.titlePrompt;
+            } else active.retainedCheckouts = [...new Map([...active.retainedCheckouts, ...(origin.checkouts ?? [])].map(checkout => [JSON.stringify(checkout), checkout])).values()];
+          }
           outcome = await this.run(active, { ...(binding.apiKey ? { apiKey: binding.apiKey } : {}), model: binding.model, maxInvestigators,
             ...(build ? { build: { ...build, reusable } } : {}), prompt: job.prompt, history: previous.history, roots, scope,
-            ...this.conversations.naming(job.conversationId), ...(id ? { titlePrompt: job.prompt } : {}) }, access, signal);
+            ...naming }, access, signal);
           if (outcome.reason && !binding.apiKey) throw new ChatGPTError(outcome.reason);
         };
         if (binding.apiKey) await work((role, bytes) => this.apiSettings!.grant(binding.apiKey!, role!, bytes!, active.controller.signal), active.controller.signal);
@@ -232,6 +240,11 @@ export class LiveSupervisor {
   private checkoutPartial(active: Active, result?: LiveResult): LiveResult {
     return { ...(result ?? { requests: active.requests, usageComplete: false }), status: 'partial', history: [],
       text: (result?.text ?? active.text) + '\n\nPartial: the checkout changed during analysis or scan coverage was incomplete. No compatible snapshot was committed. Retry explicitly for fresh sources within a new job.' };
+  }
+  private async historicalCurrent(previous: ReturnType<Conversations['resumeContext']>, signal: AbortSignal): Promise<boolean> {
+    return await this.verify(previous.evidence, signal) &&
+      (!(previous.evidence.length || previous.sourceBacked || previous.checkouts?.length) ||
+        !!previous.checkouts?.length && await this.checkouts.fresh(previous.checkouts, signal));
   }
   private async verify(evidence: Evidence[], signal: AbortSignal, environment?: EnvironmentPermissions): Promise<boolean> {
     for (const item of evidence) {
