@@ -1,0 +1,27 @@
+# Bounded context continuation (#17)
+
+Athena checks each role independently against its pinned API model's context window. Serialized UTF-8 bytes are a deliberately conservative token upper estimate, not measured token usage. The window reserves the existing 1,024-token output cap and 4,096 tokens of framing/serialization headroom; system instructions and tool declarations count in the input. The 2 MiB local protocol ceiling still applies. A model too small even for the instructions/question stops without a provider call.
+
+ChatGPT's subscription catalog does **not** publish trustworthy capacity/output metadata. Its existing allowlisted wire contract is unchanged (no invented context window or subscription output-token parameter). It uses a conservative **64 KiB local input ceiling**, not a claimed provider capacity guarantee; its existing streamed-response/answer bounds remain. Provider context failures remain possible on that route. No fallback, permission, price gate, or workflow is added.
+
+## Continuation
+
+Before each main/investigator model step, Athena can replace older complete assistant/tool exchanges with compact continuation notes. It never splits tool-call/result pairs. Original user messages, including constraints and delegated questions, remain verbatim; the latest assistant/tool exchange remains intact. If those cannot fit, Athena honestly narrows rather than silently truncating them.
+
+Source-only exchanges compact deterministically: retain E IDs, observed scope and incompleteness notices, not excerpts or full-file digests. Older narrative/findings can require a bounded semantic summary. Summary input itself must fit; an oversized individual message is not trusted merely because it is one chunk. Summary output must complete successfully, be nonempty and fit 8 KiB. The notes retain required E IDs, scope and unresolved questions separately from model-authored prose. Old notes are replaced, not indefinitely appended to source digests. Summaries are **guidance, never independent evidence**; discarded excerpts must be inspected again before source validation/citation.
+
+Semantic summaries use the **same pinned role stream** and main-owned authority, output reservation, shared request counter, bounded transient retries and original wall-clock deadline. They cannot call tools, delegate, discover credentials/providers, or obtain a new allowance. No hidden/background summary job is created. Failed reservations, incomplete/oversized/empty summaries, cancellation or inability to fit stop continuation. The result is explicitly partial (or the existing limit/cancel outcome), with a narrower one-file/one-question follow-up. Children return it to main through their bounded result; they cannot spawn replacements. Existing one-batch-per-job delegation remains unchanged; further work can require an explicit user follow-up.
+
+## Evidence, output and privacy
+
+Source read/search output has an additional role-capacity bound. It omits whole entries and corresponding tool-facing evidence, marks truncation and requests a narrower query/range. Huge individual lines are withheld by the existing source-byte boundary, never shortened into false full-line citations. The full bounded main-owned evidence ledger and source identities remain outside model context for navigation, freshness checks and final validation. Main inspection/knowledge/batch output must also pass the combined context bound; if it cannot safely fit, the job returns partial rather than issuing an oversized request.
+
+Both the loop and retained transcript are updated after successful compaction. Detailed exploration remains separately checkpointed; stable evidence is retained by main and SQLite independently. Progress shows compaction, and the saved answer discloses that older excerpts are no longer in model context. Raw summary requests, provider payloads/errors and private reasoning are not separately persisted; only bounded guidance and existing numeric usage/outcomes are retained.
+
+Existing pre-request historical-evidence/checkout verification remains before reconstruction or summary calls. Revoked, changed or unavailable historical sources block sending rather than being resurrected from notes. Ordinary source/inspection operations retain current permissions and checks. Approved outbound environment exposure still seals the entire conversation **before release**: summaries, paraphrases, exploration and results from that exposed context are non-retained. Revocation cancels the same supervised job.
+
+## Deterministic validation
+
+- `context-continuation.test.ts`: long narrative histories, exact user constraints, reference preservation independent of summary prose, capacity bounds, summary errors/empty/oversized output, insufficient budget, cancellation, shared retry grants/usage and oversized individual user messages.
+- `api-conversations.test.ts`: long real-agent source loops, complete protocol exchanges, no paid calls for source-only compaction, bounded search output, huge lines, external evidence/persistence, visible discard notices, and revoked-source reconstruction before any provider call.
+- Existing source/environment/supervisor suites continue to exercise secret/access filters, non-retention, request/time limits, cancellation, fresh evidence and independent pinned roles. All model HTTP is scripted; no live model calls are required.

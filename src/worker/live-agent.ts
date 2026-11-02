@@ -1,4 +1,6 @@
 import { reusableBuildKnowledge } from '../shared/build';
+import { contextBytes, contextCeiling, continueContext, ContinuationError } from './context-continuation';
+import { normalizeContext } from '@earendil-works/pi-ai';
 import { EnvironmentContext } from './environment-context';
 import { apiStream } from './api-stream';
 import { requestAllowance, type ApiGrant, type ModelRole } from '../shared/api-models';
@@ -30,6 +32,8 @@ export interface LiveCapabilities {
 export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilities, signal: AbortSignal, http?: typeof fetch): Promise<LiveResult> {
   let text = '', activity = job.apiKey ? 'Preparing API-key model…' : 'Preparing ChatGPT…', requests = 0, limited = false, usageComplete = true, limitNotice = '';
   let exploration: Exploration | undefined, title: string | undefined;
+  const continuationNotices = new Set<string>();
+  let compactions = 0;
   let investigators: InvestigatorTask[] = [];
   const usage: ChatGPTUsage = { input: 0, output: 0, cachedInput: 0 };
   const observations: StreamObservation[] = [];
@@ -58,6 +62,7 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
       signal.throwIfAborted();
       if (limited) throw new Error(limitNotice || 'Job limit reached.');
       if (role === 'conversation' && investigators.length && investigators.every(task => task.status === 'failed' || task.status === 'cancelled')) throw new Error('No investigator completed. Retry explicitly.');
+      if (Buffer.byteLength(JSON.stringify(context)) > contextCeiling(job.apiKey?.[role].model.contextWindow)) throw new ContinuationError();
       if (requests >= LIVE_LIMITS.requests || Buffer.byteLength(JSON.stringify(context)) > LIVE_LIMITS.historyBytes) {
         limited = true;
         limitNotice = requests >= LIVE_LIMITS.requests ? 'Request limit reached. Retry explicitly for a new attempt.' : 'Conversation context is too large. Start a new conversation; no history was silently removed.';
@@ -94,15 +99,45 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
         }
       })().catch(() => stopRequest(role, output));
       return output;
-    } catch {
+    } catch (error) {
+      if (error instanceof ContinuationError) continuationNotices.add(error.message);
       // Agent's stream contract encodes preparation failures as protocol events.
       stopRequest(role, output); return output;
     }
   };
   const createAgent = (role: 'main' | 'investigator', tools: AgentTool[], systemPrompt: string, history: Message[] = []) => {
-    const agent = new Agent({
+    const modelRole = role === 'main' ? 'conversation' : 'investigator';
+    const stream = streamFor(modelRole);
+    const ceiling = contextCeiling(job.apiKey?.[modelRole].model.contextWindow);
+    const agent: Agent = new Agent({
+      transformContext: async messages => {
+        const original = messages as Message[];
+        try {
+          const compacted = await continueContext(original, ceiling, async input => {
+            activity = `Compacting ${role} context — shared job limits apply…`;
+            capabilities.progress(text, activity);
+            const output = await stream(agent.state.model, normalizeContext({ messages: input }), { signal });
+            return output.result();
+          }, signal);
+          if (compacted !== original) {
+            compactions++;
+            environment.check(compacted);
+            // Update BOTH the loop transcript and retained state. Evidence lives in main,
+            // and checkpoints persist only this reduced transcript, not provider payloads.
+            original.splice(0, original.length, ...compacted);
+            agent.state.messages = compacted;
+            activity = `Compacted ${role} context; discarded excerpts require reinspection.`;
+            capabilities.progress(text, activity);
+          }
+          if (contextBytes(original) > ceiling) throw new ContinuationError();
+          return original;
+        } catch (error) {
+          if (!signal.aborted) continuationNotices.add(error instanceof ContinuationError ? error.message : new ContinuationError().message);
+          throw error;
+        }
+      },
       initialState: { model: job.apiKey?.[role === 'main' ? 'conversation' : 'investigator'].model ?? chatgptModel(job.model), tools, systemPrompt, messages: history.filter(message => message.role !== 'system') },
-      toolExecution: 'sequential', identity: { userAgent: { custom: 'Athena/0.1' }, attribution: null }, streamFn: streamFor(role === 'main' ? 'conversation' : 'investigator'),
+      toolExecution: 'sequential', identity: { userAgent: { custom: 'Athena/0.1' }, attribution: null }, streamFn: stream,
     });
     agents.add(agent);
     agent.subscribe(event => {
@@ -141,6 +176,7 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
     },
   };
   const investigate = investigatorTool(job.roots, {
+    sourceBytes: Math.max(1024, Math.floor(contextCeiling(job.apiKey?.investigator.model.contextWindow) / 8)),
     knowledge: scope => scope && buildLeads.has(scope) ? buildLeads.get(scope)! : retainedLeads,
     tasks: value => { investigators = value; capabilities.checkpoint?.({ investigators }); },
     createAgent: (tools, prompt) => createAgent('investigator', tools, prompt),
@@ -214,11 +250,12 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
   if (text.length > LIVE_LIMITS.answerCharacters) limited = true;
   const reason = observations.findLast(observation => observation.failure)?.failure;
   const anyCompleted = investigators.some(task => task.status === 'complete');
-  const partial = exploration?.result.status === 'partial' || investigators.some(task => task.status !== 'complete');
-  const notice = limited || !historyFits ? '\n\n' + (limitNotice || 'Local output/history limit reached. Start a new conversation.')
+  const partial = continuationNotices.size > 0 || exploration?.result.status === 'partial' || investigators.some(task => task.status !== 'complete');
+  const outcomeNotice = continuationNotices.size ? '\n\n' + [...continuationNotices].join('\n') : limited || !historyFits ? '\n\n' + (limitNotice || 'Local output/history limit reached. Start a new conversation.')
     : partial ? '\n\nPartial: some investigators did not complete. Successful findings are retained; missing results remain unknown.'
     : !success && anyCompleted ? '\n\nPartial: final synthesis failed. Successful findings remain available.' : '';
-  return { status: limited || !historyFits ? 'limit' : signal.aborted ? 'cancelled' : !success ? (anyCompleted ? 'partial' : 'failed') : partial ? 'partial' : 'complete', investigators, text: text.slice(0, LIVE_LIMITS.answerCharacters - notice.length) + notice,
+  const notice = outcomeNotice + (compactions ? `\n\nContext compacted ${compactions} time(s). Older source excerpts are no longer in model context; retained references require source reinspection. Summaries are guidance, not evidence.` : '');
+  return { status: limited || !historyFits ? 'limit' : signal.aborted ? 'cancelled' : !success ? (anyCompleted || continuationNotices.size ? 'partial' : 'failed') : partial ? 'partial' : 'complete', investigators, text: text.slice(0, LIVE_LIMITS.answerCharacters - notice.length) + notice,
     history: historyFits ? history : [], requests, usageComplete: requests > 0 && usageComplete, ...(exploration ? { exploration } : {}), ...(title ? { title } : {}),
     ...(observations.some(observation => observation.usage) ? { usage } : {}), ...(!success && !anyCompleted && reason ? { reason } : {}) };
 }

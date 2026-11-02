@@ -206,6 +206,49 @@ test('builds share the existing fifty-request limit and do not synthesize or pub
   expect(await knowledge.inspect()).toEqual([]);
 });
 
+test('#17 long source exploration compacts whole tool exchanges, retains external evidence and persists a visible discard notice', async () => {
+  writeFileSync(join(root, 'answer.ts'), 'export const answer = 42; // ' + 'bounded source interpretation '.repeat(18));
+  scripts = [response(undefined, 'investigate', { question: 'Find the answer; do not execute code.' }),
+    ...Array.from({ length: 35 }, () => response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 })),
+    response(undefined, 'finish_investigation', { findings: [{ claim: 'Value is 42', support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: ['Who calls this?'], candidateKnowledgeChanges: [] }), response('Static answer [E1].')];
+  supervisor.start(null, 'Inspect source, preserve caller uncertainty.'); await idle();
+  const answer = conversations.workspace().selected!.messages.at(-1)!;
+  expect(answer.status).toBe('complete');
+  expect(answer.text).toContain('Older source excerpts are no longer in model context');
+  expect(answer.evidence?.[0]).toMatchObject({ id: 'E1', text: expect.stringContaining('export const answer = 42;'), citation: { path: 'answer.ts', start: 1, end: 1, contentIdentity: expect.stringMatching(/^sha256:/) } });
+  expect(requests).toHaveLength(38); // Tool-only compaction has no hidden paid summary.
+  expect(reservations).toHaveLength(38);
+  const history = conversations.exploration(answer.id)!.history;
+  expect(JSON.stringify(history)).toContain('Athena compacted continuation');
+  expect(JSON.stringify(history)).toContain('E1');
+  expect(Buffer.byteLength(JSON.stringify(history))).toBeLessThan(27000);
+  expect(requests.every(request => Buffer.byteLength(JSON.stringify(request.body)) < 32000)).toBe(true);
+  snapshot.roots = []; // Revocation must reject reconstruction BEFORE any summary or answer request.
+  supervisor.start(conversations.workspace().selected!.id, 'Continue from the compacted references.'); await idle();
+  expect(requests).toHaveLength(38);
+  expect(conversations.workspace().selected!.messages.at(-1)!.status).toBe('failed');
+  conversations.close(); conversations = new Conversations(join(directory, 'conversations.sqlite'));
+  expect(conversations.workspace().selected!.messages.find(message => message.id === answer.id)!.text).toContain('Context compacted');
+  expect(conversations.exploration(answer.id)!.result.unresolvedQuestions).toEqual(['Who calls this?']);
+});
+
+test('#17 a large search and huge individual line are bounded for the investigator without losing the main-owned evidence trail', async () => {
+  writeFileSync(join(root, 'many.txt'), Array.from({ length: 80 }, (_, index) => `matching source line ${index}`).join('\n'));
+  writeFileSync(join(root, 'huge.txt'), 'one huge line '.repeat(2000));
+  scripts = [response(undefined, 'investigate', { question: 'Inspect matching source lines and the huge line.' }),
+    response(undefined, 'sources_search', { root, path: 'many.txt', query: 'matching' }),
+    response(undefined, 'sources_read', { root, path: 'huge.txt', start: 1, end: 1 }),
+    response(undefined, 'finish_investigation', { findings: [{ claim: 'Matching line zero exists', support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: ['Huge line was withheld; narrow the document.'], candidateKnowledgeChanges: [] }), response('Bounded findings, huge line unknown [E1].')];
+  supervisor.start(null, 'Inspect without overflowing.'); await idle();
+  const searchOutput = (requests[2]!.body.messages as { role: string; content: string }[]).findLast(message => message.role === 'tool')!.content;
+  expect(Buffer.byteLength(searchOutput)).toBeLessThanOrEqual(3360);
+  expect(searchOutput).toContain('Model-capacity output limit');
+  expect(searchOutput).not.toContain('matching source line 79');
+  expect(conversations.workspace().selected!.messages.at(-1)!.evidence).toHaveLength(80);
+  expect(JSON.stringify(requests[3]!.body)).toContain('Excerpt exceeds output-byte limit');
+  expect(JSON.stringify(requests)).not.toContain('one huge line '.repeat(100));
+});
+
 test('real Pi agents use separate pinned API-key providers, preserve source boundaries and reserve each request', async () => {
   scripts = [response(undefined, 'investigate', { question: 'Find the answer' }), response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }),
     response(undefined, 'finish_investigation', { findings: [{ claim: 'Value is 42', support: 'source', evidenceIds: ['E1'] }], unresolvedQuestions: ['Runtime not observed'], candidateKnowledgeChanges: [], knowledgeCandidates: [knowledgeCandidate()] }), response('Value is 42 [E1].')];

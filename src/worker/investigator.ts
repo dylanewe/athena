@@ -8,6 +8,7 @@ import type { LiveCapabilities } from './live-agent';
 import { retainedHistory, SOURCE_INSTRUCTIONS } from './agent-context';
 
 interface InvestigatorRuntime {
+  sourceBytes?: number;
   knowledge?: (scope?: string) => import('../shared/knowledge').KnowledgeContext[];
   // Factory supplies the job's frozen model, shared request gate and cancellation.
   createAgent(tools: AgentTool[], systemPrompt: string): Agent;
@@ -31,7 +32,7 @@ function singleInvestigator(roots: LiveStart['roots'], runtime: InvestigatorRunt
       let summary: InvestigatorResult | undefined, scopeTruncated = false;
       const buildResult = (): InvestigatorResult => summary ?? {
         status: 'partial', findings: [], evidence: observed.slice(0, INVESTIGATION_LIMITS.references).map(item => ({ ...item, text: item.text.slice(0, INVESTIGATION_LIMITS.excerpt) })),
-        inspectedScope: scope, scopeTruncated, unresolvedQuestions: ['Investigator did not finish a structured result. Evidence is incomplete; runtime behavior was not observed.'], candidateKnowledgeChanges: [],
+        inspectedScope: scope, scopeTruncated, unresolvedQuestions: [investigator.state.errorMessage?.startsWith('Partial: context') ? investigator.state.errorMessage.slice(0, 500) : 'Investigator did not finish a structured result. Narrow follow-up: inspect one file and one unresolved question. Evidence is incomplete; runtime behavior was not observed.'], candidateKnowledgeChanges: [],
       };
       const sources = sourceTools({ run: async (operation, input) => {
         signal.throwIfAborted();
@@ -43,7 +44,7 @@ function singleInvestigator(roots: LiveStart['roots'], runtime: InvestigatorRunt
         if (!scope.includes(location)) { if (scope.length < INVESTIGATION_LIMITS.scope) scope.push(location); else scopeTruncated = true; }
         runtime.progress(`Investigator: ${operation} ${input.path}`.slice(0, 200));
         return result;
-      } }, runtime.check);
+      } }, runtime.check, runtime.sourceBytes);
       const finish: AgentTool = {
         name: 'finish_investigation', label: 'Return findings',
         description: 'Finish with bounded findings, evidence IDs, unresolved questions, and candidate knowledge changes (proposals only, never writes). Source-supported findings require observed evidence; interpretation is explicitly uncertain. No runtime observation is available.',
