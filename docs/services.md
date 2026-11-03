@@ -1,5 +1,7 @@
 # Services and concrete dependencies (#12)
 
+For #21's paginated filters, 200-claim presentation budget, focus/collapse controls, layout decision and measured large-inventory responsiveness, see [Focused knowledge maps](large-maps.md). The per-response provenance/model bounds below remain unchanged.
+
 **Services & dependencies** opens a read-only, repository-grouped neighborhood. **Explore investigation map** starts from the current answer's retained entities; **Explore neighborhood** on a knowledge detail starts from that claim. Without an answer/origin, the explorer starts from a bounded recent set, optionally scoped by registered repository name. Source locations distinguish entities even when names collide; names in different repositories are never silently equated. Services and interfaces are separate entities, not repository synonyms. A repository can yield multiple services without enumerating every route or adopting a manifest.
 
 Entity/connection buttons open the existing access-checked knowledge detail, evidence excerpts, current-file inspection, origins, conflicts and durable user annotations. **Ask about entity/connection** or **Ask follow-up question** prepares an editable, unsent new-conversation draft containing an explicitly untrusted lead. Only Send starts model work under the existing route, role pins, endpoint approvals and paid-work limits. Reverse visual group order affects display only. There is no graph edit/save/write API.

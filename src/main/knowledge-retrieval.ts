@@ -94,6 +94,7 @@ export class KnowledgeRetrieval {
     budget.coverage.required = input.operation === 'neighborhood' || input.operation === 'flow' || input.operation === 'flows';
     let ids: string[];
     let edges: NonNullable<KnowledgeResult['edges']> = [];
+    let neighborhood: { ids: string[]; nextOffset?: number; omitted: boolean } | undefined;
     if (input.operation === 'flow') {
       const origin = await this.checked(input.id, signal, budget);
       ids = origin?.record.flow ? [input.id, ...flowReferences(origin.record.flow)] : [];
@@ -103,7 +104,8 @@ export class KnowledgeRetrieval {
       if (input.serviceId) { filters.push('f.service = ?'); params.push(input.serviceId); }
       ids = this.db.prepare(`SELECT DISTINCT f.id FROM operation_flows f JOIN claims c ON c.id = f.id ${filters.length ? 'WHERE ' + filters.join(' AND ') : ''} ORDER BY c.rowid DESC LIMIT ? OFFSET ?`).all(...params, limit + 1, offset).map(row => String(row.id));
     } else if (input.operation === 'neighborhood') {
-      ids = await this.neighborhood(input, limit, signal, budget);
+      neighborhood = await this.neighborhood(input, limit, signal, budget);
+      ids = neighborhood.ids;
     } else if (input.operation === 'search') {
       const filters: string[] = [], params: SQLInputValue[] = [];
       if (input.scope) { filters.push('EXISTS (SELECT 1 FROM knowledge_names n WHERE n.id = c.id AND n.scope = ?)'); params.push(knowledgeName(input.scope)); }
@@ -137,6 +139,7 @@ export class KnowledgeRetrieval {
       consumed++;
       if (!checked) continue;
       const { record, stale } = checked;
+      if (input.operation === 'neighborhood' && ((input.provenance && record.provenance !== input.provenance) || (input.freshness && input.freshness !== (stale ? 'stale' : 'current')))) continue;
       const hit: KnowledgeHit = { ...claimContext(record, stale), aliases: record.aliases ?? [],
         freshness: stale ? 'stale' : 'current', evidence: record.evidence.map((item, index) => ({ index, citation: item.citation })),
         owners: record.owners.slice(0, 8), relations: record.relations.slice(0, 8).map(({ kind, target }) => ({ kind, target })),
@@ -172,6 +175,11 @@ export class KnowledgeRetrieval {
     }
     const next = offset + consumed;
     const result: KnowledgeResult = { items, ...(ids.length > consumed && next <= L.offset && consumed > 0 ? { nextOffset: next } : {}), notice: NOTICE };
+    if (neighborhood) {
+      delete result.nextOffset;
+      if (neighborhood.nextOffset !== undefined) result.nextOffset = neighborhood.nextOffset;
+      result.neighborhood = { omitted: neighborhood.omitted || items.length < ids.length };
+    }
     if (input.operation === 'flow' && items.length !== ids.length) {
       result.items = []; delete result.nextOffset;
       result.notice = NOTICE + ' Flow withheld: complete ordered support is unavailable under current access or response bounds.';
@@ -232,6 +240,7 @@ export class KnowledgeRetrieval {
     const budget = this.contexts.get(result);
     if (budget && !this.contextEligible(result)) {
       result.items = []; delete result.edges; delete result.evidence; delete result.evidenceId; delete result.derivation;
+      if (result.neighborhood) result.neighborhood.omitted = true;
       result.notice = NOTICE + ' Source access revoked during retrieval.';
       return result;
     }
@@ -239,43 +248,62 @@ export class KnowledgeRetrieval {
     result.derivation = budget.coverage.derivation;
     if (Buffer.byteLength(JSON.stringify(result)) > L.bytes) {
       result.items = []; delete result.edges; delete result.derivation; delete result.evidence; delete result.evidenceId;
+      if (result.neighborhood) result.neighborhood.omitted = true;
       result.notice = NOTICE + ' Typed knowledge withheld because complete attachment provenance exceeds response bounds.';
     }
     return result;
   }
   /** Bounded static adjacency, indexed only by the central claim publisher. No inference or independent source authority. */
-  private async neighborhood(input: Extract<KnowledgeRequest, { operation: 'neighborhood' }>, limit: number, signal: AbortSignal, budget: RetrievalBudget): Promise<string[]> {
+  private async neighborhood(input: Extract<KnowledgeRequest, { operation: 'neighborhood' }>, limit: number, signal: AbortSignal, budget: RetrievalBudget): Promise<{ ids: string[]; nextOffset?: number; omitted: boolean }> {
     const filters: string[] = [], params: SQLInputValue[] = [];
     if (input.scope) { filters.push('e.scope = ?'); params.push(knowledgeName(input.scope)); }
     if (input.messageId) { filters.push('EXISTS (SELECT 1 FROM owners o WHERE o.claim_id = e.id AND o.message_id = ?)'); params.push(input.messageId); }
-    const seeds = input.id ? [input.id] : this.db.prepare(`SELECT e.id FROM architecture_entities e JOIN claims c ON c.id = e.id ${filters.length ? 'WHERE ' + filters.join(' AND ') : ''} ORDER BY c.rowid DESC LIMIT ?`).all(...params, limit).map(row => String(row.id));
+    const tokens = input.query?.match(/[\p{L}\p{N}_]+/gu)?.slice(0, 12) ?? [];
+    if (input.query?.trim() && !tokens.length) return { ids: [], omitted: false };
+    if (tokens.length) { filters.push('knowledge_fts MATCH ?'); params.push(tokens.map(token => `"${token}"`).join(' AND ')); }
+    if (input.provenance) { filters.push("json_extract(c.value, '$.provenance') = ?"); params.push(input.provenance); }
+    const offset = input.offset ?? 0;
+    const seedLimit = input.id || input.depth === 0 ? limit : Math.max(1, Math.floor(limit / 3));
+    const candidates = input.id ? [input.id] : this.db.prepare(`SELECT e.id FROM architecture_entities e JOIN claims c ON c.id = e.id ${tokens.length ? 'JOIN knowledge_fts ON knowledge_fts.id = e.id' : ''} ${filters.length ? 'WHERE ' + filters.join(' AND ') : ''} ORDER BY CASE e.type WHEN 'service' THEN 0 WHEN 'interface' THEN 1 ELSE 2 END, c.rowid DESC LIMIT ? OFFSET ?`).all(...params, seedLimit + 1, offset).map(row => String(row.id));
+    const seeds = candidates.slice(0, seedLimit);
+    let omitted = candidates.length > seedLimit;
+    let nextOffset = !input.id && omitted && offset + seedLimit <= L.offset ? offset + seedLimit : undefined;
     const ids = new Set<string>();
     const queue: { id: string; depth: number }[] = [];
     const add = async (id: string, depth: number) => {
       if (ids.has(id)) return true;
-      if (ids.size >= limit || signal.aborted) return false;
+      if (ids.size >= limit || signal.aborted) { omitted = true; return false; }
       const item = await this.checked(id, signal, budget);
-      if (!item?.record.architecture) return false;
+      if (!item?.record.architecture) { omitted = true; return false; }
       ids.add(id);
       if (!isConnection(item.record.architecture)) queue.push({ id, depth });
       return true;
     };
     // Reserve room for connection claims and opposite endpoints before filling with extra seeds.
-    const seedLimit = input.id || input.depth === 0 ? limit : Math.max(1, Math.floor(limit / 3));
-    for (const id of seeds.slice(0, seedLimit)) {
+    for (const id of seeds) {
       const origin = await this.checked(id, signal, budget);
       const a = origin?.record.architecture;
       if (a && isConnection(a)) {
         await add(a.from, 0); await add(a.to, 0);
         if (input.depth > 0) await add(id, 0);
       } else if (a) await add(id, 0);
+      else omitted = true;
     }
-    for (let cursor = 0; cursor < queue.length && ids.size < limit; cursor++) {
+    for (let cursor = 0; cursor < queue.length; cursor++) {
       const node = queue[cursor];
       if (node.depth >= input.depth) continue;
       const kinds = input.kinds;
-      const rows = this.db.prepare(`SELECT id, source, target FROM architecture_connections WHERE (source = ? OR target = ?) ${kinds ? `AND type IN (${kinds.map(() => '?').join(',')})` : ''} ORDER BY rowid DESC LIMIT ?`).all(node.id, node.id, ...(kinds ?? []), limit);
-      for (const row of rows) {
+      // An origin's direct-neighbor pages reserve space for the origin plus complete
+      // connection/endpoint triples. Deeper traversals remain bounded leads; focus
+      // a frontier entity to page its direct neighbors rather than scanning a graph.
+      const rowLimit = Math.max(1, Math.floor((limit - ids.size) / 3));
+      const rowOffset = input.id && node.depth === 0 ? offset : 0;
+      const rows = this.db.prepare(`SELECT id, source, target FROM architecture_connections WHERE (source = ? OR target = ?) ${kinds ? `AND type IN (${kinds.map(() => '?').join(',')})` : ''} ORDER BY rowid DESC LIMIT ? OFFSET ?`).all(node.id, node.id, ...(kinds ?? []), rowLimit + 1, rowOffset);
+      if (rows.length > rowLimit) {
+        omitted = true;
+        if (input.id && node.depth === 0 && offset + rowLimit <= L.offset) nextOffset = offset + rowLimit;
+      }
+      for (const row of rows.slice(0, rowLimit)) {
         // Checking the connection includes both endpoints and all transitive provenance in this response's budget.
         if (!await add(String(row.id), node.depth + 1)) continue;
         await add(String(row.source), node.depth + 1); await add(String(row.target), node.depth + 1);
@@ -285,7 +313,7 @@ export class KnowledgeRetrieval {
       if (ids.size >= limit) break;
       await add(id, 0);
     }
-    return [...ids];
+    return { ids: [...ids], nextOffset, omitted };
   }
   async compareAnnotationSnapshot(record: KnowledgeRecord, external: AbortSignal, connected: boolean, context?: object) {
     const inherited = context ? this.contexts.get(context) : this.budget(external);

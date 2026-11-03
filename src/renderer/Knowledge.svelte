@@ -3,7 +3,7 @@
   import Contradictions from './Contradictions.svelte';
   import Resolutions from './Resolutions.svelte';
   import type { KnowledgeHit } from '../shared/knowledge';
-  let { messageId = '', recordId = '', writable, openConversation, prepareRefresh, openExplorer, ask, openFlow, returnToFlow }: { openFlow: (id: string) => void; returnToFlow?: () => void; messageId?: string; recordId?: string; writable: boolean; openConversation: (id: string) => void; prepareRefresh: (record: KnowledgeHit) => void; openExplorer: (id: string) => void; ask: (record: KnowledgeHit) => void } = $props();
+  let { messageId = '', recordId = '', writable, openConversation, prepareRefresh, openExplorer, ask, openFlow, returnToFlow, returnToMap }: { returnToMap?: () => void; openFlow: (id: string) => void; returnToFlow?: () => void; messageId?: string; recordId?: string; writable: boolean; openConversation: (id: string) => void; prepareRefresh: (record: KnowledgeHit) => void; openExplorer: (id: string) => void; ask: (record: KnowledgeHit) => void } = $props();
   let records = $state<KnowledgeHit[]>([]);
   let error = $state('');
   let busy = $state(true);
@@ -65,6 +65,7 @@
   <header><div><div class="eyebrow">Source-backed · On this Mac</div><h1>Knowledge</h1></div><button disabled={busy} onclick={() => detailId ? showClaim(detailId) : load(offset)}>Check freshness</button></header>
   <div class="knowledge-content">
     {#if returnToFlow}<button onclick={returnToFlow}>Return to request flow</button>{/if}
+    {#if returnToMap}<button onclick={returnToMap}>Return to investigation map</button>{/if}
     <p class="intro">Find concise architectural and domain findings. Static inspection is not runtime observation. Prepare refresh opens an unsent investigation draft; only Send starts model work under your existing permissions and job limits.</p>
     <form class="search" onsubmit={event => { event.preventDefault(); search(); }}>
       <label>Search knowledge<input aria-label="Search knowledge" bind:value={query} maxlength="200" placeholder="Topic, claim or evidence text" /></label>

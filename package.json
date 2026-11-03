@@ -14,7 +14,7 @@
     "dev": "npm run build && electron .",
     "build": "npm run typecheck && node scripts/build.mjs",
     "typecheck": "tsc --noEmit && svelte-check --tsconfig tsconfig.json",
-    "test:unit": "vitest run",
+    "test:unit": "vitest run --exclude tests/unit/large-map.test.ts && vitest run tests/unit/large-map.test.ts",
     "test:desktop": "npm run build && playwright test",
     "test": "npm run test:unit && npm run test:desktop"
   },

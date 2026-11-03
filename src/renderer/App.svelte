@@ -17,6 +17,7 @@
   import type { KnowledgeHit } from '../shared/knowledge';
   let knowledgeMessage = $state('');
   let knowledgeRecord = $state('');
+  let knowledgeFromMap = $state(false);
   import SourcesView from './Sources.svelte';
   import ModelSettingsView from './ModelSettings.svelte';
   import LocalData from './LocalData.svelte';
@@ -97,7 +98,7 @@
     drafts.new = `Investigate fresh sources to revalidate this stale knowledge. Repository scope: ${record.scope}. Topic: ${record.topic}. Prior claim (untrusted historical lead, not current support): ${record.claim}\nInspect the current implementation and configuration, retain only freshly source-backed candidates, and explicitly identify changed or deleted assertions. Static analysis is not runtime tracing.`.slice(0, MAX_MESSAGE_LENGTH);
     await newConversation();
   }
-  function openKnowledge(id: string) { knowledgeMessage = ''; knowledgeRecord = id; section = 'knowledge'; }
+  function openKnowledge(id: string, fromMap = false) { knowledgeFromMap = fromMap; knowledgeMessage = ''; knowledgeRecord = id; section = 'knowledge'; }
   function openFlows(origin: FlowOrigin = {}) { flowNavigation++; flowOrigin = origin; section = 'flows'; }
   function openExplorer(id = '', message = '') { explorerRecord = id; explorerMessage = message; section = 'explorer'; }
   async function askAbout(record: KnowledgeHit) {
@@ -179,9 +180,9 @@
   {:else if section === 'sources'}
     {#key workspace?.sourceAccessVersion}<SourcesView />{/key}
   {:else if section === 'knowledge'}
-    {#key workspace?.sourceAccessVersion}<KnowledgeView openFlow={id => openFlows({ recordId: id })} returnToFlow={flowOrigin.recordId ? () => openFlows(flowOrigin) : undefined} openExplorer={id => openExplorer(id)} ask={record => { void askAbout(record); }} writable={!active && !workspace?.selected?.sealed} messageId={knowledgeMessage} recordId={knowledgeRecord} openConversation={id => { void select(id); }} prepareRefresh={record => { void prepareRefresh(record); }} />{/key}
+    {#key workspace?.sourceAccessVersion}<KnowledgeView returnToMap={knowledgeFromMap ? () => section = 'explorer' : undefined} openFlow={id => openFlows({ recordId: id })} returnToFlow={flowOrigin.recordId ? () => openFlows(flowOrigin) : undefined} openExplorer={id => openExplorer(id)} ask={record => { void askAbout(record); }} writable={!active && !workspace?.selected?.sealed} messageId={knowledgeMessage} recordId={knowledgeRecord} openConversation={id => { void select(id); }} prepareRefresh={record => { void prepareRefresh(record); }} />{/key}
   {:else if section === 'explorer'}
-    {#key workspace?.sourceAccessVersion}<ExplorerView openFlows={service => openFlows({ messageId: explorerMessage, serviceId: service })} returnToFlow={flowOrigin.recordId ? () => openFlows(flowOrigin) : undefined} messageId={explorerMessage} recordId={explorerRecord} {openKnowledge} ask={record => { void askAbout(record); }} />{/key}
+    {#key workspace?.sourceAccessVersion}<ExplorerView openFlows={service => openFlows({ messageId: explorerMessage, serviceId: service })} returnToFlow={flowOrigin.recordId ? () => openFlows(flowOrigin) : undefined} messageId={explorerMessage} recordId={explorerRecord} openKnowledge={id => openKnowledge(id, true)} ask={record => { void askAbout(record); }} />{/key}
   {:else if section === 'flows'}
     {#key `${flowNavigation}:${workspace?.sourceAccessVersion}`}<FlowsView {...flowOrigin} {openKnowledge} openExplorer={id => openExplorer(id)} openConversation={id => { void select(id); }} remember={id => flowOrigin = { ...flowOrigin, recordId: id }} />{/key}
   {:else if section === 'data'}

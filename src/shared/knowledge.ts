@@ -74,7 +74,7 @@ const recordId = Type.String({ pattern: '^K[a-f0-9]{64}$' });
 const page = { limit: Type.Optional(Type.Integer({ minimum: 1, maximum: KNOWLEDGE_LIMITS.results })), offset: Type.Optional(Type.Integer({ minimum: 0, maximum: KNOWLEDGE_LIMITS.offset })) };
 export const knowledgeRequestSchema = Type.Union([
   Type.Object({ operation: Type.Literal('search'), query: Type.String({ maxLength: 200, pattern: '^[^\\x00-\\x1f\\x7f]*$' }), scope: Type.Optional(bounded(4096)), exact: Type.Optional(Type.Boolean()), messageId: Type.Optional(bounded(80)), ...page }, { additionalProperties: false }),
-  Type.Object({ operation: Type.Literal('neighborhood'), id: Type.Optional(recordId), scope: Type.Optional(bounded(4096)), messageId: Type.Optional(bounded(80)), depth: Type.Integer({ minimum: 0, maximum: 3 }), kinds: Type.Optional(Type.Array(connectionType, { minItems: 1, maxItems: 5, uniqueItems: true })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: KNOWLEDGE_LIMITS.results })) }, { additionalProperties: false }),
+  Type.Object({ operation: Type.Literal('neighborhood'), id: Type.Optional(recordId), scope: Type.Optional(bounded(4096)), messageId: Type.Optional(bounded(80)), depth: Type.Integer({ minimum: 0, maximum: 3 }), kinds: Type.Optional(Type.Array(connectionType, { minItems: 1, maxItems: 5, uniqueItems: true })), query: Type.Optional(Type.String({ maxLength: 200, pattern: '^[^\\x00-\\x1f\\x7f]*$' })), provenance: Type.Optional(Type.Enum(['declared', 'statically-inferred'])), freshness: Type.Optional(Type.Enum(['current', 'stale'])), ...page }, { additionalProperties: false }),
   Type.Object({ operation: Type.Literal('flows'), messageId: Type.Optional(bounded(80)), serviceId: Type.Optional(recordId), ...page }, { additionalProperties: false }),
   Type.Object({ operation: Type.Literal('flow'), id: recordId }, { additionalProperties: false }),
   Type.Object({ operation: Type.Literal('detail'), id: recordId }, { additionalProperties: false }),
@@ -99,6 +99,8 @@ export interface KnowledgeResult {
   items: KnowledgeHit[];
   edges?: { source: string; kind: KnowledgeRecord['relations'][number]['kind']; target: string }[];
   nextOffset?: number;
+  /** Candidate pagination is not proof of complete or accessible architecture. */
+  neighborhood?: { omitted: boolean };
   notice: string;
   /** Main-owned runtime citation, only for a current evidence request. */
   evidence?: Evidence;

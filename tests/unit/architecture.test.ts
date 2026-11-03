@@ -92,9 +92,51 @@ test.each([
   expect((await f.knowledge.retrieve({ operation: 'search', query: '' })).items).toEqual([]);
 });
 
-test.each([{ depth: 4 }, { depth: -1 }, { depth: 1, limit: 21 }, { depth: 1, kinds: ['similarity'] }, { depth: 1, query: 'SQL' }])('rejects unbounded or untyped traversal: %j', async request => {
+test.each([{ depth: 4 }, { depth: -1 }, { depth: 1, limit: 21 }, { depth: 1, kinds: ['similarity'] }, { depth: 1, arbitrary: 'SQL' }])('rejects unbounded or untyped traversal: %j', async request => {
   const f = await fixture();
   await expect(f.knowledge.retrieve({ operation: 'neighborhood', ...request } as never)).rejects.toThrow('Invalid bounded');
+});
+
+test('map pages expose unloaded neighborhoods, filter indexed topics and provenance, and never turn withheld access into isolation', async () => {
+  const f = await fixture();
+  for (let batch = 0; batch < 3; batch++) await f.publish(Array.from({ length: 12 }, (_, i) => f.entity(`C${i + 1}`, `Service ${batch * 12 + i}`)));
+  const first = await f.knowledge.retrieve({ operation: 'neighborhood', scope: 'shop', depth: 0, limit: 20 });
+  expect(first.items).toHaveLength(20);
+  expect(first.nextOffset).toBe(20);
+  expect(first.neighborhood?.omitted).toBe(true);
+  const second = await f.knowledge.retrieve({ operation: 'neighborhood', scope: 'shop', depth: 0, limit: 20, offset: first.nextOffset });
+  expect(second.items).toHaveLength(16);
+  expect(second.items.some(item => first.items.some(previous => previous.id === item.id))).toBe(false);
+  expect(second.nextOffset).toBeUndefined();
+  const found = await f.knowledge.retrieve({ operation: 'neighborhood', query: 'Service 7', depth: 0, provenance: 'statically-inferred', freshness: 'current' });
+  expect(found.items.map(item => item.topic)).toEqual(['Service 7']);
+  expect((await f.knowledge.retrieve({ operation: 'neighborhood', query: 'Service 7', depth: 0, provenance: 'declared' })).items).toEqual([]);
+  f.snapshot.repositories[0].presence = 'missing';
+  const revoked = await f.knowledge.retrieve({ operation: 'neighborhood', scope: 'shop', depth: 0, limit: 20 });
+  expect(revoked.items).toEqual([]);
+  expect(revoked.neighborhood?.omitted).toBe(true);
+});
+
+test('direct expansion pages remain deterministic through cycles and expose unloaded neighbors without following similarity', async () => {
+  const f = await fixture();
+  const [hub] = await f.publish([f.entity('C1', 'Hub')]);
+  for (let batch = 0; batch < 3; batch++) await f.publish(Array.from({ length: 5 }, (_, i) => [f.entity(`C${i * 2 + 1}`, `Neighbor ${batch * 5 + i}`), f.connection(`C${i * 2 + 2}`, hub, `C${i * 2 + 1}`)]).flat());
+  const request = { operation: 'neighborhood' as const, id: hub, depth: 1, limit: 20 };
+  const first = await f.knowledge.retrieve(request);
+  expect(first.nextOffset).toBe(6);
+  expect(first.neighborhood?.omitted).toBe(true);
+  expect((await f.knowledge.retrieve(request)).items.map(item => item.id)).toEqual(first.items.map(item => item.id));
+  const second = await f.knowledge.retrieve({ ...request, offset: first.nextOffset });
+  expect(second.items.filter(item => item.kind === 'relationship').some(item => first.items.some(previous => previous.id === item.id))).toBe(false);
+  const leaf = first.items.find(item => item.id !== hub && item.kind === 'entity')!;
+  await f.publish([{ ...f.connection('C1', leaf.id, hub, 'event'), topic: 'Cycle back to hub' }]);
+  const cyclic = await f.knowledge.retrieve({ ...request, depth: 3, kinds: ['event'] });
+  expect(cyclic.items).toHaveLength(3);
+  expect(new Set(cyclic.items.map(item => item.id)).size).toBe(3);
+  writeFileSync(join(f.directory, 'shop', 'new.ts'), 'changed();');
+  expect((await f.knowledge.retrieve({ ...request, freshness: 'current' })).items).toEqual([]);
+  expect((await f.knowledge.retrieve({ ...request, freshness: 'stale' })).items.length).toBeGreaterThan(0);
+  expect((await f.knowledge.retrieve({ operation: 'neighborhood', scope: 'ledger', depth: 1 })).items).toEqual([]);
 });
 
 test('bounded scope seeds reserve room for concrete connections instead of filling every result slot with entities', async () => {
