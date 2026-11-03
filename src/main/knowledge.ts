@@ -166,7 +166,7 @@ export class Knowledge {
       return { connected: !!current, freshness: checked.retained.stale || checked.current?.stale || changed ? 'stale' as const : 'current' as const };
     });
   }
-  targetEligible(target: ResolutionTarget): boolean { return this.eligible(target.record); }
+  inspectionEligible(context?: object): boolean { return !!context && this.retrieval.contextEligible(context); }
   private resolutionVersion(record: KnowledgeRecord, derivation: NonNullable<KnowledgeResult['derivation']>): string {
     return digest({ id: record.id, evidence: record.evidence, dependencies: derivation.files, scopes: derivation.scopes, checkouts: derivation.checkouts });
   }

@@ -191,6 +191,30 @@ test.each(['current', 'reconnected-origin'] as const)('annotation inspection rec
   expect((await inspection).items).toEqual([]);
 });
 
+test('annotation finalization includes newly added current transitive provenance under unchanged claim IDs', async () => {
+  writeFileSync(join(right, 'second.ts'), 'export const second = true;');
+  const [dependency] = await publish(left), [first] = await publish(right);
+  const entry = (await sources.run('read', { root: right, path: 'second.ts', start: 1, end: 1 })).entries[0];
+  const [second] = await knowledge.publish({ owner: { conversationId: 'c', messageId: 'second' }, evidence: [{ id: 'E1', citation: entry.citation!, text: entry.text! }], candidates: [{ ...candidate('right'), topic: 'Second target' }], completed: true, environmentExposed: false, signal: new AbortController().signal });
+  const annotation = (await resolutions.write({ operation: 'annotate', kind: 'note', text: 'Both originally independent targets', claimIds: [first, second] })).items[0];
+  const repeated = await knowledge.publish({ owner: { conversationId: 'c', messageId: 'repeat' }, evidence: await evidence(right), candidates: [candidate('right', [{ kind: 'depends-on', target: dependency }])], completed: true, environmentExposed: false, signal: new AbortController().signal });
+  expect(repeated).toEqual([first]);
+  const actual = (await vi.importActual<typeof fs>('node:fs/promises')).open;
+  let entered!: () => void, resume!: () => void, secondReads = 0;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const released = new Promise<void>(resolve => { resume = resolve; });
+  vi.mocked(fs.open).mockImplementation(async (...args) => {
+    const handle = await actual(...args);
+    // First read is the first target's checkout census; second is the next
+    // target's permission read, after the first target's checks completed.
+    if (String(args[0]) === join(right, 'second.ts') && ++secondReads === 2) { entered(); await released; }
+    return handle;
+  });
+  const inspection = resolutions.read({ operation: 'inspect', id: annotation.id });
+  await waiting; access.revoke(left); resume();
+  expect((await inspection).items).toEqual([]);
+});
+
 test('withdrawal during retrieval IO never returns a cached excerpt or claim', async () => {
   const [id] = await publish(left);
   const actual = (await vi.importActual<typeof fs>('node:fs/promises')).open;

@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Sources } from '../../src/main/sources';
 import { SourceCheckouts } from '../../src/main/source-checkouts';
-import { FOLDER_CONSENT, type InventorySnapshot } from '../../src/shared/inventory';
+import { FOLDER_CONSENT, folderGranted, type InventorySnapshot } from '../../src/shared/inventory';
 
 let root: string, sources: Sources, checkouts: SourceCheckouts;
 const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' });
@@ -25,7 +25,7 @@ beforeEach(() => {
     repositories: [{ name: 'service', path: root, presence: 'present', documentationRoots: [], boundaries: [], fileCount: 1, examined: false }],
     candidates: [], discovery: { status: 'complete', visited: 0, current: '', nonGitFiles: 0, failures: [] },
   };
-  const inventory = { snapshot: () => structuredClone(snapshot) };
+  const inventory = { snapshot: () => structuredClone(snapshot), granted: (path: string) => folderGranted(snapshot.roots, path) };
   sources = new Sources(':memory:', inventory); checkouts = new SourceCheckouts(sources, inventory);
 });
 afterEach(() => { sources.close(); rmSync(root, { recursive: true, force: true }); });

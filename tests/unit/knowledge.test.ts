@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Knowledge } from '../../src/main/knowledge';
 import { Sources } from '../../src/main/sources';
 import { KnowledgeGateway } from '../../src/main/knowledge-bridge';
-import { FOLDER_CONSENT, type InventorySnapshot } from '../../src/shared/inventory';
+import { FOLDER_CONSENT, folderGranted, type InventorySnapshot } from '../../src/shared/inventory';
 import type { Evidence } from '../../src/shared/live';
 import { KNOWLEDGE_LIMITS } from '../../src/shared/knowledge';
 
@@ -15,7 +15,7 @@ const root = join(directory, 'sources'); mkdirSync(join(root, 'api', '.git'), { 
 writeFileSync(join(root, 'api', 'service.ts'), 'export function serve() { return "ready"; }\n');
 writeFileSync(join(root, 'api', 'README.md'), 'The service handles requests.\n');
 const snapshot: InventorySnapshot = { roots: [{ path: root, consent: FOLDER_CONSENT, acceptedAt: 'now', includedLocations: [] }], repositories: [{ name: 'public-api', path: join(root, 'api'), presence: 'present', documentationRoots: [], boundaries: [], fileCount: 2, examined: false }], candidates: [], discovery: { status: 'complete', visited: 0, current: '', nonGitFiles: 0, failures: [] } };
-const inventory = { snapshot: () => structuredClone(snapshot) };
+const inventory = { snapshot: () => structuredClone(snapshot), granted: (path: string) => folderGranted(snapshot.roots, path) };
 const sources = new Sources(':memory:', inventory);
 const knowledge = new Knowledge(join(directory, 'knowledge.sqlite'), sources, inventory, () => {});
 beforeEach(() => {

@@ -8,7 +8,7 @@ import { Sources } from '../../src/main/sources';
 import { DatabaseSync } from 'node:sqlite';
 import { ResolutionGateway } from '../../src/main/resolution-bridge';
 import { Conversations } from '../../src/main/conversations';
-import { FOLDER_CONSENT, type InventorySnapshot } from '../../src/shared/inventory';
+import { FOLDER_CONSENT, folderGranted, type InventorySnapshot } from '../../src/shared/inventory';
 
 const cleanup: (() => void)[] = [];
 afterEach(() => { for (const action of cleanup.splice(0).reverse()) action(); });
@@ -19,7 +19,7 @@ async function fixture() {
   writeFileSync(join(root, 'README.md'), 'Use dependency B.\n');
   writeFileSync(join(root, 'service.ts'), 'export const result = C.call();\n');
   const snapshot: InventorySnapshot = { roots: [{ path: root, consent: FOLDER_CONSENT, acceptedAt: 'now', includedLocations: [] }], repositories: [{ name: 'service', path: root, presence: 'present', documentationRoots: [], boundaries: [], fileCount: 2, examined: false }], candidates: [], discovery: { status: 'complete', visited: 0, current: '', nonGitFiles: 0, failures: [] } };
-  const inventory = { snapshot: () => structuredClone(snapshot) };
+  const inventory = { snapshot: () => structuredClone(snapshot), granted: (path: string) => folderGranted(snapshot.roots, path) };
   const conversations = new Conversations(join(directory, 'conversations.sqlite')); cleanup.push(() => conversations.close());
   const sources = new Sources(':memory:', inventory); cleanup.push(() => sources.close());
   const knowledge = new Knowledge(join(directory, 'knowledge.sqlite'), sources, inventory, value => conversations.assertClean(value)); cleanup.push(() => knowledge.close());

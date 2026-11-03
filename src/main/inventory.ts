@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { constants } from 'node:fs';
 import { lstat, readdir, realpath, open } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, sep } from 'node:path';
-import { FOLDER_CONSENT, type DesignatedRoot, type Discovery, type InventorySnapshot, type Repository, type RepositoryCandidate } from '../shared/inventory';
+import { FOLDER_CONSENT, folderGranted, type DesignatedRoot, type Discovery, type InventorySnapshot, type Repository, type RepositoryCandidate } from '../shared/inventory';
 
 // A worktree/submodule gitfile may point outside the root. Recognize it without following it.
 async function isGitFile(path: string, assertAccess: () => void): Promise<boolean> {
@@ -286,8 +286,11 @@ export class Inventory {
     if (!this.closed) { this.closed = true; this.db.close(); }
   }
 
+  /** Hot IO guards need current authority, not a cloned renderer inventory. */
+  granted(path: string): boolean { return folderGranted(this.state.roots, path); }
+
   private assertGranted(path: string): void {
-    if (!this.state.roots.some(root => root.path === path && !root.revokedAt && root.consent === FOLDER_CONSENT && root.acceptedAt)) throw new Error('Folder permission withdrawn.');
+    if (!this.granted(path)) throw new Error('Folder permission withdrawn.');
   }
 
   private requireIdle(): void {

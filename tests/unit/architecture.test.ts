@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { Knowledge } from '../../src/main/knowledge';
 import { KnowledgeGateway } from '../../src/main/knowledge-bridge';
 import { Sources } from '../../src/main/sources';
-import { FOLDER_CONSENT, type InventorySnapshot } from '../../src/shared/inventory';
+import { FOLDER_CONSENT, folderGranted, type InventorySnapshot } from '../../src/shared/inventory';
 import type { Evidence } from '../../src/shared/live';
 
 const cleanups: (() => void)[] = [];
@@ -18,7 +18,7 @@ async function fixture() {
     writeFileSync(join(directory, name, 'services.ts'), name === 'shop' ? 'export const api = serve();\nexport const worker = consume("orders");\napi.get("/balance", ledger);\nworker.store("postgres://orders");\n' : 'export const api = serve("/balance");\n');
     snapshot.repositories.push({ name, path: join(directory, name), presence: 'present', documentationRoots: [], boundaries: [], fileCount: 1, examined: false });
   }
-  const inventory = { snapshot: () => structuredClone(snapshot) };
+  const inventory = { snapshot: () => structuredClone(snapshot), granted: (path: string) => folderGranted(snapshot.roots, path) };
   const sources = new Sources(':memory:', inventory);
   const path = join(directory, 'knowledge.sqlite');
   const knowledge = new Knowledge(path, sources, inventory, () => {});

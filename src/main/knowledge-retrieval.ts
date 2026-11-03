@@ -17,6 +17,7 @@ function claimContext(record: KnowledgeRecord, stale: boolean): KnowledgeContext
 
 interface RetrievalBudget {
   records: Map<string, KnowledgeRecord | undefined>;
+  authorized: Set<string>;
   sources: Set<string>;
   checkouts: Map<string, boolean>;
   canPersistInvalidations: () => boolean;
@@ -29,7 +30,7 @@ export class KnowledgeRetrieval {
   /** Main-private response capabilities: never serialized into renderer/model results or persistence. */
   private readonly contexts = new WeakMap<object, RetrievalBudget>();
   private budget(signal: AbortSignal, canPersistInvalidations = () => false): RetrievalBudget {
-    return { records: new Map(), sources: new Set(), checkouts: new Map(), canPersistInvalidations, signal, coverage: { required: false, derivation: { files: [], scopes: [], checkouts: [] } } };
+    return { records: new Map(), authorized: new Set(), sources: new Set(), checkouts: new Map(), canPersistInvalidations, signal, coverage: { required: false, derivation: { files: [], scopes: [], checkouts: [] } } };
   }
   inspectionContext(signal: AbortSignal): object {
     const context = {};
@@ -182,10 +183,38 @@ export class KnowledgeRetrieval {
     this.contexts.set(result, budget);
     return this.completeResult(result);
   }
+  /** Final authorization for every inspected current/retained graph, including
+   * dependencies added under an unchanged ID while other targets awaited IO.
+   * This is bounded local provenance checking, never a fresh filesystem read. */
+  contextEligible(context: object): boolean {
+    const budget = this.contexts.get(context);
+    if (!budget || budget.signal.aborted) return false;
+    const sources = new Set<string>();
+    const eligible = (source: SourceIdentity) => {
+      sources.add(JSON.stringify(source));
+      return sources.size <= L.sourceChecks && this.eligible(source);
+    };
+    const retained = budget.coverage.derivation;
+    if (![...retained.files, ...retained.scopes].every(eligible) || !retained.checkouts.every(this.eligible)) return false;
+    const encountered = new Set(budget.records.keys()), visited = new Set<string>();
+    // Looked-up candidates that exhausted the response budget never authorized
+    // any output and must not consume a second source-check allowance here.
+    const queue = [...budget.authorized].filter(id => !!budget.records.get(id));
+    for (let index = 0; index < queue.length; index++) {
+      const id = queue[index];
+      if (visited.has(id)) continue;
+      if (!encountered.has(id) && encountered.size >= L.graph) return false;
+      encountered.add(id); visited.add(id);
+      const current = this.load(id);
+      if (!current || ![...current.dependencies, ...current.scopes].every(eligible) || ![...current.evidence.map(item => item.citation), ...(current.checkouts ?? [])].every(this.eligible)) return false;
+      for (const edge of current.relations) if (edge.kind === 'depends-on') queue.push(edge.target);
+    }
+    return true;
+  }
   /** Finalize again after annotation attachment under the same opaque read context. */
   completeResult(result: KnowledgeResult): KnowledgeResult {
     const budget = this.contexts.get(result);
-    if (budget && [...budget.records.values()].some(record => record && ![...record.dependencies, ...record.scopes, ...(record.checkouts ?? [])].every(source => this.eligible(source)))) {
+    if (budget && !this.contextEligible(result)) {
       result.items = []; delete result.edges; delete result.evidence; delete result.evidenceId; delete result.derivation;
       result.notice = NOTICE + ' Source access revoked during retrieval.';
       return result;
@@ -340,6 +369,7 @@ export class KnowledgeRetrieval {
     coverage.scopes = merge(coverage.scopes, derivation.scopes);
     coverage.checkouts = merge(coverage.checkouts, derivation.checkouts);
     if (!unique.every(source => this.eligible(source)) || !checkouts.every(source => this.eligible(source))) return;
+    for (const id of visited.keys()) budget.authorized.add(id);
     return { record, stale, derivation };
   }
 }

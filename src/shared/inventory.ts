@@ -1,6 +1,10 @@
 export const PURGE_CONFIRMATION = 'Permanently delete associated local data';
 export const FOLDER_CONSENT = 'Eligible material throughout this folder, including future repositories and non-Git documents, may be investigated and sent to providers you explicitly approve. Repository inventory and documentation starting directories organize knowledge; they do not restrict access. Folder consent does not approve a provider, secret access, environment access, or paid work.';
 
+export function folderGranted(roots: DesignatedRoot[], path: string): boolean {
+  return roots.some(root => root.path === path && !root.revokedAt && root.consent === FOLDER_CONSENT && !!root.acceptedAt);
+}
+
 export interface DesignatedRoot {
   path: string;
   revokedAt?: string;

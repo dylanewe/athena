@@ -6,7 +6,7 @@ import { Knowledge } from '../../src/main/knowledge';
 import { Sources } from '../../src/main/sources';
 import { KnowledgeGateway } from '../../src/main/knowledge-bridge';
 import { Resolutions } from '../../src/main/resolutions';
-import { FOLDER_CONSENT, type InventorySnapshot } from '../../src/shared/inventory';
+import { FOLDER_CONSENT, folderGranted, type InventorySnapshot } from '../../src/shared/inventory';
 import type { Evidence } from '../../src/shared/live';
 import type { KnowledgeCandidate, OperationFlow } from '../../src/shared/knowledge';
 import { branchingCandidates, branchingFiles, operationCandidates, operationFiles, parallelCandidates, parallelFiles } from '../fixtures/operation';
@@ -22,7 +22,7 @@ async function fixture(input: { files?: readonly (readonly [string, string, stri
     snapshot.repositories.push({ name: scope, path: join(directory, scope), presence: 'present', documentationRoots: [], boundaries: [], fileCount: 1, examined: false });
   }
   for (const [scope, path, text] of files) writeFileSync(join(directory, scope, path), text);
-  const inventory = { snapshot: () => structuredClone(snapshot) };
+  const inventory = { snapshot: () => structuredClone(snapshot), granted: (path: string) => folderGranted(snapshot.roots, path) };
   const sources = new Sources(':memory:', inventory);
   const path = join(directory, 'knowledge.sqlite');
   const knowledge = new Knowledge(path, sources, inventory, () => {});

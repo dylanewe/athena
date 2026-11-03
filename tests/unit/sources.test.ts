@@ -23,6 +23,7 @@ async function repository(path: string) { await mkdir(join(root, path), { recurs
 const read = (path: string, start = 1, end = 40) => sources.run('read', { root, path, start, end });
 beforeEach(async () => {
   vi.mocked(fs.open).mockImplementation((await vi.importActual<typeof fs>('node:fs/promises')).open).mockClear();
+  vi.mocked(fs.realpath).mockImplementation((await vi.importActual<typeof fs>('node:fs/promises')).realpath).mockClear();
   directory = await realpath(await mkdtemp(join(tmpdir(), 'athena-sources-')));
   root = join(directory, 'chosen'); await mkdir(root);
   inventory = new Inventory(join(directory, 'inventory.sqlite'));
@@ -38,6 +39,30 @@ test('revocation during an in-flight read discards excerpts and future tool read
   expect(await pending).toMatchObject({ status: 'cancelled', entries: [] });
   await expect(read('notes.md')).rejects.toThrow(/permission/i);
   await expect(sourceTools(sources)[2].execute('read-id', { root, path: 'notes.md', start: 1, end: 1 })).resolves.toMatchObject({ isError: true });
+});
+
+test.each(['revoke', 'cancel'] as const)('%s during path validation prevents every subsequent filesystem probe', async action => {
+  await file('a/b/c.ts');
+  const actual = (await vi.importActual<typeof fs>('node:fs/promises')).realpath;
+  let entered!: () => void, resume!: () => void, paused = false;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const released = new Promise<void>(resolve => { resume = resolve; });
+  vi.mocked(fs.realpath).mockImplementation(async path => {
+    const canonical = await actual(path);
+    if (!paused && String(path) === root) { paused = true; entered(); await released; }
+    return canonical;
+  });
+  const controller = new AbortController();
+  const reading = sources.run('read', { root, path: 'a/b/c.ts' }, controller.signal);
+  await waiting;
+  if (action === 'revoke') inventory.revoke(root); else controller.abort();
+  vi.mocked(fs.realpath).mockClear(); vi.mocked(fs.lstat).mockClear(); vi.mocked(fs.open).mockClear();
+  resume(); await reading;
+  // Cancellation races a stopped response against IO; let its path walk drain.
+  await new Promise(resolve => setImmediate(resolve));
+  expect(vi.mocked(fs.realpath).mock.calls).toEqual([]);
+  expect(vi.mocked(fs.lstat).mock.calls).toEqual([]);
+  expect(vi.mocked(fs.open).mock.calls).toEqual([]);
 });
 
 test('lists and searches non-Git heterogeneous text and cites bounded UTF-8 ranges without repository requirements', async () => {

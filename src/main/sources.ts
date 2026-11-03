@@ -8,7 +8,6 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import ignore, { type Ignore } from 'ignore';
 import type { Inventory } from './inventory';
-import { FOLDER_CONSENT } from '../shared/inventory';
 import { suspectedSecret } from './secret-check';
 import { SOURCE_LIMITS as L, SOURCE_WARNING, type SourceCheckout, type SourceCitation, type SourceEntry, type SourceScope, type SourceException, type SourceOperation, type SourceRequest, type SourceResult } from '../shared/sources';
 
@@ -49,7 +48,7 @@ function actualEnvironment(path: string): boolean {
 export class Sources {
   private readonly db: DatabaseSync;
   private includes: SourceException[];
-  constructor(path: string, private readonly inventory: Pick<Inventory, 'snapshot'>) {
+  constructor(path: string, private readonly inventory: Pick<Inventory, 'snapshot' | 'granted'>) {
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA secure_delete = ON; PRAGMA journal_mode = WAL; CREATE TABLE IF NOT EXISTS source_policy (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), value TEXT NOT NULL)');
     const row = this.db.prepare('SELECT value FROM source_policy WHERE singleton = 1').get();
@@ -69,7 +68,7 @@ export class Sources {
   async exception(root: string, path: string, include: boolean): Promise<SourceException[]> {
     this.root(root); location(path);
     if (protectedName(`${root}/${path}`)) throw new Denied('Credential files and Git internals cannot be included.');
-    await this.safePath(root, path);
+    await this.safePath(root, path, () => { this.root(root); });
     this.root(root); // A revoke/purge may have completed while path validation awaited IO.
     const next = this.includes.filter(item => item.root !== root || item.path !== path);
     if (include) next.push({ root, path });
@@ -97,7 +96,7 @@ export class Sources {
     const start = input.start ?? 1, end = input.end ?? start + L.lines - 1;
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start || end - start >= L.lines || end > 1_000_000) throw new Denied('Read at most 200 lines, using positive line numbers.');
     let timedOut = false;
-    const authorized = () => this.inventory.snapshot().roots.some(item => item.path === root && !item.revokedAt && item.consent === FOLDER_CONSENT && item.acceptedAt);
+    const authorized = () => this.inventory.granted(root);
     const budget: Budget = {
       deadline: performance.now() + L.milliseconds, signal, scanned: 0, bytes: 0, output: 1024,
       check() {
@@ -225,25 +224,35 @@ export class Sources {
   }
 
   private root(path: string): string {
-    if (!this.inventory.snapshot().roots.some(root => root.path === path && !root.revokedAt && root.consent === FOLDER_CONSENT && root.acceptedAt)) throw new Denied('Folder permission required.');
+    if (!this.inventory.granted(path)) throw new Denied('Folder permission required.');
     return path;
   }
   private included(root: string, path: string): boolean {
     return this.includes.some(item => item.root === root && (item.path === '.' || path === item.path || path.startsWith(item.path + '/')));
   }
   /** Reject every symlink component, not only an escaped final target. */
-  private async safePath(root: string, path: string): Promise<string> {
-    if (await realpath(root) !== root || !(await lstat(root)).isDirectory()) throw new Denied('Designated folder moved or became a symlink.');
+  private async safePath(root: string, path: string, check: () => void): Promise<string> {
+    check();
+    const canonical = await realpath(root);
+    check();
+    if (canonical !== root || !(await lstat(root)).isDirectory()) throw new Denied('Designated folder moved or became a symlink.');
+    check();
     let absolute = root;
     for (const part of path === '.' ? [] : path.split('/')) {
       absolute = join(absolute, part);
+      check();
       const stat = await lstat(absolute);
+      check();
       if (stat.isSymbolicLink()) throw new Denied('Symlinks are not followed.');
     }
-    if (!within(root, await realpath(absolute))) throw new Denied('Outside designated folder.');
+    check();
+    const actual = await realpath(absolute);
+    check();
+    if (!within(root, actual)) throw new Denied('Outside designated folder.');
     return absolute;
   }
-  private async marker(path: string): Promise<boolean> {
+  private async marker(path: string, budget: Budget): Promise<boolean> {
+    budget.check();
     try { const stat = await lstat(join(path, '.git')); return stat.isDirectory() || stat.isFile(); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
   }
@@ -251,7 +260,8 @@ export class Sources {
     budget.check();
     const environment = actualEnvironment(path) && !protectedName(`${root}/${path.split('/').slice(0, -1).join('/')}`);
     if (protectedName(`${root}/${path}`) && !environment) throw new Denied('Environment/credential file or Git internals are protected.');
-    const absolute = await this.safePath(root, path);
+    const absolute = await this.safePath(root, path, () => budget.check());
+    budget.check();
     const stat = await lstat(absolute);
     const approved = environment && stat.isFile() && permission?.root === root && permission.path === path && permission.valid();
     if (environment && !approved) throw new Denied('Actual environment file is protected; current-investigation permission required.', false, stat.isFile() && stat.size <= L.fileBytes);
@@ -264,7 +274,7 @@ export class Sources {
     let directory = root;
     for (let index = 0; index <= parts.length; index++) {
       budget.check();
-      if (await this.marker(directory)) { owner = directory; rules.length = 0; }
+      if (await this.marker(directory, budget)) { owner = directory; rules.length = 0; }
       if (index > 0 && !override) {
         if (parts[index - 1].startsWith('.') || skipped.has(parts[index - 1].toLowerCase())) throw new Denied('Hidden/vendor/generated directory (default exclusion).', true);
       }
@@ -311,16 +321,18 @@ export class Sources {
   }
   private async text(root: string, path: string, budget: Budget, max: number): Promise<string> {
     budget.check();
-    const absolute = await this.safePath(root, path);
+    const absolute = await this.safePath(root, path, () => budget.check());
+    budget.check();
     const before = await lstat(absolute);
     if (!before.isFile() || before.size > max) throw new IncompleteRead('Unsupported or oversized input.');
     if (budget.bytes + before.size + 1 > L.totalBytes) throw new Stopped('Input-byte limit reached.');
     budget.check();
     const file = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
+      budget.check();
       const stat = await file.stat();
       if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino || stat.size > max) throw new IncompleteRead('File changed during access check.');
-      await this.safePath(root, path);
+      await this.safePath(root, path, () => budget.check());
       budget.check();
       const buffer = Buffer.alloc(stat.size + 1);
       let length = 0;

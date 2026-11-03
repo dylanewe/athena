@@ -11,7 +11,7 @@ import { Knowledge } from '../../src/main/knowledge';
 import type { ChatGPTSettings } from '../../src/main/chatgpt-settings';
 import { runLiveAgent } from '../../src/worker/live-agent';
 import type { LiveParentMessage, LiveStart } from '../../src/shared/live';
-import { FOLDER_CONSENT, type InventorySnapshot } from '../../src/shared/inventory';
+import { FOLDER_CONSENT, folderGranted, type InventorySnapshot } from '../../src/shared/inventory';
 import { BUILD_CONSENT } from '../../src/shared/build';
 
 let directory: string, root: string, settings: ApiSettings, conversations: Conversations, sources: Sources, supervisor: LiveSupervisor;
@@ -59,7 +59,7 @@ beforeEach(() => {
   directory = realpathSync(mkdtempSync(join(tmpdir(), 'athena-api-live-'))); root = join(directory, 'repo'); mkdirSync(root); writeFileSync(join(root, 'answer.ts'), 'export const answer = 42;\n');
   conversations = new Conversations(join(directory, 'conversations.sqlite'));
   snapshot = { roots: [{ path: root, consent: FOLDER_CONSENT, acceptedAt: 'now', includedLocations: [] }], repositories: [], candidates: [], discovery: { status: 'complete', visited: 0, current: '', nonGitFiles: 1, failures: [] } };
-  const inventory = { snapshot: () => snapshot };
+  const inventory = { snapshot: () => snapshot, granted: (path: string) => folderGranted(snapshot.roots, path) };
   sources = new Sources(':memory:', inventory);
   reservations = [];
   settings = new ApiSettings(join(directory, 'api.sqlite'), { available: () => true, encrypt: value => Buffer.from(value), decrypt: value => Buffer.from(value).toString() }, async () => 'fake-helper', {}, n => reservations.push(n));

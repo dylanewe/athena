@@ -15,7 +15,7 @@ import { Knowledge } from '../../src/main/knowledge';
 import { runLiveAgent } from '../../src/worker/live-agent';
 import { LIVE_LIMITS, type LiveParentMessage } from '../../src/shared/live';
 import type { InventorySnapshot } from '../../src/shared/inventory';
-import { FOLDER_CONSENT } from '../../src/shared/inventory';
+import { FOLDER_CONSENT, folderGranted } from '../../src/shared/inventory';
 import { operationCandidates, operationFiles } from '../fixtures/operation';
 
 const frame = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
@@ -250,7 +250,7 @@ async function followupWithHistoricalContextWithheld(id: string, count: number) 
 beforeEach(async () => {
   directory = realpathSync(mkdtempSync(join(tmpdir(), 'athena-live-'))); root = join(directory, 'repo'); mkdirSync(root); writeFileSync(join(root, 'answer.ts'), 'export const answer = 42;\n');
   snapshot = { roots: [{ path: root, consent: FOLDER_CONSENT, acceptedAt: 'now', includedLocations: [] }], repositories: [], candidates: [], discovery: { status: 'complete', visited: 0, current: '', nonGitFiles: 1, failures: [] } };
-  const inventory = { snapshot: () => structuredClone(snapshot) };
+  const inventory = { snapshot: () => structuredClone(snapshot), granted: (path: string) => folderGranted(snapshot.roots, path) };
   sources = new Sources(':memory:', inventory); db = new Conversations(join(directory, 'conversations.sqlite'));
   store = new ChatGPTStore(join(directory, 'chatgpt.sqlite'), { available: () => true, encrypt: value => Buffer.from(value), decrypt: value => Buffer.from(value).toString() });
   const registration: Registration = { clientId: 'fixture-client', issuer: ISSUER, subject: 'fixture-subject', tokens: { idToken: 'verified', accessToken: 'fixture-oauth', refreshToken: 'fixture-refresh', expiresAt: Date.now() + 3600_000, scopes: SCOPES } };
