@@ -156,6 +156,25 @@ test('explicit purge removes whole owned conversations, annotations and dependen
   expect((await knowledge.inspect()).map(record => record.id)).toEqual([independentId]);
 });
 
+test('reset and retention recovery never resurrect purged conversations, annotations, evidence or original-source knowledge', async () => {
+  const [id] = await publish(left);
+  await resolutions.write({ operation: 'annotate', kind: 'note', text: 'Private explanation', claimIds: [id] });
+  const observed = await evidence(left);
+  const job = conversations.beginLive(null, 'Private question', binding, undefined, undefined, [left]);
+  conversations.finishLive(job.messageId, result, observed);
+  conversations.setVerboseDays(0); conversations.cleanupExpired();
+  await access.purge(left, PURGE_CONFIRMATION);
+  await knowledge.clear(); close(); open();
+  await access.recover(); await knowledge.recoverCleanup(); conversations.recoverCleanup(); conversations.cleanupExpired(); await knowledge.scan();
+  expect(conversations.workspace().conversations).toEqual([]);
+  expect((await resolutions.read({ operation: 'list' })).items).toEqual([]);
+  expect(await knowledge.inspect()).toEqual([]);
+  expect(inventory.snapshot().roots[0]).toMatchObject({ revokedAt: expect.any(String), purgedAt: expect.any(String) });
+  await expect(knowledge.publish({ owner: { conversationId: job.conversationId, messageId: job.messageId }, evidence: observed, candidates: [candidate('left')], completed: true, environmentExposed: false, signal: new AbortController().signal })).rejects.toThrow(/revoked/);
+  conversations.finishLive(job.messageId, result, observed);
+  expect(conversations.hasAttempt(job.messageId)).toBe(false);
+});
+
 test('a failed destructive database step leaves a durable pending purge that restart completes', async () => {
   const [id] = await publish(left);
   await resolutions.write({ operation: 'annotate', kind: 'note', text: 'Private annotation', claimIds: [id] });

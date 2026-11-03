@@ -29,6 +29,7 @@ export interface Message {
   activity?: string;
   contextNotice?: string;
   interrupted?: boolean;
+  verboseExpired?: boolean;
   model?: string;
   provider?: string;
   ephemeral?: boolean;
@@ -61,6 +62,7 @@ export interface DemoJob {
   text: string;
 }
 export interface DesktopBridge {
+  maintenance: import('./maintenance').MaintenanceBridge;
   knowledge: KnowledgeBridge;
   resolutions: import('./resolutions').ResolutionBridge;
   apiModels: ApiSettingsBridge;

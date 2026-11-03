@@ -1,4 +1,5 @@
 import { checkpointPurge } from './local-purge';
+import { LocalCleanup } from './local-cleanup';
 import { affectedSource } from './source-ownership';
 import { randomUUID, createHash } from 'node:crypto';
 import { SourceCheckouts } from './source-checkouts';
@@ -35,6 +36,7 @@ const physicalOwnership = (sources: SourceIdentity[]) => digest([...new Set(sour
 export class Knowledge {
   private readonly db: DatabaseSync;
   private readonly retrieval: KnowledgeRetrieval;
+  private readonly cleanup: LocalCleanup;
   private readonly checkouts: SourceCheckouts;
   private pending: Promise<unknown> = Promise.resolve();
   constructor(path: string, private readonly sources: Sources, private readonly inventory: Pick<Inventory, 'snapshot'>,
@@ -75,6 +77,7 @@ export class Knowledge {
     }
     this.db.exec('CREATE TABLE IF NOT EXISTS knowledge_generation (id TEXT PRIMARY KEY)');
     if (!this.db.prepare('SELECT id FROM knowledge_generation').get()) this.db.prepare('INSERT INTO knowledge_generation VALUES (?)').run(randomUUID());
+    this.cleanup = new LocalCleanup(this.db);
     this.retrieval = new KnowledgeRetrieval(this.db, id => this.records(id).find(record => this.eligible(record)),
       (identity, signal) => this.permitted(identity, signal), (identities, signal) => this.fresh(identities, signal),
       (evidence, signal) => this.currentEvidence(evidence, signal),
@@ -204,10 +207,14 @@ export class Knowledge {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     checkpointPurge(this.db);
   }); }
+  cleanupStatus() { return this.cleanup.status(); }
+  recoverCleanup(): Promise<void> { return this.serial(async () => this.cleanup.recover()); }
+  /** Reset derived knowledge only. Never republish from retained answer records. */
   clear(): Promise<void> { return this.serial(async () => {
-    this.db.exec('BEGIN IMMEDIATE');
-    try { this.db.exec('DELETE FROM claims; DELETE FROM knowledge_generation'); this.db.prepare('INSERT INTO knowledge_generation VALUES (?)').run(randomUUID()); this.db.exec('COMMIT'); }
-    catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    this.cleanup.run(() => {
+      this.db.exec('DELETE FROM operation_flows; DELETE FROM architecture_connections; DELETE FROM claims; DELETE FROM knowledge_generation');
+      this.db.prepare('INSERT INTO knowledge_generation VALUES (?)').run(randomUUID());
+    });
   }); }
   close(): void { this.db.close(); }
 

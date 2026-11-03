@@ -42,7 +42,20 @@ async function apiModelRequest(operation: string, payload?: unknown): Promise<Ap
   return reply.result;
 }
 
+async function maintenanceRequest(operation: string, payload?: unknown): Promise<import('./shared/maintenance').MaintenanceStatus> {
+  const reply = await ipcRenderer.invoke('athena:maintenance', operation, payload);
+  if (!reply.ok) throw new Error(reply.error);
+  return reply.result;
+}
+
 const bridge: DesktopBridge = {
+  maintenance: {
+    snapshot: () => maintenanceRequest('snapshot'),
+    policy: verboseDays => maintenanceRequest('policy', { verboseDays }),
+    cleanup: () => maintenanceRequest('cleanup'),
+    reset: confirmation => maintenanceRequest('reset', { confirmation }),
+    deleteConversation: (conversationId, confirmation) => maintenanceRequest('deleteConversation', { conversationId, confirmation }),
+  },
   resolutions: {
     read: async request => {
       const reply = await ipcRenderer.invoke('athena:resolutions', 'read', request);

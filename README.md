@@ -48,6 +48,10 @@ Completed, unexposed investigations can retain concise architectural/domain topi
 
 In **Repositories**, select repositories, review scope and paid-processing consent, then choose **Build/refresh knowledge** for a broader architectural overview. Current knowledge is reused; new/changed scope uses the existing parallel investigator scheduler, provider approvals and shared job limits. Coverage shows actual source requests, encountered unsupported inputs, unresolved references, failures and partial completion. Validated candidates appear in existing knowledge search/details. No build runs automatically on launch, discovery, registration or hint editing. See [explicit builds, incremental reuse, persistence and deterministic tests](docs/knowledge-builds.md).
 
+## Reset knowledge and manage retention (#20)
+
+**Local data** provides an explicitly confirmed knowledge-cache reset without deleting conversations, settings, permissions, aliases or user resolutions. Reset starts no model calls; rebuild explicitly from **Repositories → Build/refresh knowledge**, which may require paid reinvestigation under existing permissions and job limits. Annotations remain disconnected until explicit claim/evidence reconciliation. Verbose tool/child transcripts expire after 30 days by default (configurable); concise investigations and answer evidence are retained separately until explicitly deleted. The panel shows policy/cleanup status and offers confirmed conversation deletion. See [retention boundaries, checkpoint recovery and deterministic tests](docs/local-data.md).
+
 ## Explore services and dependencies (#12)
 
 **Services & dependencies** shows a bounded, read-only neighborhood grouped by repository, with separate services, interfaces and explicit external/unresolved endpoints. **Explore investigation map** starts from an answer; select entities or concrete API/event/library/store/deployment connections to inspect their ordinary knowledge evidence and annotations. Expand typed neighbors up to three hops, or prepare an unsent follow-up question. Layout order never changes claims. Missing analysis/edges are not proof of isolation; static analysis is not runtime tracing. Extraction, SQLite adjacency, access/freshness, sticky endpoint invalidation and dynamic taint guards all reuse the central knowledge authority. See [behavior, candidate contracts, shared lookup bounds and deterministic tests](docs/services.md).
@@ -146,7 +150,8 @@ No provider account or live API key is required. Desktop tests use real SQLite, 
 | `src/main/knowledge.ts`, `knowledge-retrieval.ts`, `knowledge-bridge.ts`, `src/shared/knowledge.ts` | Transactional normalization/publication, freshness/identity reconciliation, SQLite FTS/name retrieval and bounded read-only inspection IPC |
 | `src/main/operation-flows.ts`, `src/renderer/Flows.svelte` | Named-operation candidate reference validation inside central publication and read-only ordered flow navigation |
 | `src/main/folder-access.ts`, `source-ownership.ts` | Durable folder withdrawal, original physical ownership, explicit purge and restart-safe cleanup orchestration |
-| `src/main/conversations.ts` | Durable conversation transactions and interruption recovery |
+| `src/main/conversations.ts` | Durable conversation transactions, independent answer evidence, transcript retention and interruption recovery |
+| `src/main/maintenance-bridge.ts`, `local-cleanup.ts`, `src/renderer/LocalData.svelte` | User-only reset/retention/deletion, recoverable local checkpointing and visible policy/status |
 | `src/main/bridge.ts` | Caller authorization and conversation request validation |
 | `src/main/inventory.ts` | Local discovery, filesystem boundaries, stable repository identities, consent and inventory persistence |
 | `src/main/inventory-bridge.ts` | Native folder selection/consent flow and validated inventory commands |

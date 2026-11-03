@@ -4,6 +4,7 @@ import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { FolderAccess } from './folder-access';
 import { Conversations } from './conversations';
+import { MaintenanceGateway } from './maintenance-bridge';
 import { Resolutions } from './resolutions';
 import { ResolutionGateway } from './resolution-bridge';
 import { Knowledge } from './knowledge';
@@ -45,6 +46,7 @@ let resolutions: Resolutions | undefined;
 let resolutionGateway: ResolutionGateway | undefined;
 let jobs: LiveSupervisor | undefined;
 let gateway: DesktopGateway | undefined;
+let maintenanceGateway: MaintenanceGateway | undefined;
 let folderAccess: FolderAccess | undefined;
 let inventory: Inventory | undefined;
 let inventoryGateway: InventoryGateway | undefined;
@@ -87,7 +89,9 @@ function createWindow() {
       webviewTag: false, webSecurity: true, session: uiSession,
     },
   });
-  gateway = new DesktopGateway(conversations!, jobs!, { webContentsId: window.webContents.id, url: documentURL });
+  const owner = { webContentsId: window.webContents.id, url: documentURL };
+  maintenanceGateway = new MaintenanceGateway(conversations!, knowledge!, owner, () => !quitting && !conversations!.workspace().activeConversationId && !jobs?.saveError, notify);
+  gateway = new DesktopGateway(conversations!, jobs!, owner, () => !maintenanceGateway?.busy);
   inventoryGateway = new InventoryGateway(inventory!, { webContentsId: window.webContents.id, url: documentURL }, async () => {
     if (!window || window.isDestroyed()) return;
     const result = await dialog.showOpenDialog(window, { title: 'Choose a folder for Athena', properties: ['openDirectory'], buttonLabel: 'Review permission' });
@@ -101,7 +105,7 @@ function createWindow() {
   }, () => jobs?.revokeApiAuthority(), () => inventory!.snapshot().roots.map(root => root.path));
   knowledgeGateway = new KnowledgeGateway(knowledge!, { webContentsId: window.webContents.id, url: documentURL }, resolutions, () => {
     const workspace = conversations!.workspace();
-    return !quitting && !workspace.activeConversationId && !workspace.selected?.sealed;
+    return !quitting && !maintenanceGateway?.busy && !workspace.activeConversationId && !workspace.selected?.sealed;
   });
   resolutionGateway = new ResolutionGateway(resolutions!, { webContentsId: window.webContents.id, url: documentURL });
   sourceGateway = new SourceGateway(sources!, { webContentsId: window.webContents.id, url: documentURL });
@@ -112,7 +116,7 @@ function createWindow() {
   window.webContents.on('render-process-gone', () => { jobs?.cancel(); inventory?.cancel(); modelSettings?.cancel(); sourceGateway?.cancel(); chatgpt?.cancel(); });
   window.on('minimize', () => jobs?.lifecycle('minimize'));
   window.on('close', () => { jobs?.lifecycle('window-close'); inventory?.cancel(); modelSettings?.cancel(); sourceGateway?.cancel(); chatgpt?.cancel(); });
-  window.on('closed', () => { resolutionGateway = undefined; knowledgeGateway = undefined; gateway = undefined; inventoryGateway = undefined; modelGateway = undefined; apiGateway = undefined; sourceGateway = undefined; chatgptGateway = undefined; window = undefined; });
+  window.on('closed', () => { maintenanceGateway = undefined; resolutionGateway = undefined; knowledgeGateway = undefined; gateway = undefined; inventoryGateway = undefined; modelGateway = undefined; apiGateway = undefined; sourceGateway = undefined; chatgptGateway = undefined; window = undefined; });
   void window.loadURL(documentURL);
 }
 
@@ -154,7 +158,7 @@ if (!app.requestSingleInstanceLock()) {
     const resolutionDatabase = join(stateDirectory, 'resolutions.sqlite');
     resolutions = new Resolutions(resolutionDatabase, knowledge, material => conversations!.assertClean(material), () => {
       const workspace = conversations!.workspace();
-      if (quitting || workspace.activeConversationId || workspace.selected?.sealed) throw new Error('Annotations require an idle, unsealed user context.');
+      if (quitting || maintenanceGateway?.busy || workspace.activeConversationId || workspace.selected?.sealed) throw new Error('Annotations require an idle, unsealed user context.');
     });
     chmodSync(resolutionDatabase, 0o600);
     const modelDatabase = join(stateDirectory, 'models.sqlite');
@@ -187,6 +191,17 @@ if (!app.requestSingleInstanceLock()) {
     }), notify, apiSettings, knowledge, resolutions);
     folderAccess = new FolderAccess(inventory, conversations, sources, knowledge, resolutions, () => { jobs?.revokeFolderAccess(); sourceGateway?.cancel(); }, notify, ids => jobs?.discardPurgedResults(ids));
     await folderAccess.recover(); // Finish interrupted destructive cleanup before exposing any local views.
+    await knowledge.recoverCleanup();
+    conversations.recoverCleanup();
+    conversations.cleanupExpired(); // Local-only; never reconstruct expired or reset knowledge.
+    setInterval(() => { void maintenanceGateway?.cleanupIdle().catch(notify); }, 60 * 60_000).unref();
+    ipcMain.handle('athena:maintenance', async (event, operation: unknown, payload: unknown) => {
+      try {
+        if (!maintenanceGateway || quitting) throw new Error();
+        const result = await maintenanceGateway.dispatch({ webContentsId: event.sender.id, isMainFrame: event.senderFrame === event.sender.mainFrame, url: event.senderFrame?.url ?? '' }, operation, payload);
+        return { ok: true, result };
+      } catch { return { ok: false, error: 'Local maintenance could not finish. Finish active work or save pending results, check confirmation and local storage, then reload status and retry cleanup. No model work was started.' }; }
+    });
     ipcMain.handle('athena:resolutions', async (event, operation: unknown, payload: unknown) => {
       try {
         if (!resolutionGateway || quitting) throw new Error();

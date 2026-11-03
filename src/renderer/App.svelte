@@ -19,12 +19,13 @@
   let knowledgeRecord = $state('');
   import SourcesView from './Sources.svelte';
   import ModelSettingsView from './ModelSettings.svelte';
+  import LocalData from './LocalData.svelte';
   import { MAX_MESSAGE_LENGTH, type Workspace, type Message } from '../shared/contracts';
   import type { Evidence } from '../shared/live';
   let defaultModel = $state<string | null>(null);
   let inspected = $state<Record<string, string>>({});
 
-  let section = $state<'conversation' | 'inventory' | 'models' | 'sources' | 'knowledge' | 'explorer' | 'flows'>('conversation');
+  let section = $state<'conversation' | 'inventory' | 'models' | 'sources' | 'knowledge' | 'explorer' | 'flows' | 'data'>('conversation');
   let workspace = $state<Workspace | null>(null);
   let error = $state('');
   let busy = $state(false);
@@ -153,6 +154,7 @@
     <button class="new-conversation" aria-pressed={section === 'explorer'} onclick={() => openExplorer('', selected?.messages.findLast(hasRetainedKnowledge)?.id ?? '')}>Services & dependencies</button>
     <button class="new-conversation" aria-pressed={section === 'flows'} onclick={() => openFlows()}>Request flows</button>
     <button class="new-conversation" aria-pressed={section === 'models'} onclick={() => section = section === 'models' ? 'conversation' : 'models'}>Model settings</button>
+    <button class="new-conversation" aria-pressed={section === 'data'} onclick={() => section = section === 'data' ? 'conversation' : 'data'}>Local data</button>
     <div class="sidebar-heading">Your conversations</div>
     <button class="new-conversation" onclick={newConversation} disabled={busy || !workspace}><span aria-hidden="true">+</span> New conversation</button>
     <nav aria-label="Saved conversations">
@@ -182,6 +184,8 @@
     {#key workspace?.sourceAccessVersion}<ExplorerView openFlows={service => openFlows({ messageId: explorerMessage, serviceId: service })} returnToFlow={flowOrigin.recordId ? () => openFlows(flowOrigin) : undefined} messageId={explorerMessage} recordId={explorerRecord} {openKnowledge} ask={record => { void askAbout(record); }} />{/key}
   {:else if section === 'flows'}
     {#key `${flowNavigation}:${workspace?.sourceAccessVersion}`}<FlowsView {...flowOrigin} {openKnowledge} openExplorer={id => openExplorer(id)} openConversation={id => { void select(id); }} remember={id => flowOrigin = { ...flowOrigin, recordId: id }} />{/key}
+  {:else if section === 'data'}
+    <LocalData active={!!active || !!workspace?.saveError} conversations={workspace?.conversations ?? []} selectedId={workspace?.selected?.id} changed={() => { drafts = { new: '' }; inspected = {}; void load(); }} />
   {:else if section === 'models'}
     <ModelSettingsView maxInvestigators={workspace?.maxInvestigators ?? 3} concurrencyBusy={busy} setConcurrency={maximum => { void change(() => window.athena.setMaxInvestigators(maximum)); }} />
   {:else}
@@ -202,6 +206,7 @@
                 </div>
                 {#if message.role === 'assistant' && message.status !== 'running' && selected.model}<p class="draft-note">Historical answer · Not current verification{message.provider ? ` · ${message.provider} / ${message.model}` : ''}</p>{/if}
                 {#if selected.revokedSources?.length}<p class="draft-note">Revoked-source local history: {selected.revokedSources.join(', ')}. Retained for inspection only, excluded from future model context. Previously sent provider data cannot be recalled.</p>{/if}
+                {#if message.verboseExpired}<p class="draft-note">Verbose transcripts expired under local retention policy. This answer, concise investigation record and citation evidence are retained.</p>{/if}
                 {#if message.contextNotice}<p class="draft-note">{message.contextNotice}</p>{/if}
                 {#if message.interrupted}<p class="draft-note">Interrupted after restart · Partial work · No automatic continuation. Retry explicitly starts a new accounted job using current model settings.</p>{/if}
                 {#if message.ephemeral}<p class="draft-note">Ephemeral · Not saved · May contain sensitive values</p>{/if}

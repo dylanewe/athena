@@ -23,10 +23,12 @@ export class DesktopGateway {
     private readonly conversations: Conversations,
     private readonly jobs: JobControls,
     private readonly owner: { webContentsId: number; url: string },
+    private readonly canStart: () => boolean = () => true,
   ) {}
 
   dispatch(caller: Caller, operation: unknown, payload: unknown): Workspace {
     authorize(caller, this.owner);
+    if ((operation === 'send' || operation === 'build' || operation === 'retry') && !this.canStart()) throw new Error('Local maintenance is running.');
     switch (operation) {
       case 'workspace':
         noPayload(payload);

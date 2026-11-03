@@ -6,13 +6,22 @@ import { DesktopGateway, type Caller } from '../../src/main/bridge';
 const trusted: Caller = { webContentsId: 1, isMainFrame: true, url: 'file:///athena/index.html' };
 const cleanups: (() => void)[] = [];
 afterEach(() => cleanups.splice(0).forEach(cleanup => cleanup()));
-function setup() {
+function setup(canStart = () => true) {
   const store = new Conversations(':memory:');
   const supervisor = new JobSupervisor(store, () => { throw new Error('No process in this test'); }, () => {});
   cleanups.push(() => { supervisor.cancel(); store.close(); });
-  const bridge = new DesktopGateway(store, supervisor, { webContentsId: 1, url: trusted.url });
+  const bridge = new DesktopGateway(store, supervisor, { webContentsId: 1, url: trusted.url }, canStart);
   return { store, bridge };
 }
+
+test('local maintenance excludes new sends, retries and paid builds while leaving history readable', () => {
+  const { bridge, store } = setup(() => false);
+  for (const [operation, payload] of [['send', { conversationId: null, text: 'New work' }], ['retry', { messageId: '00000000-0000-4000-8000-000000000000' }], ['build', { repositories: ['repo'], consent: 'yes' }]]) {
+    expect(() => bridge.dispatch(trusted, operation, payload)).toThrow('Local maintenance');
+  }
+  expect(bridge.dispatch(trusted, 'workspace', undefined).conversations).toEqual([]);
+  expect(store.workspace().activeConversationId).toBeNull();
+});
 
 test('a first send creates and selects a locally titled conversation even if the demo cannot start', () => {
   const { bridge } = setup();

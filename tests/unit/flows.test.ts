@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from 'vitest';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -52,6 +53,34 @@ test.each([
   await expect(f.publish(candidates)).rejects.toThrow();
   expect((await f.knowledge.retrieve({ operation: 'flows' })).items).toEqual([]);
   expect((await f.knowledge.retrieve({ operation: 'search', query: '' })).items).toEqual([]);
+});
+
+test('cache reset clears the complete flow, architecture and search indexes, rotates reuse generation, and allows explicit full re-extraction', async () => {
+  const f = await fixture(); const ids = await f.publish(); const generation = f.knowledge.generation();
+  await f.knowledge.clear();
+  expect(f.knowledge.generation()).not.toBe(generation);
+  expect((await f.knowledge.retrieve({ operation: 'flows' })).items).toEqual([]);
+  expect((await f.knowledge.retrieve({ operation: 'search', query: 'checkout' })).items).toEqual([]);
+  expect((await f.knowledge.retrieve({ operation: 'neighborhood', scope: 'shop', depth: 3 })).items).toEqual([]);
+  expect(await f.publish()).toEqual(ids);
+  expect((await f.knowledge.retrieve({ operation: 'flow', id: ids[8] })).items).toHaveLength(9);
+});
+
+test('interrupted cache-reset checkpoint recovers without replaying extraction or losing the committed empty generation', async () => {
+  const f = await fixture(); const ids = await f.publish(); const generation = f.knowledge.generation();
+  const reader = new DatabaseSync(f.path); reader.exec('BEGIN'); reader.prepare('SELECT * FROM claims').all();
+  try {
+    await expect(f.knowledge.clear()).rejects.toThrow(/checkpoint/i);
+    expect(f.knowledge.cleanupStatus().cleanupPending).toBe(true);
+  } finally { reader.exec('ROLLBACK'); reader.close(); }
+  const emptyGeneration = f.knowledge.generation(); expect(emptyGeneration).not.toBe(generation);
+  const reopened = new Knowledge(f.path, f.sources, f.inventory, () => {});
+  try {
+    await reopened.recoverCleanup(); await reopened.scan();
+    expect(reopened.cleanupStatus().cleanupPending).toBe(false);
+    expect(reopened.generation()).toBe(emptyGeneration);
+    expect((await reopened.retrieve({ operation: 'detail', id: ids[8] })).items).toEqual([]);
+  } finally { reopened.close(); }
 });
 
 test('a named cross-repository operation retains ordered steps, synchronous handoffs, explicit missing implementation and version-bound claim dependencies across restart', async () => {

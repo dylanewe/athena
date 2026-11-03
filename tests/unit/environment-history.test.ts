@@ -46,6 +46,8 @@ test('sealing precedes exposure; all derived persistence, follow-ups and restart
   expect(db.liveContext(job.conversationId)).toEqual({ history: [], evidence: [] });
   expect(db.exploration(job.messageId)).toBeUndefined();
   expect(() => db.beginLive(job.conversationId, canary, db.binding(job.conversationId))).toThrow('new conversation');
+  db.setVerboseDays(0); db.cleanupExpired(); db.recoverCleanup();
+  expect(db.retentionStatus()).toMatchObject({ expiredAttempts: 1, cleanupPending: false });
   expect(readdirSync(directory).some(file => readFileSync(join(directory, file)).includes(canary))).toBe(false);
   db.close(); db = new Conversations(path);
   expect(JSON.stringify(db.workspace()).includes(canary)).toBe(false);

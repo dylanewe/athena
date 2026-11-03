@@ -102,6 +102,25 @@ test('explicit builds investigate undocumented code with the shared scheduler an
   expect(conversations.workspace().selected!.messages.at(-1)!.build?.repositories).toEqual(['repo']);
 });
 
+test('reset invalidates every build receipt without starting paid work; explicit rebuild fully re-extracts under unchanged approvals and limits', async () => {
+  registerBuildRepository();
+  const extraction = () => [response(undefined, 'sources_read', { root, path: 'answer.ts', start: 1, end: 1 }),
+    response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: [], candidateKnowledgeChanges: [], knowledgeCandidates: [{ ...knowledgeCandidate(), scope: 'repo' }] }), response('Overview [E1].')];
+  scripts = extraction(); supervisor.build(['repo'], BUILD_CONSENT); await idle();
+  const original = conversations.workspace().selected!; const approvals = settings.snapshot(); const paid = [...reservations];
+  const [prior] = await knowledge.inspect();
+  await knowledge.clear(); await knowledge.scan(); conversations.setVerboseDays(0); conversations.cleanupExpired();
+  expect(requests).toHaveLength(3); expect(reservations).toEqual(paid); expect(settings.snapshot()).toEqual(approvals);
+  expect(conversations.workspace().selected!.messages.at(-1)!.evidence).toEqual(original.messages.at(-1)!.evidence);
+  expect(await knowledge.inspect()).toEqual([]);
+  expect(() => supervisor.build(['repo'], 'yes')).toThrow(); expect(requests).toHaveLength(3);
+  scripts = extraction(); supervisor.build(['repo'], BUILD_CONSENT); await idle();
+  expect(requests).toHaveLength(6); expect(reservations.length).toBeGreaterThan(paid.length);
+  expect(conversations.workspace().selected!.messages.at(-1)).toMatchObject({ status: 'complete', build: { reusedRepositories: [] }, investigators: [{ status: 'complete', scope: 'repo' }] });
+  expect((await knowledge.inspect()).map(record => record.id)).toEqual([prior.id]);
+  expect(workers.at(-1)!.job!.maxInvestigators).toBe(conversations.maxInvestigators());
+});
+
 test('unchanged builds reuse retained knowledge without paid calls, but edited callers trigger scoped revalidation', async () => {
   registerBuildRepository();
   const finish = response(undefined, 'finish_investigation', { findings: [], unresolvedQuestions: ['External callers unknown'], candidateKnowledgeChanges: [], knowledgeCandidates: [{ ...knowledgeCandidate(), scope: 'repo' }] });

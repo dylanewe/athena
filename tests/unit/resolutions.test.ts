@@ -7,6 +7,8 @@ import { Resolutions } from '../../src/main/resolutions';
 import { Sources } from '../../src/main/sources';
 import { DatabaseSync } from 'node:sqlite';
 import { ResolutionGateway } from '../../src/main/resolution-bridge';
+import { MaintenanceGateway } from '../../src/main/maintenance-bridge';
+import { RESET_CONFIRMATION } from '../../src/shared/maintenance';
 import { Conversations } from '../../src/main/conversations';
 import { FOLDER_CONSENT, folderGranted, type InventorySnapshot } from '../../src/shared/inventory';
 
@@ -39,6 +41,35 @@ async function fixture() {
   };
   return { directory, root, knowledge, resolutions, publish, conversations, snapshot, open, setWritable: (value: boolean) => { writable = value; } };
 }
+
+test('authorized local reset preserves durable user state and annotations without relinking even identical extracted IDs', async () => {
+  const f = await fixture(); const ids = await f.publish();
+  const annotation = (await f.resolutions.write({ operation: 'annotate', kind: 'intent', text: 'C is intentional.', claimIds: ids })).items[0];
+  const demo = f.conversations.begin(null, 'Durable question'); f.conversations.finish(demo.messageId, 'complete', 'Durable answer');
+  f.conversations.setMaxInvestigators(2); f.conversations.setVerboseDays(45);
+  const before = f.conversations.workspace(); const folders = structuredClone(f.snapshot);
+  const owner = { webContentsId: 1, url: 'file:///athena/index.html' }; const caller = { ...owner, isMainFrame: true };
+  let idle = false;
+  const maintenance = new MaintenanceGateway(f.conversations, f.knowledge, owner, () => idle);
+  await expect(maintenance.dispatch(caller, 'reset', { confirmation: RESET_CONFIRMATION })).rejects.toThrow(/active/i);
+  idle = true;
+  for (const invalid of [{ ...caller, isMainFrame: false }, { ...caller, webContentsId: 2 }, { ...caller, url: 'https://other.test' }]) {
+    await expect(maintenance.dispatch(invalid, 'reset', { confirmation: RESET_CONFIRMATION })).rejects.toThrow(/Unauthorized/i);
+  }
+  await expect(maintenance.dispatch(caller, 'reset', { confirmation: 'yes' })).rejects.toThrow();
+  await expect(maintenance.dispatch(caller, 'policy', { verboseDays: '0' })).rejects.toThrow();
+  const pending = maintenance.dispatch(caller, 'reset', { confirmation: RESET_CONFIRMATION });
+  expect(maintenance.busy).toBe(true);
+  await expect(maintenance.dispatch(caller, 'cleanup', undefined)).rejects.toThrow();
+  await pending;
+  expect(f.conversations.workspace()).toEqual(before); expect(f.snapshot).toEqual(folders);
+  expect(f.conversations.retentionStatus().verboseDays).toBe(45);
+  expect((await f.knowledge.retrieve({ operation: 'search', query: '' })).items).toEqual([]);
+  expect((await f.resolutions.read({ operation: 'list' })).items[0]).toMatchObject({ id: annotation.id, status: 'requires-reconnection' });
+  const replacements = await f.publish(); expect(replacements).toEqual(ids);
+  expect((await f.resolutions.read({ operation: 'list', claimId: replacements[0] })).items).toEqual([]);
+  expect((await f.resolutions.write({ operation: 'reconnect', id: annotation.id, claimIds: replacements })).items[0].status).toBe('recorded-for-these-versions');
+});
 
 test('user resolutions bind both evidence versions, survive derived replacement, and reconnect only by explicit confirmation', async () => {
   const f = await fixture();
