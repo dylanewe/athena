@@ -8,11 +8,12 @@ import { KnowledgeRetrieval, knowledgeName as nameKey } from './knowledge-retrie
 import { relative, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Check } from 'typebox/value';
-import { flowReferences, isConnection, knowledgeCandidatesSchema, type KnowledgeCandidate, type KnowledgeOwner, type KnowledgeRecord, type KnowledgeRequest, type KnowledgeResult } from '../shared/knowledge';
+import { flowReferences, isConnection, KNOWLEDGE_LIMITS, knowledgeCandidatesSchema, type KnowledgeCandidate, type KnowledgeOwner, type KnowledgeRecord, type KnowledgeRequest, type KnowledgeResult } from '../shared/knowledge';
 import type { ResolutionTarget } from '../shared/resolutions';
 import type { Evidence } from '../shared/live';
 import type { SourceCheckout, SourceIdentity, SourceScope } from '../shared/sources';
 import type { Inventory } from './inventory';
+import { folderGranted } from '../shared/inventory';
 import type { Sources } from './sources';
 
 interface Publication {
@@ -168,6 +169,29 @@ export class Knowledge {
       const changed = checked.current && target.version !== this.resolutionVersion(checked.current.record, checked.current.derivation);
       return { connected: !!current, freshness: checked.retained.stale || checked.current?.stale || changed ? 'stale' as const : 'current' as const };
     });
+  }
+  /** Metadata-only reconciliation visibility. This does NOT authorize retained
+   * annotation text/evidence, model attachments, or a reconnection write. */
+  reconciliationEligible(targets: ResolutionTarget[]): boolean {
+    const records = targets.map(target => target.record);
+    const queued = targets.filter(target => target.generation === this.generation()).map(target => target.record.id);
+    const visited = new Set<string>();
+    for (let index = 0; index < queued.length; index++) {
+      const id = queued[index];
+      if (visited.has(id)) continue;
+      if (visited.size >= KNOWLEDGE_LIMITS.graph) return false;
+      visited.add(id);
+      const current = this.records(id)[0];
+      if (!current) return false;
+      records.push(current);
+      queued.push(...current.relations.filter(edge => edge.kind === 'depends-on').map(edge => edge.target));
+    }
+    const sources = [...new Map(records.flatMap(record => [...record.dependencies, ...record.scopes,
+      ...record.evidence.map(item => item.citation), ...(record.checkouts ?? [])]).map(source => [JSON.stringify(source), source])).values()];
+    const inventory = this.inventory.snapshot();
+    return sources.length > 0 && sources.length <= KNOWLEDGE_LIMITS.sourceChecks && sources.every(source =>
+      folderGranted(inventory.roots, source.folder) && this.sources.eligible(source) && (!source.repository ||
+        inventory.repositories.some(repo => repo.presence === 'present' && nameKey(repo.name) === nameKey(source.repository!.name))));
   }
   inspectionEligible(context?: object): boolean { return !!context && this.retrieval.contextEligible(context); }
   private resolutionVersion(record: KnowledgeRecord, derivation: NonNullable<KnowledgeResult['derivation']>): string {

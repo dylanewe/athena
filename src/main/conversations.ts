@@ -97,6 +97,7 @@ export class Conversations {
     // never at epoch. This migration does not expire any durable state.
     if (!attempts.includes('ended_at')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN ended_at TEXT');
     if (!attempts.includes('verbose_deleted_at')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN verbose_deleted_at TEXT');
+    if (!attempts.includes('source_roots_recorded')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN source_roots_recorded INTEGER NOT NULL DEFAULT 0');
     if (!attempts.includes('ownership_uncertain')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN ownership_uncertain INTEGER NOT NULL DEFAULT 0');
     this.db.prepare(`UPDATE live_attempts SET ended_at = ? WHERE ended_at IS NULL AND message_id IN (SELECT id FROM messages WHERE status != 'running')`).run(new Date().toISOString());
     this.cleanup = new LocalCleanup(this.db);
@@ -127,7 +128,7 @@ export class Conversations {
       // Pre-#19 knowledge-only or sealed attempts may have discarded every source
       // envelope. Without a root catalogue their independence from a withdrawn
       // folder cannot be established. Retain/purge them conservatively.
-      if (row.ownership_uncertain || !grants.length && (row.ephemeral || result.knowledgeReferences?.length)) return true;
+      if (row.ownership_uncertain || !row.source_roots_recorded && !grants.length && (row.ephemeral || result.knowledgeReferences?.length)) return true;
       return grants.some(grant => roots.some(root => overlaps(root, grant))) ||
         ['history', 'evidence', 'result', 'exploration', 'build_scope'].some(key => row[key] && associatedMaterial(JSON.parse(String(row[key])), roots));
     }).map(row => String(row.conversation_id)))];
@@ -218,9 +219,12 @@ export class Conversations {
     for (const message of messages) this.ephemeral.delete(String(message.id));
   }
 
-  retentionStatus() {
+  private verboseDays(): number | null {
     const policy = this.db.prepare("SELECT value FROM settings WHERE key = 'verboseDays'").get()?.value;
-    return { verboseDays: policy === 'forever' ? null : Number(policy ?? 30),
+    return policy === 'forever' ? null : Number(policy ?? 30);
+  }
+  retentionStatus() {
+    return { verboseDays: this.verboseDays(),
       expiredAttempts: Number(this.db.prepare('SELECT COUNT(*) AS count FROM live_attempts WHERE verbose_deleted_at IS NOT NULL').get()!.count),
       eligibleAttempts: Number(this.db.prepare("SELECT COUNT(*) AS count FROM live_attempts a JOIN messages m ON m.id = a.message_id WHERE m.status != 'running' AND a.verbose_deleted_at IS NULL AND a.ended_at <= ?").get(this.expiryCutoff())!.count),
       ...this.cleanup.status() };
@@ -230,8 +234,8 @@ export class Conversations {
     this.db.prepare("INSERT OR REPLACE INTO settings VALUES ('verboseDays', ?)").run(days === null ? 'forever' : String(days));
   }
   private expiryCutoff(): string {
-    const policy = this.db.prepare("SELECT value FROM settings WHERE key = 'verboseDays'").get()?.value;
-    return policy === 'forever' ? '' : new Date(Date.now() - Number(policy ?? 30) * 86400000).toISOString();
+    const days = this.verboseDays();
+    return days === null ? '' : new Date(Date.now() - days * 86400000).toISOString();
   }
   recoverCleanup(): void { this.cleanup.recover(); }
   cleanupExpired(): void {
@@ -244,7 +248,7 @@ export class Conversations {
       // without that catalogue cannot be proven independent of future revocations
       // once its source envelopes expire: preserve conservative ownership, not text.
       this.db.prepare(`UPDATE live_attempts SET ownership_uncertain = CASE
-        WHEN source_roots = '[]' AND (history != '[]' OR exploration IS NOT NULL) THEN 1 ELSE ownership_uncertain END,
+        WHEN source_roots_recorded = 0 AND source_roots = '[]' AND (history != '[]' OR exploration IS NOT NULL) THEN 1 ELSE ownership_uncertain END,
         history = '[]', exploration = NULL, verbose_deleted_at = ?,
         result = json_set(COALESCE(result, '{}'), '$.verboseExpired', json('true'))
         WHERE verbose_deleted_at IS NULL AND ended_at <= ?`).run(new Date().toISOString(), cutoff);
@@ -386,7 +390,7 @@ export class Conversations {
       const insert = this.db.prepare('INSERT INTO messages(id, conversation_id, role, text, status) VALUES (?, ?, ?, ?, ?)');
       if (!retryId) insert.run(userId, id, 'user', prompt.trim(), 'complete');
       insert.run(messageId, id, 'assistant', '', 'running');
-      this.db.prepare('INSERT INTO live_attempts(message_id, user_id, prompt, build_scope, binding, source_roots) VALUES (?, ?, ?, ?, ?, ?)').run(messageId, userId, prompt.trim(), build ? JSON.stringify(build) : null, JSON.stringify(binding), JSON.stringify(sourceRoots));
+      this.db.prepare('INSERT INTO live_attempts(message_id, user_id, prompt, build_scope, binding, source_roots, source_roots_recorded) VALUES (?, ?, ?, ?, ?, ?, 1)').run(messageId, userId, prompt.trim(), build ? JSON.stringify(build) : null, JSON.stringify(binding), JSON.stringify(sourceRoots));
     });
     return { conversationId: id!, messageId, prompt: prompt.trim() };
   }

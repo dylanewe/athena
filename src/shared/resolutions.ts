@@ -31,6 +31,8 @@ export interface ResolutionSummary {
   versions: { claimId: string; version: string }[];
 }
 export interface ResolutionView extends ResolutionSummary {
+  /** Metadata-only local reconciliation entry; no retained contents authorized. */
+  unavailable?: boolean;
   createdAt: string;
   confirmedAt: string;
   bindings: { claimId: string; version: string; scope: string; topic: string; claim: string; provenance: KnowledgeRecord['provenance']; perspective: KnowledgeRecord['perspective']; freshness: 'current' | 'stale'; evidence: { citation: KnowledgeRecord['evidence'][number]['citation']; excerpt: string }[] }[];

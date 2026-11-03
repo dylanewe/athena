@@ -29,6 +29,11 @@ function open() {
   resolutions = new Resolutions(join(directory, 'resolutions.sqlite'), knowledge, () => {}, () => {});
   access = new FolderAccess(inventory, conversations, sources, knowledge, resolutions, () => { stopped = true; });
 }
+function legacyOwnership(messageId: string) {
+  const legacy = new DatabaseSync(join(directory, 'conversations.sqlite'));
+  try { legacy.prepare('UPDATE live_attempts SET source_roots_recorded = 0 WHERE message_id = ?').run(messageId); }
+  finally { legacy.close(); }
+}
 function close() { resolutions.close(); knowledge.close(); sources.close(); conversations.close(); inventory.close(); }
 async function evidence(root: string): Promise<Evidence[]> {
   const entry = (await sources.run('read', { root, path: 'source.ts', start: 1, end: 1 })).entries[0];
@@ -56,6 +61,7 @@ test.each(['serialized-knowledge', 'compacted-knowledge'] as const)('legacy %s h
   // Pre-#19 attempts have no root catalogue and may never have acquired E evidence.
   const job = conversations.beginLive(null, 'Legacy knowledge question', binding);
   conversations.finishLive(job.messageId, { ...result, history, ...(encoding === 'compacted-knowledge' ? { knowledgeReferences: [{ id: 'K' + 'a'.repeat(64), topic: 'Private lead' }] } : {}) }, []);
+  legacyOwnership(job.messageId);
   access.revoke(left);
   expect(conversations.workspace().selected?.revokedSources).toEqual([left]);
   expect(conversations.resumeContext(job.conversationId).history).toEqual([]);
@@ -67,6 +73,7 @@ test('legacy sealed investigation retains ownership for withdrawal labels and ex
   const job = conversations.beginLive(null, 'Original environment question', binding);
   conversations.markEphemeral(job.messageId);
   conversations.finishLive(job.messageId, result, []);
+  legacyOwnership(job.messageId);
   access.revoke(left);
   expect(conversations.workspace().selected?.revokedSources).toEqual([left]);
   await access.purge(left, PURGE_CONFIRMATION);

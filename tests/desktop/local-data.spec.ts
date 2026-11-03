@@ -65,6 +65,28 @@ test('local reset preserves answers, permissions and user resolutions, starts no
   expect(await workers()).toBe(1);
 });
 
+test('missing evidence remains visible as a content-withheld annotation needing reconciliation, never an unsafe new binding', async () => {
+  await page.getByRole('button', { name: 'Inspect retained knowledge', exact: true }).click();
+  await page.getByRole('button', { name: 'Knowledge details', exact: true }).first().click();
+  const resolutions = page.getByRole('region', { name: 'User resolutions' });
+  await resolutions.getByLabel('Your resolution explanation').fill('My private discrepancy explanation.');
+  await resolutions.getByRole('button', { name: 'Save user annotation', exact: true }).click();
+  await expect(resolutions).toContainText('Recorded for these versions only');
+  await page.evaluate(() => window.athena.maintenance.reset('Reset derived knowledge'));
+  rmSync(join(root, 'answer.ts'));
+  await page.getByRole('button', { name: 'Local data', exact: true }).click();
+  await page.getByRole('button', { name: 'Knowledge', exact: true }).click();
+  await expect(resolutions).toContainText('Annotation retained; original sources are unavailable');
+  await expect(resolutions).toContainText('Requires reconsideration');
+  await expect(resolutions).not.toContainText('My private discrepancy explanation.');
+  await expect(resolutions.getByRole('button', { name: 'Reconsider and reconnect annotation', exact: true })).toHaveCount(0);
+  writeFileSync(join(root, 'answer.ts'), 'export const result = C.call();\n');
+  await resolutions.getByRole('button', { name: 'Reload annotations', exact: true }).click();
+  await expect(resolutions).toContainText('My private discrepancy explanation.');
+  await expect(resolutions).toContainText('Requires reconsideration');
+  expect(await workers()).toBe(1);
+});
+
 test('local retention expires verbose transcripts, keeps citations across restart and explicitly deletes a conversation without resurrection', async () => {
   const evidence = await page.evaluate(async () => (await window.athena.workspace()).selected!.messages.at(-1)!.evidence);
   await page.getByRole('button', { name: 'Local data', exact: true }).click();

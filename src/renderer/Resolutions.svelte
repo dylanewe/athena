@@ -84,7 +84,7 @@
       </details>
       {#if item.revision > 1}<button onclick={() => original(item)}>Inspect original binding</button>{/if}
       {#if originals[item.id]}<p class="meta">Original revision: {originals[item.id].status}</p>{#each originals[item.id].bindings as binding}<blockquote>{binding.claim}<p class="meta">Claim version {binding.version}</p></blockquote>{/each}{/if}
-      {#if record}
+      {#if record && !item.unavailable}
         <label><input type="checkbox" bind:checked={confirmed[item.id]} disabled={!writable || busy} /> I reconsidered this assertion against the selected versions above</label>
         <button disabled={busy || !writable || !confirmed[item.id] || !selected.length} onclick={() => reconnect(item)}>Reconsider and reconnect annotation</button>
       {/if}

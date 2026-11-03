@@ -93,7 +93,7 @@ test('explicit conversation deletion is transactional, removes its evidence, and
 test('legacy attempts with unknown completion dates receive a fresh retention window without deleting authored state', () => {
   const f = fixture(); const job = answer(f.store); f.store.setMaxInvestigators(2); f.store.close();
   const legacy = new DatabaseSync(f.path);
-  legacy.exec('ALTER TABLE live_attempts DROP COLUMN ended_at; ALTER TABLE live_attempts DROP COLUMN verbose_deleted_at; ALTER TABLE live_attempts DROP COLUMN ownership_uncertain; DROP TABLE local_cleanup;'); legacy.close();
+  legacy.exec('ALTER TABLE live_attempts DROP COLUMN ended_at; ALTER TABLE live_attempts DROP COLUMN verbose_deleted_at; ALTER TABLE live_attempts DROP COLUMN ownership_uncertain; ALTER TABLE live_attempts DROP COLUMN source_roots_recorded; DROP TABLE local_cleanup;'); legacy.close();
   vi.setSystemTime(new Date('2036-01-01T00:00:00Z'));
   const migrated = f.open(); migrated.cleanupExpired();
   expect(migrated.liveContext(job.conversationId).history).toHaveLength(1);
@@ -116,12 +116,27 @@ test('conversation deletion interrupted at checkpoint stays deleted and recovery
   expect(reopened.retentionStatus().cleanupPending).toBe(false);
 });
 
+test.each([false, true])('known source-free conversations stay independent of unrelated revocation and purge after expiry (sealed=%s)', sealed => {
+  const f = fixture();
+  const job = f.store.beginLive(null, 'A source-free question', { model: 'fixture', registration: 'fixture' });
+  if (sealed) f.store.markEphemeral(job.messageId);
+  f.store.finishLive(job.messageId, { ...result, exploration: undefined }, []);
+  f.store.setVerboseDays(0); f.store.cleanupExpired(); f.store.revoke(['/unrelated']);
+  expect(f.store.revokedSources(job.conversationId)).toEqual([]);
+  f.store.purge(['/unrelated']); f.store.close();
+  const selected = f.open().workspace().selected!;
+  expect(selected.id).toBe(job.conversationId);
+  expect(selected.messages[0].text).toBe('A source-free question');
+  expect(selected.messages.at(-1)!.text).toBe(sealed ? 'Ephemeral investigation: derived output was not saved. Start a new conversation; this context cannot be reused.' : result.text);
+});
+
 test('cleanup and deletion refuse active work and preserve legacy physical ownership after verbose expiry', () => {
   const f = fixture();
   const active = f.store.beginLive(null, 'Legacy inspection', { model: 'fixture', registration: 'fixture' });
   expect(() => f.store.cleanupExpired()).toThrow(/active/i);
   expect(() => f.store.deleteConversation(active.conversationId)).toThrow(/active/i);
   f.store.finishLive(active.messageId, { ...result, history: [{ role: 'user', content: JSON.stringify({ citation: evidence[0].citation }), timestamp: 0 }] }, []);
+  const legacy = new DatabaseSync(f.path); legacy.exec('UPDATE live_attempts SET source_roots_recorded = 0'); legacy.close();
   f.store.setVerboseDays(0); f.store.cleanupExpired();
   f.store.revoke(['/original']);
   expect(f.store.workspace().selected!.revokedSources).toEqual(['/original']);

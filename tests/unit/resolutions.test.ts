@@ -71,6 +71,28 @@ test('authorized local reset preserves durable user state and annotations withou
   expect((await f.resolutions.write({ operation: 'reconnect', id: annotation.id, claimIds: replacements })).items[0].status).toBe('recorded-for-these-versions');
 });
 
+test('deleted evidence leaves a content-withheld reconciliation entry without exposing revoked material or authorizing unsafe reconnection', async () => {
+  const f = await fixture(); const ids = await f.publish();
+  const annotation = (await f.resolutions.write({ operation: 'annotate', kind: 'intent', text: 'Private retained explanation.', claimIds: ids })).items[0];
+  await f.knowledge.clear(); rmSync(join(f.root, 'service.ts'));
+  const orphan = (await f.resolutions.read({ operation: 'list' })).items[0];
+  expect(orphan).toMatchObject({ id: annotation.id, status: 'requires-reconsideration', unavailable: true, bindings: [], versions: [] });
+  expect(JSON.stringify(orphan)).not.toContain('Private retained explanation');
+  expect(JSON.stringify(orphan)).not.toContain('C.call');
+  expect((await f.resolutions.read({ operation: 'inspect', id: annotation.id })).items[0].id).toBe(annotation.id);
+  expect((await f.resolutions.read({ operation: 'list' }, undefined, false)).items).toEqual([]); // No model attachment fallback.
+  const other = otherSource(f); const unrelated = await f.publish(other, 'other');
+  await expect(f.resolutions.write({ operation: 'reconnect', id: annotation.id, claimIds: unrelated })).rejects.toThrow();
+  const roots = f.snapshot.roots; f.snapshot.roots = [roots[1]];
+  expect((await f.resolutions.read({ operation: 'list' })).items).toEqual([]);
+  f.snapshot.roots = [{ ...roots[0], revokedAt: 'now' }, roots[1]];
+  expect((await f.resolutions.read({ operation: 'list' })).items).toEqual([]);
+  f.snapshot.roots = roots; writeFileSync(join(f.root, 'service.ts'), 'export const result = C.call();\n');
+  expect((await f.resolutions.read({ operation: 'list' })).items[0]).toMatchObject({ id: annotation.id, text: annotation.text, status: 'requires-reconsideration' });
+  const replacements = await f.publish();
+  expect((await f.resolutions.write({ operation: 'reconnect', id: annotation.id, claimIds: replacements })).items[0].revision).toBe(2);
+});
+
 test('user resolutions bind both evidence versions, survive derived replacement, and reconnect only by explicit confirmation', async () => {
   const f = await fixture();
   const ids = await f.publish();
