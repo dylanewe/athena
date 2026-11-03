@@ -102,10 +102,15 @@ export class LiveSupervisor {
       throw new LiveError('Local demonstrations are read-only. Start a new conversation.');
     }
     const maxInvestigators = this.conversations.maxInvestigators();
-    const job = this.conversations.beginLive(id, prompt, binding, retryId, build, this.inventory.snapshot().roots.filter(root => !root.revokedAt).map(root => root.path));
+    // One immutable catalogue owns both persisted provenance and worker metadata.
+    // Designating another folder during preparation cannot silently expand it.
+    const snapshot = this.inventory.snapshot();
+    const roots: LiveStart['roots'] = snapshot.roots.filter(root => !root.revokedAt && root.consent === FOLDER_CONSENT && root.acceptedAt).map(root => ({ path: root.path, repositories: snapshot.repositories.filter(repo => repo.presence === 'present' && (repo.path === root.path || repo.path.startsWith(root.path + '/'))).map(repo => ({ name: repo.name, path: repo.path })) }));
+    const sourceRoots = roots.map(root => root.path);
+    const job = this.conversations.beginLive(id, prompt, binding, retryId, build, sourceRoots);
     const controller = new AbortController();
     const environment = new EnvironmentPermissions(this.sources, controller.signal, () => this.conversations.markEphemeral(job.messageId), () => this.cancel(), this.changed, content => this.conversations.rememberEnvironment(content));
-    const active: Active = { ...job, sourceRoots: this.inventory.snapshot().roots.filter(root => !root.revokedAt).map(root => root.path), apiKey: !!binding.apiKey, controller, environment, knowledgeReferences: [], checkouts: [], retainedCheckouts: [], text: '', evidence: [], dependencies: [], scopes: [], dependencyCoverageComplete: true, requests: 0 };
+    const active: Active = { ...job, sourceRoots, apiKey: !!binding.apiKey, controller, environment, knowledgeReferences: [], checkouts: [], retainedCheckouts: [], text: '', evidence: [], dependencies: [], scopes: [], dependencyCoverageComplete: true, requests: 0 };
     if (build) {
       active.build = build; active.buildGeneration = this.knowledge?.generation();
       active.coverage = { repositories: build.repositories.map(repo => repo.name), reusedRepositories: [], reusedFrom: [], inspected: [], unsupported: [], failures: [], unresolved: [], truncated: false,
@@ -148,8 +153,6 @@ export class LiveSupervisor {
         if (build) active.retainedCheckouts.push(...active.checkouts.filter(checkout => build.repositories.some(repo => checkout.folder === repo.root && checkout.repository?.name === repo.name)));
         if (this.active !== active) return;
         const work = async (access: (role?: ModelRole, bytes?: number) => Promise<string | ApiGrant>, signal: AbortSignal) => {
-          const snapshot = this.inventory.snapshot();
-          const roots = snapshot.roots.filter(root => !root.revokedAt && root.consent === FOLDER_CONSENT && root.acceptedAt).map(root => ({ path: root.path, repositories: snapshot.repositories.filter(repo => repo.presence === 'present' && (repo.path === root.path || repo.path.startsWith(root.path + '/'))).map(repo => ({ name: repo.name, path: repo.path })) }));
           signal.throwIfAborted();
           this.conversations.assertClean({ history: previous.history, roots });
           const scope = this.conversations.scope(job.conversationId)?.repositories
@@ -228,7 +231,7 @@ export class LiveSupervisor {
     if (this.active) this.end(this.active, { status: 'cancelled', text: this.active.text + '\n\nFolder access revoked. Active and queued work stopped. Local history is retained with revoked-source labels and excluded from future context. Data already transmitted to a provider cannot be recalled; incurred usage remains.', history: [], requests: this.active.requests, usageComplete: false });
   }
   discardPurgedResults(messageIds: string[]): void {
-    if (this.unsaved && messageIds.includes(this.unsaved.messageId)) this.unsaved = undefined;
+    if (this.unsaved && (messageIds.includes(this.unsaved.messageId) || !this.conversations.hasAttempt(this.unsaved.messageId))) this.unsaved = undefined;
   }
   revokeApiAuthority(): void { if (this.active?.apiKey) this.cancel(); }
   retry(messageId: string): void { this.start(null, '', messageId); }
@@ -240,6 +243,15 @@ export class LiveSupervisor {
   private checkoutIdentities(active: Active): SourceIdentity[] { return [...active.evidence.map(item => item.citation), ...active.dependencies, ...active.scopes, ...active.retainedCheckouts]; }
   private usedCheckouts(active: Active): SourceCheckout[] {
     return [...new Map([...this.checkouts.select(this.checkoutIdentities(active), active.checkouts), ...active.retainedCheckouts].map(snapshot => [JSON.stringify(snapshot), snapshot])).values()];
+  }
+  private associateAvailableRoots(active: Active): void {
+    // Source/retrieval tools still use current global permissions. If a new grant
+    // becomes available mid-job, record its possible contribution before release,
+    // even if compaction later discards the returned provenance envelopes.
+    const added = this.inventory.snapshot().roots.filter(root => !root.revokedAt && root.consent === FOLDER_CONSENT && root.acceptedAt && !active.sourceRoots.includes(root.path)).map(root => root.path);
+    if (!added.length) return;
+    this.conversations.associateRoots(active.messageId, added);
+    active.sourceRoots = [...active.sourceRoots, ...added];
   }
   private accessValid(active: Active): boolean {
     const roots = this.inventory.snapshot().roots;
@@ -357,6 +369,7 @@ export class LiveSupervisor {
             operations = operations.then(async () => {
               try {
                 if (settled || this.active !== active || signal.aborted) return;
+                if (message.type === 'source' || message.type === 'knowledge') this.associateAvailableRoots(active);
                 if (message.type === 'access') {
                   if (!await this.checkoutValid(active)) { finish(this.checkoutPartial(active)); return; }
                   if (active.requests >= LIVE_LIMITS.requests) { finish(failure('limit')); return; }

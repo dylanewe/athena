@@ -1,3 +1,4 @@
+import { checkpointPurge } from './local-purge';
 import { associatedMaterial } from './source-ownership';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
@@ -36,7 +37,7 @@ export class Resolutions {
       }
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
-    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    checkpointPurge(this.db);
   }); }
   close(): void { this.db.close(); }
   private serial<T>(action: () => Promise<T>): Promise<T> {

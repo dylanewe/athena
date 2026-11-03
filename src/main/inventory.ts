@@ -1,3 +1,4 @@
+import { checkpointPurge } from './local-purge';
 import { overlaps } from './source-ownership';
 import { DatabaseSync } from 'node:sqlite';
 import { constants } from 'node:fs';
@@ -109,14 +110,17 @@ export class Inventory {
   }
   purgeState(paths: string[], pending: boolean): void {
     if (paths.some(path => !this.state.roots.some(root => root.path === path && root.revokedAt))) throw new Error('Revoke before purging.');
+    // Cleanup and its required checkpoint run while the durable intent is still
+    // pending. The final metadata-only marker is written only after success.
     this.save({ ...this.state,
-      roots: this.state.roots.map(root => paths.includes(root.path) ? { ...root, purgePending: pending, ...(pending ? {} : { purgedAt: new Date().toISOString(), includedLocations: [] }) } : root),
+      roots: this.state.roots.map(root => paths.includes(root.path) ? { ...root, purgePending: true, purgedAt: undefined, ...(!pending ? { includedLocations: [] } : {}) } : root),
       repositories: pending ? this.state.repositories : this.state.repositories.filter(repo => !paths.some(path => within(path, repo.path))),
       candidates: pending ? this.state.candidates : this.state.candidates.filter(repo => !paths.some(path => within(path, repo.path))),
     });
     if (!pending) {
       this.discovery = { status: 'idle', visited: 0, current: '', nonGitFiles: 0, failures: [] };
-      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      checkpointPurge(this.db);
+      this.save({ ...this.state, roots: this.state.roots.map(root => paths.includes(root.path) ? { ...root, purgePending: false, purgedAt: new Date().toISOString() } : root) });
     }
   }
 

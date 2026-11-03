@@ -63,6 +63,37 @@ test.each(['serialized-knowledge', 'compacted-knowledge'] as const)('legacy %s h
   expect(conversations.workspace().conversations).toEqual([]);
 });
 
+test('legacy sealed investigation retains ownership for withdrawal labels and explicit purge', async () => {
+  const job = conversations.beginLive(null, 'Original environment question', binding);
+  conversations.markEphemeral(job.messageId);
+  conversations.finishLive(job.messageId, result, []);
+  access.revoke(left);
+  expect(conversations.workspace().selected?.revokedSources).toEqual([left]);
+  await access.purge(left, PURGE_CONFIRMATION);
+  expect(conversations.workspace().conversations).toEqual([]);
+});
+
+test.each(['inventory', 'conversations', 'knowledge', 'resolutions', 'sources'])('an incomplete %s checkpoint keeps purge pending until recovery can finish', async database => {
+  const [id] = await publish(left);
+  await resolutions.write({ operation: 'annotate', kind: 'note', text: 'Associated note', claimIds: [id] });
+  await sources.exception(left, 'source.ts', true);
+  const job = conversations.beginLive(null, 'Associated question', binding, undefined, undefined, [left]);
+  conversations.finishLive(job.messageId, result, []);
+  const reader = new DatabaseSync(join(directory, `${database}.sqlite`));
+  reader.exec('BEGIN'); reader.prepare('SELECT name FROM sqlite_master').all();
+  try {
+    await expect(access.purge(left, PURGE_CONFIRMATION)).rejects.toThrow(/checkpoint/i);
+    expect(inventory.snapshot().roots[0]).toMatchObject({ purgePending: true });
+    expect(inventory.snapshot().roots[0].purgedAt).toBeUndefined();
+  } finally { reader.exec('ROLLBACK'); reader.close(); }
+  close(); open(); await access.recover();
+  expect(inventory.snapshot().roots[0]).toMatchObject({ purgePending: false, purgedAt: expect.any(String) });
+  expect(conversations.workspace().conversations).toEqual([]);
+  expect(await knowledge.inspect()).toEqual([]);
+  expect((await resolutions.read({ operation: 'list' })).items).toEqual([]);
+  expect(sources.exceptions()).toEqual([]);
+});
+
 test('fresh support at a reconnected independently authorized location survives withdrawal and purge of the original grant', async () => {
   const [original] = await publish(left);
   const moved = join(right, 'relocated'); renameSync(left, moved);

@@ -654,6 +654,42 @@ test('streamed partial text is retained on Stop but never becomes future model c
   expect(db.liveContext(conversation.id).history).toEqual([]);
 });
 
+test('the worker catalogue is frozen with durable job ownership before asynchronous preparation', async () => {
+  let entered!: () => void, resume!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const released = new Promise<void>(resolve => { resume = resolve; });
+  oauth.catalog = vi.fn(async () => { entered(); await released; return [{ id: 'fixture-model', name: 'Fixture' }]; });
+  await chatgpt.close();
+  store = new ChatGPTStore(join(directory, 'chatgpt.sqlite'), { available: () => true, encrypt: value => Buffer.from(value), decrypt: value => Buffer.from(value).toString() });
+  chatgpt = new ChatGPTSettings(store, oauth, { start: () => { throw new Error('No connection test'); } });
+  jobs = new LiveSupervisor(db, chatgpt, sources, { snapshot: () => structuredClone(snapshot) }, () => { const worker = new Worker(); workers.push(worker); return worker; }, () => {}, undefined, knowledge, resolutions);
+  jobs.start(null, 'An ordinary metadata question');
+  await waiting;
+  const added = join(directory, 'newly-designated'); mkdirSync(added);
+  snapshot.roots.push({ path: added, consent: FOLDER_CONSENT, acceptedAt: 'now', includedLocations: [] });
+  resume(); await idle();
+  expect(requests).toHaveLength(1);
+  expect(JSON.stringify(requests)).toContain(root);
+  expect(JSON.stringify(requests)).not.toContain(added);
+  db.revoke([added]);
+  expect(db.workspace().selected?.revokedSources).toBeUndefined();
+});
+
+test('mid-job global source availability is recorded before retrieval even when returned envelopes are later absent', async () => {
+  http = async (_url, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    return new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
+  };
+  jobs.start(null, 'A waiting job'); await expect.poll(() => requests.length).toBe(1);
+  const added = join(directory, 'newly-designated'); mkdirSync(added);
+  snapshot.roots.push({ path: added, consent: FOLDER_CONSENT, acceptedAt: 'now', includedLocations: [] });
+  const reply = await workers[0].rpc('knowledge', { input: { operation: 'search', query: 'not-found' } });
+  expect(reply.knowledge?.items).toEqual([]);
+  jobs.cancel(); await idle(); db.revoke([added]);
+  expect(db.workspace().selected?.revokedSources).toEqual([added]);
+  expect(db.purge([added])).toHaveLength(2);
+});
+
 test('revoked historical source text and deferred title context are not reconstructed for a fresh follow-up', async () => {
   scripted(investigationScripts(root)); jobs.start(null, 'Original private source question'); await idle();
   const conversation = db.workspace().selected!;
@@ -712,7 +748,13 @@ test('purge discards a failed-save terminal result instead of retaining it for a
   const lock = new DatabaseSync(join(directory, 'conversations.sqlite'));
   try { lock.exec('BEGIN IMMEDIATE'); jobs.cancel(); expect(jobs.saveError).toBeDefined(); }
   finally { lock.exec('ROLLBACK'); lock.close(); }
+  const reader = new DatabaseSync(join(directory, 'conversations.sqlite'));
+  reader.exec('BEGIN'); reader.prepare('SELECT id FROM messages').all();
   snapshot.roots[0].revokedAt = 'now'; db.revoke([root]);
+  try { expect(() => db.purge([root])).toThrow(/checkpoint/i); }
+  finally { reader.exec('ROLLBACK'); reader.close(); }
+  // The prior deletion committed before its checkpoint failed; recovery returns
+  // no IDs, but must still clear the now-orphaned in-memory failed-save result.
   jobs.discardPurgedResults(db.purge([root]));
   expect(jobs.saveError).toBeUndefined();
   expect(db.workspace().conversations).toEqual([]);

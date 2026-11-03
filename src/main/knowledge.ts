@@ -1,3 +1,4 @@
+import { checkpointPurge } from './local-purge';
 import { affectedSource } from './source-ownership';
 import { randomUUID, createHash } from 'node:crypto';
 import { SourceCheckouts } from './source-checkouts';
@@ -201,7 +202,7 @@ export class Knowledge {
       for (const id of ids) this.db.prepare('DELETE FROM claims WHERE id = ?').run(id);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
-    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    checkpointPurge(this.db);
   }); }
   clear(): Promise<void> { return this.serial(async () => {
     this.db.exec('BEGIN IMMEDIATE');

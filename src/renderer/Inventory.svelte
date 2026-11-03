@@ -146,7 +146,7 @@
             {#if purgePath === root.path}
               <section class="consent" aria-label="Confirm local purge">
                 <h3>Permanently delete associated local data?</h3>
-                <p>Deletes cached evidence, source-owned knowledge and dependent assertions, associated annotations, and entire associated conversations (including later turns and titles). Independently supported knowledge remains. Conversations may be associated conservatively with every folder available to that job; legacy knowledge history with lost ownership is included conservatively. Other local settings are kept. Your repository files are never changed.</p>
+                <p>Deletes cached evidence, source-owned knowledge and dependent assertions, associated annotations, and entire associated conversations (including later turns and titles). Independently supported knowledge remains. Conversations may be associated conservatively with every folder available to that job; legacy sealed/knowledge history with lost ownership is included conservatively. Other local settings are kept. Your repository files are never changed.</p>
                 <p>This cannot be undone. It does not recall provider data or erase external backups, OS snapshots, or guarantee forensic erasure of disk blocks. The minimal revoked-folder permission record remains to prevent resurrection.</p>
                 <label class="check"><input type="checkbox" bind:checked={purgeAccepted} /> {PURGE_CONFIRMATION}</label>
                 <button disabled={busy || !purgeAccepted} onclick={async () => { await change(() => window.athena.inventory.purge(root.path, PURGE_CONFIRMATION)); purgePath = null; purgeAccepted = false; }}>Confirm permanent purge</button>

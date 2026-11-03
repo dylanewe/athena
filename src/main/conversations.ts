@@ -1,3 +1,4 @@
+import { checkpointPurge } from './local-purge';
 import { associatedMaterial, overlaps } from './source-ownership';
 import type { BuildCoverage, BuildScope } from '../shared/build';
 import { randomUUID } from 'node:crypto';
@@ -114,13 +115,22 @@ export class Conversations {
     return [...new Set(this.db.prepare(`SELECT m.conversation_id, a.* FROM live_attempts a JOIN messages m ON m.id = a.message_id`).all().filter(row => {
       const grants = JSON.parse(String(row.source_roots)) as string[];
       const result = row.result ? JSON.parse(String(row.result)) : {};
-      // Pre-#19 knowledge-only attempts may have compacted away every citation.
-      // A referenced interpretation without a recorded root catalogue cannot be
-      // proven independent of a withdrawn folder. Retain/purge it conservatively.
-      if (!grants.length && result.knowledgeReferences?.length) return true;
+      // Pre-#19 knowledge-only or sealed attempts may have discarded every source
+      // envelope. Without a root catalogue their independence from a withdrawn
+      // folder cannot be established. Retain/purge them conservatively.
+      if (!grants.length && (row.ephemeral || result.knowledgeReferences?.length)) return true;
       return grants.some(grant => roots.some(root => overlaps(root, grant))) ||
         ['history', 'evidence', 'result', 'exploration', 'build_scope'].some(key => row[key] && associatedMaterial(JSON.parse(String(row[key])), roots));
     }).map(row => String(row.conversation_id)))];
+  }
+  hasAttempt(messageId: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM live_attempts WHERE message_id = ?').get(messageId);
+  }
+  associateRoots(messageId: string, roots: string[]): void {
+    const row = this.db.prepare('SELECT source_roots FROM live_attempts WHERE message_id = ?').get(messageId);
+    if (!row) throw new Error('Attempt unavailable.');
+    const recorded = JSON.parse(String(row.source_roots)) as string[];
+    this.db.prepare('UPDATE live_attempts SET source_roots = ? WHERE message_id = ?').run(JSON.stringify([...new Set([...recorded, ...roots])]), messageId);
   }
   revokedSources(id: string): string[] {
     return this.withdrawn().filter(root => this.associatedConversations([root]).includes(id));
@@ -141,7 +151,7 @@ export class Conversations {
         this.db.prepare('DELETE FROM conversations WHERE id = ?').run(id);
       }
     });
-    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    checkpointPurge(this.db);
     return removed;
   }
 

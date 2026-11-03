@@ -1,3 +1,4 @@
+import { checkpointPurge } from './local-purge';
 import { affectedSource } from './source-ownership';
 import type { SourceIdentity } from '../shared/sources';
 import { constants } from 'node:fs';
@@ -60,7 +61,7 @@ export class Sources {
   purge(roots: string[]): void {
     this.includes = this.includes.filter(item => !roots.includes(item.root));
     this.db.prepare('INSERT OR REPLACE INTO source_policy VALUES (1, ?)').run(JSON.stringify(this.includes));
-    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    checkpointPurge(this.db);
   }
   exceptions(): SourceException[] { return structuredClone(this.includes); }
   close(): void { this.db.close(); }
