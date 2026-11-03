@@ -169,7 +169,9 @@ test('reset and retention recovery never resurrect purged conversations, annotat
   const observed = await evidence(left);
   const job = conversations.beginLive(null, 'Private question', binding, undefined, undefined, [left]);
   conversations.finishLive(job.messageId, result, observed);
+  conversations.progressChildHistory(job.messageId, 'T1', result.history);
   conversations.setVerboseDays(0); conversations.cleanupExpired();
+  expect(conversations.childHistories(job.messageId)).toEqual({});
   await access.purge(left, PURGE_CONFIRMATION);
   await knowledge.clear(); close(); open();
   await access.recover(); await knowledge.recoverCleanup(); conversations.recoverCleanup(); conversations.cleanupExpired(); await knowledge.scan();

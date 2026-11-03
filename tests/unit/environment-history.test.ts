@@ -34,7 +34,11 @@ test('an abrupt restart retains only the safe marker, never ephemeral progress',
 
 test('sealing precedes exposure; all derived persistence, follow-ups and restart recovery fail closed', () => {
   const job = db.beginLive(null, 'Inspect configuration', { model: 'fixture', registration: 'fixture' });
+  db.progressChildHistory(job.messageId, 'T1', [{ role: 'user', content: 'Earlier ordinary child history', timestamp: 0 }]);
   db.markEphemeral(job.messageId);
+  expect(db.childHistories(job.messageId)).toEqual({});
+  db.progressChildHistory(job.messageId, 'T1', [{ role: 'user', content: canary, timestamp: 0 }]);
+  expect(db.childHistories(job.messageId)).toEqual({});
   db.progressLive(job.messageId, canary, canary);
   const evidence: Evidence[] = [{ id: 'E1', text: canary, citation: { folder: '/fixture', path: '.env', repository: null, start: 1, end: 1, revision: null, contentIdentity: 'sha256:' + 'a'.repeat(64) } }];
   const exploration: Exploration = { history: [{ role: 'user', content: canary, timestamp: 0 }], result: { status: 'complete', findings: [{ claim: canary, support: 'source', evidenceIds: ['E1'] }], evidence, inspectedScope: [canary], scopeTruncated: false, unresolvedQuestions: [canary], candidateKnowledgeChanges: [canary] } };

@@ -59,7 +59,7 @@ export class Resolutions {
       for (const row of rows.slice(0, 4)) {
         const stored = this.stored(row);
         const revision = input.operation === 'inspect' ? input.revision : row.linked_revision ? Number(row.linked_revision) : undefined;
-        const view = await this.view(stored, revision, signal, observe, budget) ?? (observe ? this.reconciliationEntry(stored, revision, signal) : undefined);
+        const view = await this.view(stored, revision, signal, observe, budget) ?? (observe ? this.reconciliationEntry(stored, revision, signal, budget.context) : undefined);
         consumed++;
         if (!view) continue;
         if (Buffer.byteLength(JSON.stringify({ items: [...items, view], notice: NOTICE })) > KNOWLEDGE_LIMITS.bytes - 128) { consumed--; break; }
@@ -67,7 +67,7 @@ export class Resolutions {
       }
       // Earlier views may have awaited a different annotation's IO since their
       // own checks. Finalize the entire response against current authorization.
-      return { items: items.filter(item => item.unavailable ? this.visibleReconciliation(item.id, item.revision) : this.eligibleRevision(item.id, item.revision, budget.context)), notice: NOTICE, ...(rows.length > consumed && consumed > 0 && offset + consumed <= 10000 ? { nextOffset: offset + consumed } : {}) };
+      return { items: items.filter(item => item.unavailable ? this.visibleReconciliation(item.id, item.revision, budget.context) : this.eligibleRevision(item.id, item.revision, budget.context)), notice: NOTICE, ...(rows.length > consumed && consumed > 0 && offset + consumed <= 10000 ? { nextOffset: offset + consumed } : {}) };
     });
   }
   write(input: ResolutionWrite): Promise<ResolutionResult> {
@@ -130,15 +130,15 @@ export class Resolutions {
   /** Keep a content-free entry visible when files disappear or ordinary source
    * checks cannot finish. Never relax source policy to release annotation prose,
    * excerpts, locations, model context, or authority to reconnect. */
-  private visibleReconciliation(id: string, revision: number): boolean {
+  private visibleReconciliation(id: string, revision: number, context?: object): boolean {
     const rows = this.db.prepare('SELECT revision, value FROM revisions WHERE annotation_id = ? AND (revision = 1 OR revision = ?)').all(id, revision);
-    return rows.some(row => Number(row.revision) === revision) && this.knowledge.reconciliationEligible(rows.flatMap(row => (JSON.parse(String(row.value)) as Revision).targets));
+    return rows.some(row => Number(row.revision) === revision) && this.knowledge.reconciliationEligible(rows.flatMap(row => (JSON.parse(String(row.value)) as Revision).targets), context);
   }
-  private reconciliationEntry(stored: Stored, requested: number | undefined, signal: AbortSignal): ResolutionView | undefined {
+  private reconciliationEntry(stored: Stored, requested: number | undefined, signal: AbortSignal, context?: object): ResolutionView | undefined {
     const row = requested === undefined
       ? this.db.prepare('SELECT revision, value FROM revisions WHERE annotation_id = ? ORDER BY revision DESC LIMIT 1').get(stored.id)
       : this.db.prepare('SELECT revision, value FROM revisions WHERE annotation_id = ? AND revision = ?').get(stored.id, requested);
-    if (!row || !this.visibleReconciliation(stored.id, Number(row.revision))) return;
+    if (!row || !this.visibleReconciliation(stored.id, Number(row.revision), context)) return;
     let writable = true;
     try { this.assertWritable(); } catch { writable = false; }
     if (writable && !signal.aborted) this.db.prepare('UPDATE revisions SET reconsider = 1 WHERE annotation_id = ? AND revision = ?').run(stored.id, row.revision);

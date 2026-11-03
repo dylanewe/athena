@@ -15,7 +15,7 @@ interface InvestigatorRuntime {
   /** Excerpts in the input that generated the current tool calls, not later results. */
   evidenceIds(agent: Agent): ReadonlySet<string>;
   source: LiveCapabilities['source'];
-  checkpoint(exploration: Exploration): void;
+  checkpoint(exploration: Exploration, taskId?: string): void;
   check(material: unknown): void;
   limit(notice: string): void;
   progress(activity: string): void;
@@ -121,7 +121,7 @@ export function investigatorTool(roots: LiveStart['roots'], runtime: Investigato
             const child = singleInvestigator(roots, { ...runtime, knowledge: () => runtime.knowledge?.(task.scope) ?? [], checkpoint: exploration => {
               if (signal.aborted) return;
               task.result = exploration.result;
-              if (!input.tasks) runtime.checkpoint(exploration);
+              runtime.checkpoint(exploration, input.tasks ? task.id : undefined);
               notify();
             } }, signal);
             try {

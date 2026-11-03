@@ -8,7 +8,7 @@ import { KnowledgeRetrieval, knowledgeName as nameKey } from './knowledge-retrie
 import { relative, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Check } from 'typebox/value';
-import { flowReferences, isConnection, KNOWLEDGE_LIMITS, knowledgeCandidatesSchema, type KnowledgeCandidate, type KnowledgeOwner, type KnowledgeRecord, type KnowledgeRequest, type KnowledgeResult } from '../shared/knowledge';
+import { flowReferences, isConnection, knowledgeCandidatesSchema, type KnowledgeCandidate, type KnowledgeOwner, type KnowledgeRecord, type KnowledgeRequest, type KnowledgeResult } from '../shared/knowledge';
 import type { ResolutionTarget } from '../shared/resolutions';
 import type { Evidence } from '../shared/live';
 import type { SourceCheckout, SourceIdentity, SourceScope } from '../shared/sources';
@@ -172,14 +172,15 @@ export class Knowledge {
   }
   /** Metadata-only reconciliation visibility. This does NOT authorize retained
    * annotation text/evidence, model attachments, or a reconnection write. */
-  reconciliationEligible(targets: ResolutionTarget[]): boolean {
+  reconciliationEligible(targets: ResolutionTarget[], context?: object): boolean {
+    if (!context || !this.retrieval.reserveReconciliation(context, targets.map(target => target.record.id))) return false;
     const records = targets.map(target => target.record);
     const queued = targets.filter(target => target.generation === this.generation()).map(target => target.record.id);
     const visited = new Set<string>();
     for (let index = 0; index < queued.length; index++) {
       const id = queued[index];
       if (visited.has(id)) continue;
-      if (visited.size >= KNOWLEDGE_LIMITS.graph) return false;
+      if (!this.retrieval.reserveReconciliation(context, [id])) return false;
       visited.add(id);
       const current = this.records(id)[0];
       if (!current) return false;
@@ -189,9 +190,8 @@ export class Knowledge {
     const sources = [...new Map(records.flatMap(record => [...record.dependencies, ...record.scopes,
       ...record.evidence.map(item => item.citation), ...(record.checkouts ?? [])]).map(source => [JSON.stringify(source), source])).values()];
     const inventory = this.inventory.snapshot();
-    return sources.length > 0 && sources.length <= KNOWLEDGE_LIMITS.sourceChecks && sources.every(source =>
-      folderGranted(inventory.roots, source.folder) && this.sources.eligible(source) && (!source.repository ||
-        inventory.repositories.some(repo => repo.presence === 'present' && nameKey(repo.name) === nameKey(source.repository!.name))));
+    return sources.length > 0 && this.retrieval.reserveReconciliation(context, [], sources) && sources.every(source =>
+      folderGranted(inventory.roots, source.folder) && this.sources.eligible(source));
   }
   inspectionEligible(context?: object): boolean { return !!context && this.retrieval.contextEligible(context); }
   private resolutionVersion(record: KnowledgeRecord, derivation: NonNullable<KnowledgeResult['derivation']>): string {

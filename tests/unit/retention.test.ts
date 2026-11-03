@@ -26,11 +26,15 @@ function answer(store: Conversations) {
 
 test('30-day expiry removes verbose main/child histories at the boundary but retains answers, citations and concise investigations across restart', () => {
   const f = fixture(); const job = answer(f.store);
+  f.store.progressChildHistory(job.messageId, 'T1', result.exploration!.history);
   expect(f.store.retentionStatus()).toMatchObject({ verboseDays: 30, expiredAttempts: 0 });
   vi.setSystemTime(new Date('2026-01-30T23:59:59.999Z')); f.store.cleanupExpired();
   expect(f.store.liveContext(job.conversationId).history).toHaveLength(1);
+  expect(f.store.childHistories(job.messageId).T1).toHaveLength(1);
   vi.setSystemTime(new Date('2026-01-31T00:00:00Z')); f.store.cleanupExpired();
   expect(f.store.liveContext(job.conversationId).history).toEqual([]);
+  f.store.progressChildHistory(job.messageId, 'T1', result.exploration!.history);
+  expect(f.store.childHistories(job.messageId)).toEqual({});
   f.store.progressExploration(job.messageId, result.exploration!, evidence); // Late child checkpoint must not resurrect expired protocol.
   expect(f.store.exploration(job.messageId)).toBeUndefined();
   const message = f.store.workspace().selected!.messages.at(-1)!;
@@ -43,14 +47,17 @@ test('30-day expiry removes verbose main/child histories at the boundary but ret
 
 test('retention policy is configurable, local and prospective; expired transcripts never reappear', () => {
   const f = fixture(); const job = answer(f.store);
+  f.store.progressChildHistory(job.messageId, 'T1', result.exploration!.history);
   for (const days of [-1, 0.5, 3651, NaN]) expect(() => f.store.setVerboseDays(days)).toThrow();
   f.store.setVerboseDays(null);
   vi.setSystemTime(new Date('2036-01-01T00:00:00Z')); f.store.cleanupExpired();
   expect(f.store.liveContext(job.conversationId).history).toHaveLength(1);
+  expect(f.store.childHistories(job.messageId).T1).toHaveLength(1);
   f.store.setVerboseDays(0);
   expect(f.store.liveContext(job.conversationId).history).toHaveLength(1); // Saving policy alone does not delete.
   f.store.cleanupExpired(); f.store.setVerboseDays(null);
   f.store.finishLive(job.messageId, result, evidence); // A late save cannot restore expired content.
+  expect(f.store.childHistories(job.messageId)).toEqual({});
   expect(f.store.liveContext(job.conversationId).history).toEqual([]);
   f.store.close(); expect(f.open().retentionStatus()).toMatchObject({ verboseDays: null, expiredAttempts: 1 });
 });
@@ -74,6 +81,7 @@ test('failed expiry rolls back; an interrupted checkpoint is visible and restart
 test('explicit conversation deletion is transactional, removes its evidence, and late results or restart cannot recreate it', () => {
   const f = fixture(); const job = answer(f.store); f.store.setMaxInvestigators(2);
   const other = answer(f.store);
+  f.store.progressChildHistory(job.messageId, 'T1', result.exploration!.history);
   const fault = new DatabaseSync(f.path); cleanup.push(() => fault.close());
   fault.exec("CREATE TRIGGER deletion_fault BEFORE DELETE ON messages BEGIN SELECT RAISE(ABORT, 'deletion failure'); END");
   expect(() => f.store.deleteConversation(job.conversationId)).toThrow('deletion failure');
@@ -81,6 +89,9 @@ test('explicit conversation deletion is transactional, removes its evidence, and
   fault.exec('DROP TRIGGER deletion_fault');
   f.store.deleteConversation(job.conversationId);
   expect(f.store.hasAttempt(job.messageId)).toBe(false);
+  expect(f.store.childHistories(job.messageId)).toEqual({});
+  f.store.progressChildHistory(job.messageId, 'T1', result.exploration!.history);
+  expect(f.store.childHistories(job.messageId)).toEqual({});
   f.store.finishLive(job.messageId, result, evidence); f.store.progressLive(job.messageId, 'Late', 'Late');
   expect(() => f.store.select(job.conversationId)).toThrow();
   f.store.deleteConversation(other.conversationId);

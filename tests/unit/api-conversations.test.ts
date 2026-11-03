@@ -95,11 +95,19 @@ test('explicit builds investigate undocumented code with the shared scheduler an
   supervisor.build(['repo'], BUILD_CONSENT); await idle();
   const answer = conversations.workspace().selected!.messages.at(-1)!;
   expect(answer).toMatchObject({ status: 'complete', knowledgePublication: 'published', build: { repositories: ['repo'], inspected: [{ operation: 'read', path: 'answer.ts', status: 'complete' }], reusedRepositories: [] }, investigators: [{ scope: 'repo', status: 'complete' }] });
+  const children = conversations.childHistories(answer.id);
+  expect(Object.keys(children)).toEqual(['T1']);
+  expect(JSON.stringify(children.T1)).toContain('sources_read');
+  expect(JSON.stringify(conversations.workspace())).not.toContain('childHistories');
   expect(requests.map(r => r.body.model)).toEqual(['investigator-one', 'investigator-one', 'main-one']);
   expect(JSON.stringify(requests[0].body)).toContain('notes');
   expect((await knowledge.retrieve({ operation: 'search', query: 'Answer boundary', scope: 'repo' })).items).toHaveLength(1);
   conversations.close(); conversations = new Conversations(join(directory, 'conversations.sqlite'));
   expect(conversations.workspace().selected!.messages.at(-1)!.build?.repositories).toEqual(['repo']);
+  expect(conversations.childHistories(answer.id)).toEqual(children);
+  conversations.setVerboseDays(0); conversations.cleanupExpired();
+  expect(conversations.childHistories(answer.id)).toEqual({});
+  expect(conversations.workspace().selected!.messages.at(-1)!.investigators).toEqual(answer.investigators);
 });
 
 test('reset invalidates every build receipt without starting paid work; explicit rebuild fully re-extracts under unchanged approvals and limits', async () => {
@@ -382,6 +390,7 @@ test('a main-assigned batch runs three investigators concurrently, queues the fo
   expect(answer).toMatchObject({ status: 'complete', requests: 6, usage: { input: 120, output: 30 } });
   expect(answer.investigators?.map(task => [task.scope, task.status, task.result?.findings[0]?.claim])).toEqual(['A', 'B', 'C', 'D'].map(name => [name, 'complete', `Finding ${name}`]));
   expect(reservations).toHaveLength(6);
+  expect(Object.keys(conversations.childHistories(answer.id)).sort()).toEqual(['T1', 'T2', 'T3', 'T4']);
   expect(JSON.stringify(requests.at(-1)?.body)).not.toContain('sources_read\\\"');
 });
 

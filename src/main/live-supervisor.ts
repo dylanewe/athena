@@ -22,7 +22,7 @@ import { sourceRequest } from './source-bridge';
 import { checkBeforeModelSend } from './secret-check';
 import { MAX_TITLE_LENGTH } from '../shared/contracts';
 import { INVESTIGATION_LIMITS, INVESTIGATOR_MAX, validFindings, type InvestigatorTask, type Exploration } from '../shared/investigation';
-import { LIVE_LIMITS, type Evidence, type LiveParentMessage, type LiveResult, type LiveStart } from '../shared/live';
+import { LIVE_LIMITS, type Evidence, type LiveCheckpoint, type LiveParentMessage, type LiveResult, type LiveStart } from '../shared/live';
 
 export class LiveError extends Error {}
 export interface LiveWorker {
@@ -320,10 +320,16 @@ export class LiveSupervisor {
             const message = value as Record<string, unknown>;
             if (message.type === 'checkpoint') {
               if (!message.checkpoint || typeof message.checkpoint !== 'object') throw new Error();
-              const checkpoint = message.checkpoint as Pick<LiveResult, 'exploration' | 'title' | 'investigators'>;
+              const checkpoint = message.checkpoint as LiveCheckpoint;
               if (checkpoint.investigators && !active.environment.tainted) {
                 active.investigators = this.tasks(checkpoint.investigators, active, job);
                 this.conversations.progressInvestigators(active.messageId, active.investigators, active.evidence);
+              }
+              if (checkpoint.childExploration && !active.environment.tainted) {
+                const { taskId, exploration } = checkpoint.childExploration;
+                if (!active.investigators?.some(task => task.id === taskId && task.status === 'running')) throw new Error('Unknown child transcript owner.');
+                const checked = this.exploration(exploration, job.apiKey?.investigator.model.id ?? job.model, active.evidence, job.apiKey?.investigator.model.provider);
+                this.conversations.progressChildHistory(active.messageId, taskId, checked.history);
               }
               if (checkpoint.exploration && !active.environment.tainted) {
                 active.exploration = this.exploration(checkpoint.exploration, job.apiKey?.investigator.model.id ?? job.model, active.evidence, job.apiKey?.investigator.model.provider);

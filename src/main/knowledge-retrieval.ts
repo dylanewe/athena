@@ -211,6 +211,22 @@ export class KnowledgeRetrieval {
     }
     return true;
   }
+  /** Metadata-only reconciliation consumes the SAME opaque inspection allowance;
+   * a failed ordinary check cannot mint a fresh graph or source budget. */
+  reserveReconciliation(context: object, ids: string[], sources: SourceIdentity[] = []): boolean {
+    const budget = this.contexts.get(context);
+    if (!budget || budget.signal.aborted) return false;
+    for (const id of ids) if (!budget.records.has(id)) {
+      if (budget.records.size >= L.graph) return false;
+      budget.records.set(id, this.load(id));
+    }
+    for (const source of sources) {
+      const key = JSON.stringify(source);
+      if (!budget.sources.has(key) && budget.sources.size >= L.sourceChecks) return false;
+      budget.sources.add(key);
+    }
+    return true;
+  }
   /** Finalize again after annotation attachment under the same opaque read context. */
   completeResult(result: KnowledgeResult): KnowledgeResult {
     const budget = this.contexts.get(result);

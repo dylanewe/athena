@@ -201,7 +201,10 @@ export async function runLiveAgent(job: LiveStart, capabilities: LiveCapabilitie
       return result;
     },
     check: environment.check,
-    checkpoint: value => { exploration = value; capabilities.checkpoint?.({ exploration }); },
+    checkpoint: (value, taskId) => {
+      if (taskId) capabilities.checkpoint?.({ childExploration: { taskId, exploration: value } });
+      else { exploration = value; capabilities.checkpoint?.({ exploration }); }
+    },
     limit: notice => { limited = true; limitNotice = notice; abort(); },
     progress: value => { activity = value; progress(); },
   }, signal, job.maxInvestigators);

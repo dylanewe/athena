@@ -84,7 +84,10 @@ export class Conversations {
     if (!attempts.includes('build_scope')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN build_scope TEXT');
     if (!attempts.includes('exploration')) this.db.exec('ALTER TABLE live_attempts ADD COLUMN exploration TEXT');
     if (!attempts.includes('source_roots')) this.db.exec("ALTER TABLE live_attempts ADD COLUMN source_roots TEXT NOT NULL DEFAULT '[]'");
-    this.db.exec('CREATE TABLE IF NOT EXISTS revoked_sources (path TEXT PRIMARY KEY)');
+    this.db.exec(`CREATE TABLE IF NOT EXISTS revoked_sources (path TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS child_transcripts (
+        message_id TEXT NOT NULL REFERENCES live_attempts(message_id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL, history TEXT NOT NULL, PRIMARY KEY(message_id, task_id));`);
     // Earlier releases pinned one binding per conversation. Backfill original
     // attempt identities and saved build scopes before allowing model changes.
     this.db.exec(`UPDATE live_attempts SET binding = (SELECT c.binding FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.id = message_id) WHERE binding IS NULL;
@@ -244,6 +247,7 @@ export class Conversations {
     const cutoff = this.expiryCutoff();
     if (!this.db.prepare("SELECT 1 FROM live_attempts WHERE verbose_deleted_at IS NULL AND ended_at <= ?").get(cutoff)) return;
     this.cleanup.run(() => {
+      this.db.prepare('DELETE FROM child_transcripts WHERE message_id IN (SELECT message_id FROM live_attempts WHERE verbose_deleted_at IS NULL AND ended_at <= ?)').run(cutoff);
       // New attempts retain the immutable request-root catalogue. Legacy history
       // without that catalogue cannot be proven independent of future revocations
       // once its source envelopes expire: preserve conservative ownership, not text.
@@ -412,6 +416,7 @@ export class Conversations {
     this.transaction(() => {
       this.db.prepare('UPDATE conversations SET sealed = 1 WHERE id = (SELECT conversation_id FROM messages WHERE id = ?)').run(messageId);
       this.db.prepare("UPDATE messages SET text = ? WHERE id = ?").run(EPHEMERAL_NOTICE, messageId);
+      this.db.prepare('DELETE FROM child_transcripts WHERE message_id = ?').run(messageId);
       this.db.prepare("UPDATE live_attempts SET ephemeral = 1, history = '[]', evidence = '[]', exploration = NULL, result = ? WHERE message_id = ?")
         .run(JSON.stringify({ status: 'running', ephemeral: true, text: EPHEMERAL_NOTICE }), messageId);
     });
@@ -437,6 +442,18 @@ export class Conversations {
       this.progress(messageId, text);
       this.db.prepare("UPDATE live_attempts SET result = json_patch(COALESCE(result, '{}'), ?) WHERE message_id = ?").run(JSON.stringify({ status: 'running', activity, ...reported }), messageId);
     });
+  }
+
+  /** Main-private verbose storage; never renderer IPC or conversational context. */
+  childHistories(messageId: string): Record<string, PiMessage[]> {
+    return Object.fromEntries(this.db.prepare('SELECT task_id, history FROM child_transcripts WHERE message_id = ? ORDER BY task_id').all(messageId)
+      .map(row => [String(row.task_id), JSON.parse(String(row.history)) as PiMessage[]]));
+  }
+  progressChildHistory(messageId: string, taskId: string, history: PiMessage[]): void {
+    const row = this.db.prepare('SELECT verbose_deleted_at FROM live_attempts WHERE message_id = ?').get(messageId);
+    if (!row || row.verbose_deleted_at || this.protect(messageId, history)) return;
+    if (!/^T[1-8]$/.test(taskId) || !Array.isArray(history) || Buffer.byteLength(JSON.stringify(history)) > LIVE_LIMITS.historyBytes) throw new Error('Invalid bounded child transcript.');
+    this.db.prepare('INSERT OR REPLACE INTO child_transcripts VALUES (?, ?, ?)').run(messageId, taskId, JSON.stringify(history));
   }
 
   exploration(messageId: string): Exploration | undefined {

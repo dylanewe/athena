@@ -127,7 +127,9 @@ test('supporting claims from prior investigations add transitive access, freshne
     f.snapshot.repositories[1].presence = 'missing';
     expect((await f.knowledge.retrieve({ operation: 'flow', id })).items).toEqual([]);
     expect((await f.knowledge.retrieve({ operation: 'flows', serviceId: ids[0] })).items).toEqual([]);
-    expect((await resolutions.read({ operation: 'list', claimId: id })).items).toEqual([]);
+    const reconciliation = (await resolutions.read({ operation: 'list', claimId: id })).items[0];
+    expect(reconciliation).toMatchObject({ unavailable: true, status: 'requires-reconsideration', bindings: [], versions: [] });
+    expect(reconciliation.text).not.toContain('Bank internals still need investigation.');
   } finally { resolutions.close(); }
 });
 

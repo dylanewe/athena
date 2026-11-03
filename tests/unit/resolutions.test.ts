@@ -93,6 +93,33 @@ test('deleted evidence leaves a content-withheld reconciliation entry without ex
   expect((await f.resolutions.write({ operation: 'reconnect', id: annotation.id, claimIds: replacements })).items[0].revision).toBe(2);
 });
 
+test('metadata reconciliation shares the response-wide graph allowance across multiple annotations', async () => {
+  const f = await fixture(); const base = await f.publish();
+  const { record } = await f.knowledge.resolutionTarget(base[0], new AbortController().signal);
+  for (let group = 0; group < 4; group++) {
+    let head: string | undefined;
+    for (let step = 0; step < 9; step++) {
+      [head] = await f.knowledge.publish({ owner: { conversationId: 'chains', messageId: `${group}-${step}` }, candidates: [{
+        id: 'C1', scope: 'service', topic: `Chain ${group}/${step}`, summary: 'Bounded provenance chain.', claim: `Claim ${group}/${step}.`,
+        kind: 'behavior', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: head ? [{ kind: 'depends-on', target: head }] : [],
+      }], evidence: record.evidence, completed: true, environmentExposed: false, signal: new AbortController().signal });
+    }
+    await f.resolutions.write({ operation: 'annotate', kind: 'note', text: `Explanation ${group}.`, claimIds: [head!] });
+  }
+  const result = await f.resolutions.read({ operation: 'list' });
+  expect(result.items).toHaveLength(3); // Four disjoint nine-claim graphs cannot fit the shared 32-claim budget.
+  expect(result.items.every(item => !item.unavailable)).toBe(true);
+});
+
+test('missing repositories retain content-free reconciliation visibility while their original enclosing folder remains granted', async () => {
+  const f = await fixture(); const ids = await f.publish();
+  const annotation = (await f.resolutions.write({ operation: 'annotate', kind: 'note', text: 'Retained discrepancy explanation.', claimIds: ids })).items[0];
+  await f.knowledge.clear(); rmSync(f.root, { recursive: true }); f.snapshot.repositories[0].presence = 'missing';
+  expect((await f.resolutions.read({ operation: 'inspect', id: annotation.id })).items[0]).toMatchObject({ id: annotation.id, unavailable: true, status: 'requires-reconsideration', bindings: [] });
+  f.snapshot.roots[0].revokedAt = 'now';
+  expect((await f.resolutions.read({ operation: 'list' })).items).toEqual([]);
+});
+
 test('user resolutions bind both evidence versions, survive derived replacement, and reconnect only by explicit confirmation', async () => {
   const f = await fixture();
   const ids = await f.publish();
