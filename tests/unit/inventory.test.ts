@@ -309,6 +309,18 @@ test('purge during missing-repository reconciliation cannot be undone by a resum
   expect(inventory.snapshot().repositories).toEqual([]);
 });
 
+test('rescanning after withdrawal never probes filesystem metadata beneath a revoked grant', async () => {
+  await repository(join(root, 'atlas')); await inventory.designate(root, FOLDER_CONSENT); await inventory.scan();
+  inventory.revoke(root);
+  vi.mocked(fs.realpath).mockClear(); vi.mocked(fs.lstat).mockClear(); vi.mocked(fs.readdir).mockClear(); vi.mocked(fs.open).mockClear();
+  await inventory.scan();
+  expect(vi.mocked(fs.realpath).mock.calls).toEqual([]);
+  expect(vi.mocked(fs.lstat).mock.calls).toEqual([]);
+  expect(vi.mocked(fs.readdir).mock.calls).toEqual([]);
+  expect(vi.mocked(fs.open).mock.calls).toEqual([]);
+  expect(inventory.snapshot().repositories[0].presence).toBe('unknown');
+});
+
 test('revocation persists and withdraws every overlapping grant across restart', async () => {
   await repository(join(root, 'atlas'));
   await inventory.designate(root, FOLDER_CONSENT);

@@ -7,10 +7,12 @@ import { basename, isAbsolute, join, relative, sep } from 'node:path';
 import { FOLDER_CONSENT, type DesignatedRoot, type Discovery, type InventorySnapshot, type Repository, type RepositoryCandidate } from '../shared/inventory';
 
 // A worktree/submodule gitfile may point outside the root. Recognize it without following it.
-async function isGitFile(path: string): Promise<boolean> {
+async function isGitFile(path: string, assertAccess: () => void): Promise<boolean> {
+  assertAccess();
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const buffer = Buffer.alloc(4096);
+    assertAccess();
     const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
     return /^gitdir: [^\r\n]+(?:\r?\n|$)/.test(buffer.toString('utf8', 0, bytesRead));
   } finally { await file.close(); }
@@ -26,14 +28,17 @@ function relativeLocation(value: string): string {
   return value;
 }
 // Recheck every component, including persisted roots, rather than trusting a lexical prefix.
-async function safeDirectory(root: string, location = '.', allowMissing = false): Promise<string> {
+async function safeDirectory(root: string, location = '.', allowMissing = false, assertAccess: () => void = () => {}): Promise<string> {
   relativeLocation(location);
+  assertAccess();
   if (await realpath(root) !== root) throw new Error('The designated root has moved or become a symlink.');
   let path = root;
   for (const part of ['.', ...location.split('/')]) {
     path = join(path, part);
     try {
+      assertAccess();
       const stat = await lstat(path);
+      assertAccess();
       if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('Symlinks and non-directories cannot be included.');
     } catch (error) {
       if (allowMissing && (error as NodeJS.ErrnoException).code === 'ENOENT') return join(root, location);
@@ -128,7 +133,7 @@ export class Inventory {
     this.requireIdle();
     const root = this.state.roots.find(item => item.path === rootPath);
     if (!root || root.revokedAt) throw new Error('Unknown or revoked designated root.');
-    const path = await safeDirectory(root.path, location);
+    const path = await safeDirectory(root.path, location, false, () => this.assertGranted(root.path));
     this.requireIdle();
     const normalized = relative(root.path, path) || '.';
     const roots = this.state.roots.map(item => item === root ? { ...root, includedLocations: [...new Set([...root.includedLocations, normalized])] } : item);
@@ -152,12 +157,12 @@ export class Inventory {
         this.discovery.visited++;
         this.changed();
         if (this.cancelled) return;
-        await safeDirectory(root.path, relative(root.path, path) || '.');
+        await safeDirectory(root.path, relative(root.path, path) || '.', false, () => this.assertGranted(root.path));
         if (this.cancelled) return;
         const entries = await readdir(path, { withFileTypes: true });
         if (this.cancelled) return;
         const marker = entries.find(entry => entry.name === '.git');
-        if (marker && (marker.isDirectory() || (marker.isFile() && await isGitFile(join(path, '.git'))))) {
+        if (marker && (marker.isDirectory() || (marker.isFile() && await isGitFile(join(path, '.git'), () => this.assertGranted(root.path))))) {
           owner?.boundaries.push(path);
           owner = { name: basename(path), path, presence: 'present', documentationRoots: ['docs'], fileCount: 0, boundaries: [], examined: false };
           // A skipped ancestor is still an ownership boundary, not an inventory registration.
@@ -203,10 +208,10 @@ export class Inventory {
   async documentation(name: string, locations: string[]): Promise<void> {
     this.requireIdle();
     const repository = this.state.repositories.find(repo => repo.name === name);
-    const root = repository && this.state.roots.find(item => within(item.path, repository.path));
+    const root = repository && this.state.roots.find(item => !item.revokedAt && within(item.path, repository.path));
     if (!repository || !root) throw new Error('Unknown repository.');
-    await safeDirectory(root.path, relative(root.path, repository.path) || '.');
-    for (const location of locations) await safeDirectory(repository.path, location, true);
+    await safeDirectory(root.path, relative(root.path, repository.path) || '.', false, () => this.assertGranted(root.path));
+    for (const location of locations) await safeDirectory(repository.path, location, true, () => this.assertGranted(root.path));
     this.requireIdle();
     this.save({ ...this.state, repositories: this.state.repositories.map(repo => repo === repository ? { ...repo, documentationRoots: [...new Set(locations)] } : repo) });
   }
@@ -242,10 +247,11 @@ export class Inventory {
       if (current) repositories.push(refreshRepository(previous, current));
       else {
         let presence: Repository['presence'] = !this.cancelled && examinedPaths.has(previous.path) ? 'missing' : 'unknown';
-        const root = this.state.roots.find(item => within(item.path, previous.path));
+        const root = this.state.roots.find(item => !item.revokedAt && within(item.path, previous.path));
         try {
           if (!this.cancelled && root) {
-            await safeDirectory(root.path, relative(root.path, previous.path) || '.');
+            await safeDirectory(root.path, relative(root.path, previous.path) || '.', false, () => this.assertGranted(root.path));
+            this.assertGranted(root.path);
             // Case-insensitive filesystems can still resolve the old spelling after a rename.
             if (await realpath(previous.path) !== previous.path) presence = 'missing';
           }
@@ -278,6 +284,10 @@ export class Inventory {
   close(): void {
     this.cancel();
     if (!this.closed) { this.closed = true; this.db.close(); }
+  }
+
+  private assertGranted(path: string): void {
+    if (!this.state.roots.some(root => root.path === path && !root.revokedAt && root.consent === FOLDER_CONSENT && root.acceptedAt)) throw new Error('Folder permission withdrawn.');
   }
 
   private requireIdle(): void {
