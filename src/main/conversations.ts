@@ -21,9 +21,10 @@ function firstPromptTitle(text: string): string {
 /** Legacy knowledge tool transcripts/references identify derivation, not complete coverage.
  * Never infer missing provenance from current knowledge records or path-like prose. */
 function sourceContext(result: Partial<LiveResult> & { investigation?: { inspectedScope?: unknown[] } }, history: PiMessage[]) {
-  const knowledgeDerived = !!result.knowledgeReferences?.length || history.some(message =>
-    message.role === 'toolResult' && message.toolName === 'retrieve_knowledge' ||
-    message.role === 'assistant' && message.content.some(item => item.type === 'toolCall' && item.name === 'retrieve_knowledge'));
+  const knowledgeDerived = result.knowledgeProvenance ? result.knowledgeProvenance !== 'none' :
+    !!result.knowledgeReferences?.length || history.some(message =>
+      message.role === 'toolResult' && message.toolName === 'retrieve_knowledge' ||
+      message.role === 'assistant' && message.content.some(item => item.type === 'toolCall' && item.name === 'retrieve_knowledge'));
   return { ...(result.checkouts ? { checkouts: result.checkouts } : {}),
     ...(knowledgeDerived || result.investigation?.inspectedScope?.length ? { sourceBacked: true } : {}),
     ...(knowledgeDerived ? { provenanceComplete: result.knowledgeProvenance === 'complete' && !!result.checkouts?.length } : {}) };
@@ -258,6 +259,14 @@ export class Conversations {
     const cutoff = this.expiryCutoff();
     if (!this.db.prepare("SELECT 1 FROM live_attempts WHERE verbose_deleted_at IS NULL AND ended_at <= ?").get(cutoff)) return;
     this.cleanup.run(() => {
+      // Preserve fail-closed legacy classification before deleting its only clue.
+      // This records uncertainty, never reconstructs missing source provenance.
+      for (const row of this.db.prepare(`SELECT message_id, result, history FROM live_attempts
+        WHERE verbose_deleted_at IS NULL AND ended_at <= ? AND json_extract(result, '$.knowledgeProvenance') IS NULL`).iterate(cutoff)) {
+        if (sourceContext(row.result ? JSON.parse(String(row.result)) : {}, JSON.parse(String(row.history))).provenanceComplete === false) {
+          this.db.prepare("UPDATE live_attempts SET result = json_set(COALESCE(result, '{}'), '$.knowledgeProvenance', 'incomplete') WHERE message_id = ?").run(row.message_id!);
+        }
+      }
       this.db.prepare('DELETE FROM child_transcripts WHERE message_id IN (SELECT message_id FROM live_attempts WHERE verbose_deleted_at IS NULL AND ended_at <= ?)').run(cutoff);
       // New attempts retain the immutable request-root catalogue. Legacy history
       // without that catalogue cannot be proven independent of future revocations

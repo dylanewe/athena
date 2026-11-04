@@ -38,6 +38,11 @@ function investigationScripts(root: string, answer = 'The value is 42 [E1], answ
 function knowledgeCandidate() {
   return { id: 'C1', scope: `folder:${root}`, topic: 'Answer boundary', summary: 'A synchronous value boundary.', kind: 'responsibility', claim: 'The answer module owns the application answer value.', provenance: 'statically-inferred', perspective: 'current', evidenceIds: ['E1'], relations: [] };
 }
+async function publishAnswerKnowledge() {
+  const read = await sources.run('read', { root, path: 'answer.ts', start: 1, end: 1 });
+  return knowledge.publish({ owner: { conversationId: 'prior', messageId: 'prior' }, candidates: [knowledgeCandidate()],
+    evidence: [{ id: 'E1', citation: read.entries[0].citation!, text: read.entries[0].text! }], completed: true, environmentExposed: false, signal: new AbortController().signal });
+}
 function knowledgeScripts() {
   return [functionResponse('investigate', { question: 'Inspect the answer boundary' }), toolResponse(root),
     functionResponse('finish_investigation', { findings: [], unresolvedQuestions: [], candidateKnowledgeChanges: [], knowledgeCandidates: [knowledgeCandidate()] }), textResponse('Inspected the answer boundary [E1].')];
@@ -818,9 +823,7 @@ test('citation-free source investigations retain checkout provenance and cannot 
 });
 
 test.each(['unchanged', 'edited', 'deleted', 'excluded'] as const)('ordinary knowledge details without E citations preserve safe historical reconstruction for %s sources', async state => {
-  const read = await sources.run('read', { root, path: 'answer.ts', start: 1, end: 1 });
-  const [claim] = await knowledge.publish({ owner: { conversationId: 'prior', messageId: 'prior' }, candidates: [knowledgeCandidate()],
-    evidence: [{ id: 'E1', citation: read.entries[0].citation!, text: read.entries[0].text! }], completed: true, environmentExposed: false, signal: new AbortController().signal });
+  const [claim] = await publishAnswerKnowledge();
   scripted([functionResponse('retrieve_knowledge', { operation: 'detail', id: claim }), textResponse('KNOWLEDGE_ONLY_ANSWER: the answer module owns the value.')]);
   jobs.start(null, 'KNOWLEDGE_ONLY_QUESTION'); await idle();
   const id = db.workspace().selected!.id, count = requests.length;
@@ -876,9 +879,7 @@ test.each(['depends-on', 'conflicts-with', 'annotation'] as const)('ordinary %s 
 });
 
 test.each(['edited', 'deleted', 'excluded'].flatMap(state => ['pre-request', 'completion'].map(phase => ({ state, phase }))))('ordinary knowledge dependency $state is checked at $phase during an active job', async ({ state, phase }) => {
-  const read = await sources.run('read', { root, path: 'answer.ts', start: 1, end: 1 });
-  const [id] = await knowledge.publish({ owner: { conversationId: 'prior', messageId: 'prior' }, candidates: [knowledgeCandidate()],
-    evidence: [{ id: 'E1', citation: read.entries[0].citation!, text: read.entries[0].text! }], completed: true, environmentExposed: false, signal: new AbortController().signal });
+  const [id] = await publishAnswerKnowledge();
   const mutate = () => {
     if (state === 'edited') writeFileSync(join(root, 'answer.ts'), 'export const answer = 43;\n');
     if (state === 'deleted') rmSync(join(root, 'answer.ts'));
@@ -904,18 +905,36 @@ test.each(['edited', 'deleted', 'excluded'].flatMap(state => ['pre-request', 'co
   expect(db.workspace().selected!.messages.at(-1)).not.toHaveProperty('knowledgeProvenance');
 });
 
-test.each(['source-free', 'references', 'tool-history', 'partial-checkouts'] as const)('legacy %s turns do not invent missing knowledge provenance', async state => {
+test.each(['source-free', 'references', 'tool-history', 'expired-tool-history', 'partial-checkouts'] as const)('legacy %s turns do not invent missing knowledge provenance', async state => {
   const first = db.beginLive(null, 'LEGACY_QUESTION', chatgpt.conversationBinding());
   db.finishLive(first.messageId, { status: 'complete', text: 'LEGACY_ANSWER', requests: 1, usageComplete: true,
-    history: state === 'tool-history' ? [{ role: 'toolResult', toolCallId: 'old', toolName: 'retrieve_knowledge', timestamp: 0, isError: false, content: [{ type: 'text', text: 'Retrieval snapshot omitted; retrieve again.' }] }] : [],
+    history: state === 'tool-history' || state === 'expired-tool-history' ? [{ role: 'toolResult', toolCallId: 'old', toolName: 'retrieve_knowledge', timestamp: 0, isError: false, content: [{ type: 'text', text: 'Retrieval snapshot omitted; retrieve again.' }] }] : [],
     ...(state === 'references' || state === 'partial-checkouts' ? { knowledgeReferences: [{ id: 'K' + 'a'.repeat(64), topic: 'Old knowledge' }] } : {}),
     ...(state === 'partial-checkouts' ? { checkouts: [(await sources.checkout(root, '.'))!] } : {}),
   }, []);
+  if (state === 'expired-tool-history') { db.setVerboseDays(0); db.cleanupExpired(); }
   db.close(); db = new Conversations(join(directory, 'conversations.sqlite'));
   jobs = new LiveSupervisor(db, chatgpt, sources, { snapshot: () => structuredClone(snapshot) }, () => { const worker = new Worker(); workers.push(worker); return worker; }, () => {}, undefined, knowledge, resolutions);
   scripted([textResponse('Fresh answer')]); jobs.start(first.conversationId, 'Fresh question'); await idle();
   expect(JSON.stringify(requests).includes('LEGACY_ANSWER')).toBe(state === 'source-free');
   expect(JSON.stringify(requests).includes('LEGACY_QUESTION')).toBe(state === 'source-free');
+});
+
+test.each(['empty', 'withheld'] as const)('a %s retrieval attempt without delivered knowledge preserves source-free historical context', async state => {
+  const [claim] = state === 'withheld' ? await publishAnswerKnowledge() : [];
+  if (state === 'withheld') writeFileSync(join(root, 'answer.ts'), 'export const answer = 43;\n');
+  scripted([functionResponse('retrieve_knowledge', claim ? { operation: 'detail', id: claim } : { operation: 'search', query: 'no-such-topic' }), textResponse('SOURCE_FREE_ANSWER: please clarify your question.')]);
+  jobs.start(null, 'SOURCE_FREE_QUESTION'); await idle();
+  const id = db.workspace().selected!.id, count = requests.length;
+  expect(db.workspace().selected!.messages.at(-1)?.status).toBe('complete');
+  expect(db.liveContext(id).checkouts).toEqual([]);
+  expect(db.workspace().selected!.messages.at(-1)?.knowledgeReferences).toBeUndefined();
+  db.setVerboseDays(0); db.cleanupExpired();
+  db.close(); db = new Conversations(join(directory, 'conversations.sqlite'));
+  jobs = new LiveSupervisor(db, chatgpt, sources, { snapshot: () => structuredClone(snapshot) }, () => { const worker = new Worker(); workers.push(worker); return worker; }, () => {}, undefined, knowledge, resolutions);
+  scripted([textResponse('Follow-up answer')]); jobs.start(id, 'Clarification'); await idle();
+  expect(JSON.stringify(requests.slice(count))).toContain('SOURCE_FREE_ANSWER');
+  expect(JSON.stringify(requests.slice(count))).toContain('SOURCE_FREE_QUESTION');
 });
 
 test.each([
@@ -1112,6 +1131,9 @@ test('stale indexed payloads are withheld before delivery, allowing bounded fres
   expect(JSON.stringify(requests[2])).not.toContain('The answer module owns');
   expect(db.workspace().selected?.messages.at(-1)?.knowledgeReferences).toBeUndefined();
   expect(db.workspace().selected?.messages.at(-1)?.evidence).toMatchObject([{ text: 'export const answer = 43;' }]);
+  const id = db.workspace().selected!.id, count = requests.length;
+  scripted([textResponse('Follow-up on fresh investigation.')]); jobs.start(id, 'Continue'); await idle();
+  expect(JSON.stringify(requests.slice(count))).toContain('fresh source declares 43');
 });
 
 test('knowledge calls cannot crawl a ledger indefinitely and later jobs never replay retrieval snapshots', async () => {
