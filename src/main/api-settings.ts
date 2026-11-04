@@ -25,21 +25,25 @@ export class ApiSettings {
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL; PRAGMA secure_delete = ON; CREATE TABLE IF NOT EXISTS api_settings (id INTEGER PRIMARY KEY CHECK(id=1), encrypted BLOB NOT NULL);');
   }
-  private read(): Saved {
+  // Decode the saved envelope without accepting its model configuration for use.
+  // Only explicit, already-validated replacements may bypass old model validation.
+  private load(): Saved {
     if (this.state) return this.state;
     const row = this.db.prepare('SELECT encrypted FROM api_settings WHERE id=1').get();
     if (!row) return { json: JSON.stringify(DEFAULT_CONFIG), route: 'chatgpt', conversation: 'deepseek/deepseek-flash', investigator: 'deepseek/deepseek-flash', secrets: {}, credentials: {}, revoked: [], destinations: {}, helpers: {} };
     try {
       if (!this.protection.available() || !(row.encrypted instanceof Uint8Array)) throw new Error();
       const saved = JSON.parse(this.protection.decrypt(row.encrypted)) as Saved;
-      parseModelConfig(saved.json);
       if (!['chatgpt', 'api-key'].includes(saved.route) || !saved.secrets || !saved.credentials || !Array.isArray(saved.revoked) || !saved.destinations || !saved.helpers) throw new Error();
-      return this.state = saved;
-    } catch (error) {
-      // Configuration validation errors are application-authored and safe, including on restart.
-      if (error instanceof ApiSettingsError) throw error;
-      throw new ApiSettingsError('Could not unlock or validate API-key settings. Unlock Keychain and restart Athena; no configuration was reset or substituted.');
-    }
+      return saved;
+    } catch { throw new ApiSettingsError('Could not unlock or validate API-key settings. Unlock Keychain and restart Athena; no configuration was reset or substituted.'); }
+  }
+  private read(): Saved {
+    if (this.state) return this.state;
+    const saved = this.load();
+    // Safe application-authored validation errors remain actionable on restart.
+    parseModelConfig(saved.json);
+    return this.state = saved;
   }
   private save(state: Saved): void {
     if (!this.protection.available()) throw new ApiSettingsError('Unlock macOS protected storage before saving API-key configuration. No plaintext fallback.');
@@ -70,7 +74,7 @@ export class ApiSettings {
   }
   configure(json: string): ApiSettingsSnapshot {
     const entries = parseModelConfig(json);
-    const state = structuredClone(this.read());
+    const state = structuredClone(this.load());
     state.json = json;
     entries.forEach(entry => this.pin(entry, state));
     // Keep missing selections visibly invalid. Configuration edits never switch routes.

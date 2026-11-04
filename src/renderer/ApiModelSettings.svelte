@@ -4,6 +4,7 @@
   let settings = $state<ApiSettingsSnapshot>();
   let error = $state('');
   let busy = $state(false);
+  let configOpen = $state(false);
   let route = $state<ConversationRoute>('chatgpt');
   let conversation = $state('');
   let investigator = $state('');
@@ -14,7 +15,7 @@
     if (busy) return;
     busy = true; error = '';
     try { settings = await action(); route = settings.route; conversation = settings.conversation; investigator = settings.investigator; }
-    catch (failure) { error = failure instanceof Error ? failure.message : 'Could not save API-key settings.'; }
+    catch (failure) { error = failure instanceof Error ? failure.message : 'Could not save API-key settings.'; if (!settings) configOpen = true; }
     finally { busy = false; }
   }
   function configure() {
@@ -67,14 +68,15 @@
     <h3>Trusted credential helpers</h3>
     <p>Helpers run as you, outside repository directories, with a 10-second timeout and 8 KiB output limit. Review the exact command before approving; changed commands need fresh approval. Helpers are never agent tools. Revoking approval stops active API-key work.</p>
     {#each settings.helpers as helper}<div class="helper"><code>{helper.command}</code><button disabled={busy} onclick={() => change(() => window.athena.apiModels.approveHelper(helper.id, !helper.approved))}>{helper.approved ? 'Revoke helper approval' : 'Approve exact helper'}</button></div>{:else}<p class="meta">No credential helpers configured.</p>{/each}
-    <details><summary>Import or replace Pi-compatible model configuration</summary>
+  {/if}
+    <details bind:open={configOpen}><summary>Import or replace Pi-compatible model configuration</summary>
+      {#if !settings}<p class="meta">If saved model configuration is unsupported, import or enter a corrected replacement below. Credentials, approvals and route/model selections are preserved; API-key work remains blocked until the configuration validates.</p>{/if}
       <p>Import is a one-time copy of the file you choose. Athena never follows Pi updates, repository .pi files, auth.json, instructions, extensions, or settings. Importing does not execute helpers or contact providers. Supported hosted APIs: OpenAI Completions, OpenAI Responses, Anthropic Messages. Unsupported fields and capabilities are rejected.</p>
       <p class="problem">Literal secrets in configuration files can leak through the original file or backups. Prefer environment references or approved secret-manager commands. Athena encrypts imported configuration and never redisplays its secret values.</p>
-      {#if settings.literalWarning}<p class="problem">This configuration contains literal credential/header values. Prefer references; protect or remove the original source file.</p>{/if}
+      {#if settings?.literalWarning}<p class="problem">This configuration contains literal credential/header values. Prefer references; protect or remove the original source file.</p>{/if}
       <button disabled={busy} onclick={() => change(() => window.athena.apiModels.importModels())}>Import trusted models.json…</button>
       <form onsubmit={event => { event.preventDefault(); configure(); }}><label>Pi models.json (replace configuration)<textarea bind:this={configInput} rows="10" spellcheck="false" placeholder={'{"providers":{"deepseek":{"modelOverrides":{"deepseek-flash":{"name":"My DeepSeek"}}}}}'} disabled={busy}></textarea></label><button disabled={busy}>Validate and save configuration</button></form>
     </details>
-  {/if}
 </section>
 
 <style>

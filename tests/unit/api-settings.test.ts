@@ -184,6 +184,8 @@ describe('Athena API-key settings boundary', () => {
   it.each(['previous_response_id', 'conversation', 'prompt'])('rejects %s through explicit import, editing and protected saved-settings loading without reset or secret echo', async reference => {
     const f = fixture();
     f.service.configure(custom()); selectFake(f.service);
+    f.service.credential('fake', '!stored-private-helper');
+    f.service.approveHelper(f.service.snapshot().helpers[0]!.id, true);
     const before = f.service.snapshot();
     const owner = { webContentsId: 4, url: 'file:///ui' }, caller = { ...owner, isMainFrame: true };
     const path = join(f.directory, 'models.json');
@@ -209,7 +211,10 @@ describe('Athena API-key settings boundary', () => {
       expect(() => restarted.snapshot()).toThrow('Unmanaged provider-side context is unsupported');
       expect(() => restarted.conversationConfig()).toThrow('Unmanaged provider-side context is unsupported');
       expect(db.prepare('SELECT encrypted FROM api_settings WHERE id=1').get()!.encrypted).toEqual(new Uint8Array(encrypted));
-      db.prepare('UPDATE api_settings SET encrypted=? WHERE id=1').run(row.encrypted as Uint8Array); db.close();
+      const recovery = new ApiModelGateway(restarted, owner, async () => path);
+      expect(await recovery.dispatch(caller, 'configure', { json: custom() })).toEqual(before);
+      expect(readFileSync(f.path).includes(Buffer.from('stored-private-helper'))).toBe(false);
+      db.close();
     }
     expect(f.helper).not.toHaveBeenCalled(); expect(f.reserve).not.toHaveBeenCalled();
   });

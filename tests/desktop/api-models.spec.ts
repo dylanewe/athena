@@ -82,6 +82,48 @@ test('explicit one-time import isolates Pi resources and rejects invalid capabil
   expect(await page.locator('body').innerText()).not.toContain('secret-invalid-input');
 });
 
+for (const reference of ['previous_response_id', 'conversation', 'prompt']) test(`protected legacy ${reference} settings can be explicitly corrected without losing selections, credentials or approvals`, async () => {
+  const corrected = JSON.stringify({ providers: { deepseek: { apiKey: '!never-run-legacy-helper', modelOverrides: { 'deepseek-flash': { name: 'Preserved model', samplingParams: { top_p: 0.9 } } } } } });
+  const before = await page.evaluate(async json => {
+    await window.athena.apiModels.configure(json);
+    await window.athena.apiModels.select('api-key', 'deepseek/deepseek-flash', 'deepseek/deepseek-flash');
+    await window.athena.apiModels.credential('deepseek', 'preserved-private-credential');
+    const state = await window.athena.apiModels.snapshot();
+    await window.athena.apiModels.approveDestination(state.destinations[0]!.id, true);
+    await window.athena.apiModels.approveHelper(state.helpers[0]!.id, true);
+    return window.athena.apiModels.snapshot();
+  }, corrected);
+  // Model the encrypted state produced by an older release, using real safeStorage.
+  await app.evaluate(async ({ safeStorage }, { path, reference }) => {
+    const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
+    const db = new DatabaseSync(path);
+    const row = db.prepare('SELECT encrypted FROM api_settings WHERE id=1').get()!;
+    const saved = JSON.parse(safeStorage.decryptString(Buffer.from(row.encrypted as Uint8Array)));
+    const config = JSON.parse(saved.json);
+    config.providers.deepseek.modelOverrides['deepseek-flash'].samplingParams[reference] = 'private-legacy-reference';
+    saved.json = JSON.stringify(config);
+    db.prepare('UPDATE api_settings SET encrypted=? WHERE id=1').run(safeStorage.encryptString(JSON.stringify(saved)));
+    db.close();
+  }, { path: join(directory, 'state', 'api-models.sqlite'), reference });
+  await app.close(); await launch(); await modelSettings();
+  const section = page.getByRole('region', { name: 'API-key conversation configuration' });
+  await expect(section.getByRole('alert')).toContainText('Unmanaged provider-side context is unsupported');
+  await expect(section.getByLabel('Pi models.json (replace configuration)')).toBeVisible();
+  expect(await page.locator('body').innerText()).not.toMatch(/private-legacy-reference|preserved-private-credential/u);
+  if (reference === 'conversation') {
+    const path = join(directory, 'corrected-models.json'); writeFileSync(path, corrected);
+    await app.evaluate(({ dialog }, path) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); }, path);
+    await section.getByRole('button', { name: 'Import trusted models.json…' }).click();
+  } else {
+    await section.getByLabel('Pi models.json (replace configuration)').fill(corrected);
+    await section.getByRole('button', { name: 'Validate and save configuration' }).click();
+  }
+  await expect(section.getByRole('combobox', { name: 'Conversation model', exact: true })).toHaveValue('deepseek/deepseek-flash');
+  expect(await page.evaluate(() => window.athena.apiModels.snapshot())).toEqual(before);
+  await expect(section.getByLabel('Pi models.json (replace configuration)')).toHaveValue('');
+  expect(readFileSync(join(directory, 'state', 'api-models.sqlite')).includes(Buffer.from('preserved-private-credential'))).toBe(false);
+});
+
 test('unmanaged provider context fails import and editor validation without secret echo, model substitution or retained entry fields', async () => {
   const path = join(directory, 'models.json');
   await app.evaluate(({ dialog }, path) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); }, path);
