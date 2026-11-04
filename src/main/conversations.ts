@@ -18,6 +18,17 @@ function firstPromptTitle(text: string): string {
   return characters.length <= MAX_TITLE_LENGTH ? characters.join('') : characters.slice(0, MAX_TITLE_LENGTH - 1).join('').trimEnd() + '…';
 }
 
+/** Legacy knowledge tool transcripts/references identify derivation, not complete coverage.
+ * Never infer missing provenance from current knowledge records or path-like prose. */
+function sourceContext(result: Partial<LiveResult> & { investigation?: { inspectedScope?: unknown[] } }, history: PiMessage[]) {
+  const knowledgeDerived = !!result.knowledgeReferences?.length || history.some(message =>
+    message.role === 'toolResult' && message.toolName === 'retrieve_knowledge' ||
+    message.role === 'assistant' && message.content.some(item => item.type === 'toolCall' && item.name === 'retrieve_knowledge'));
+  return { ...(result.checkouts ? { checkouts: result.checkouts } : {}),
+    ...(knowledgeDerived || result.investigation?.inspectedScope?.length ? { sourceBacked: true } : {}),
+    ...(knowledgeDerived ? { provenanceComplete: result.knowledgeProvenance === 'complete' && !!result.checkouts?.length } : {}) };
+}
+
 /** Durable user state only. Rebuildable repository knowledge does not belong here. */
 export class Conversations {
   private readonly db: DatabaseSync;
@@ -189,7 +200,7 @@ export class Conversations {
     for (const message of messages) {
       const attempt = this.db.prepare('SELECT result, evidence, binding FROM live_attempts WHERE message_id = ?').get(message.id);
       if (attempt?.result) {
-        const { checkouts: _checkouts, ...visible } = JSON.parse(String(attempt.result));
+        const { checkouts: _checkouts, knowledgeProvenance: _provenance, ...visible } = JSON.parse(String(attempt.result));
         Object.assign(message, visible, { evidence: JSON.parse(String(attempt.evidence)) });
       }
       if (attempt?.binding) {
@@ -336,7 +347,7 @@ export class Conversations {
     return { needsTitle: true, titlePrompt: String(first?.text ?? ''), ...(attempt ? { messageId: String(attempt.message_id) } : {}) };
   }
 
-  liveContext(id: string): { history: PiMessage[]; evidence: Evidence[]; checkouts?: SourceCheckout[]; sourceBacked?: boolean } {
+  liveContext(id: string): { history: PiMessage[]; evidence: Evidence[]; checkouts?: SourceCheckout[]; sourceBacked?: boolean; provenanceComplete?: boolean } {
     this.binding(id);
     if (this.revokedSources(id).length) return { history: [], evidence: [], sourceBacked: true };
     if (this.db.prepare('SELECT sealed FROM conversations WHERE id = ?').get(id)?.sealed) return { history: [], evidence: [] };
@@ -344,8 +355,8 @@ export class Conversations {
       WHERE m.conversation_id = ? AND m.status = 'complete' ORDER BY m.rowid DESC LIMIT 1`).get(id);
     if (!row) return { history: [], evidence: [] };
     const result = row.result ? JSON.parse(String(row.result)) : {};
-    return { history: JSON.parse(String(row.history)), evidence: JSON.parse(String(row.evidence)),
-      ...(result.checkouts ? { checkouts: result.checkouts } : {}), ...(result.investigation?.inspectedScope?.length ? { sourceBacked: true } : {}) };
+    const history: PiMessage[] = JSON.parse(String(row.history));
+    return { history, evidence: JSON.parse(String(row.evidence)), ...sourceContext(result, history) };
   }
 
   /** One bounded public turn, not saved protocol/tool/subagent transcripts. The
@@ -356,14 +367,12 @@ export class Conversations {
     this.binding(id);
     if (this.revokedSources(id).length) return { history: [], evidence: [], sourceBacked: true };
     if (this.db.prepare('SELECT sealed FROM conversations WHERE id = ?').get(id)?.sealed) return { history: [], evidence: [] };
-    const row = this.db.prepare(`SELECT substr(a.prompt, 1, 1024) AS prompt, substr(m.text, 1, 1024) AS answer, a.evidence,
-      json_extract(a.result, '$.checkouts') AS checkouts,
-      json_extract(a.result, '$.investigation.inspectedScope') AS inspected
+    const row = this.db.prepare(`SELECT substr(a.prompt, 1, 1024) AS prompt, substr(m.text, 1, 1024) AS answer, a.evidence, a.result, a.history
       FROM live_attempts a JOIN messages m ON m.id = a.message_id
       WHERE m.conversation_id = ? AND (m.status = 'complete' OR m.id = ?) AND (? IS NULL OR m.id = ?) ORDER BY m.rowid DESC LIMIT 1`).get(id, messageId ?? null, messageId ?? null, messageId ?? null);
     if (!row) return { history: [], evidence: [] };
     return { history: [{ role: 'user', timestamp: 0, content: 'Historical conversation context only — NOT implementation evidence. Only the latest completed turn is included, bounded to 1024 characters per field; older constraints/details may be omitted. Ask for clarification if needed. Historical E IDs belong to that answer, not this job. Retrieve current knowledge or delegate revalidation before making implementation claims.\n' + JSON.stringify({ question: String(row.prompt), historicalAnswer: String(row.answer) }) }],
-      evidence: JSON.parse(String(row.evidence)), ...(row.checkouts ? { checkouts: JSON.parse(String(row.checkouts)) } : {}), ...(row.inspected && JSON.parse(String(row.inspected)).length ? { sourceBacked: true } : {}) };
+      evidence: JSON.parse(String(row.evidence)), ...sourceContext(row.result ? JSON.parse(String(row.result)) : {}, JSON.parse(String(row.history))) };
   }
 
   beginLive(id: string | null, prompt: string, binding: ConversationBinding, retryId?: string, build?: BuildScope, sourceRoots: string[] = []): { conversationId: string; messageId: string; prompt: string } {

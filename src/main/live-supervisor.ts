@@ -268,7 +268,7 @@ export class LiveSupervisor {
       text: (result?.text ?? active.text) + '\n\nPartial: the checkout changed during analysis or scan coverage was incomplete. No compatible snapshot was committed. Retry explicitly for fresh sources within a new job.' };
   }
   private async historicalCurrent(previous: ReturnType<Conversations['resumeContext']>, signal: AbortSignal): Promise<boolean> {
-    return await this.verify(previous.evidence, signal) &&
+    return previous.provenanceComplete !== false && await this.verify(previous.evidence, signal) &&
       (!(previous.evidence.length || previous.sourceBacked || previous.checkouts?.length) ||
         !!previous.checkouts?.length && await this.checkouts.fresh(previous.checkouts, signal));
   }
@@ -388,9 +388,16 @@ export class LiveSupervisor {
                   if ((!active.requests && !job.build) || !this.knowledge || ++knowledgeCalls > KNOWLEDGE_LIMITS.calls) throw new Error('Knowledge request limit.');
                   this.conversations.assertClean(message.input);
                   const retrieved = await this.knowledge.retrieve(message.input as KnowledgeRequest, signal, { canPersistInvalidations: () => this.active === active && !active.environment.tainted && !this.conversations.isEphemeral(active.messageId) && !signal.aborted });
-                  const result = this.resolutions ? await this.resolutions.attach(retrieved, signal) : retrieved;
+                  let result = this.resolutions ? await this.resolutions.attach(retrieved, signal) : retrieved;
                   if (settled || this.active !== active || signal.aborted) return;
                   this.conversations.assertClean(result);
+                  // Old leads remain locally inspectable, but cannot seed a model job
+                  // with a different checkout baseline (including explicit refreshes).
+                  // Withhold BEFORE delivery/ownership so fresh investigation remains possible.
+                  if (result.items.length && !result.derivation?.checkouts.length || result.derivation?.checkouts.some(snapshot => !snapshot.complete || !this.checkouts.select([snapshot], active.checkouts)
+                    .some(current => current.complete && current.contentIdentity === snapshot.contentIdentity))) {
+                    result = { items: [], notice: 'Knowledge withheld: original source provenance does not match this job. Investigate fresh sources; no match is not proof of absence.' };
+                  }
                   const { evidence: retained, derivation, ...bounded } = result;
                   let citation: Evidence | undefined;
                   if (retained) {
@@ -407,11 +414,11 @@ export class LiveSupervisor {
                   // Only delivered results acquire citation/navigation ownership.
                   if (citation) {
                     if (!active.evidence.some(item => item.id === citation.id)) active.evidence.push(citation);
-                    active.retainedCheckouts = [...new Map([...active.retainedCheckouts, ...(derivation?.checkouts ?? [])].map(snapshot => [JSON.stringify(snapshot), snapshot])).values()];
                   }
                   if (derivation) {
-                    // Neighborhood leads (even without E citations) scope later model requests/history
-                    // to the job's current checkout baseline. Stale fingerprints are not revived.
+                    // Retain original fingerprints even for ordinary/stale leads without E citations.
+                    // The current job baseline must never revive an older derivation.
+                    active.retainedCheckouts = [...new Map([...active.retainedCheckouts, ...derivation.checkouts].map(snapshot => [JSON.stringify(snapshot), snapshot])).values()];
                     active.dependencies = [...new Map([...active.dependencies, ...(derivation?.files ?? [])].map(identity => [JSON.stringify(identity), identity])).values()];
                     active.scopes = [...new Map([...active.scopes, ...(derivation?.scopes ?? [])].map(identity => [JSON.stringify(identity), identity])).values()];
                     if (active.dependencies.length + active.scopes.length > 1000) { finish(failure('limit')); return; }
@@ -553,7 +560,7 @@ export class LiveSupervisor {
   private end(active: Active, result: LiveResult): void {
     if (this.active !== active) return;
     this.active = undefined;
-    result = { ...result, ...(active.contextNotice ? { contextNotice: active.contextNotice } : {}), ...(!active.environment.tainted && active.investigators && !result.investigators ? { investigators: active.investigators } : {}), ...(!active.environment.tainted && result.status === 'complete' ? { checkouts: this.usedCheckouts(active) } : {}), ...(active.knowledgeReferences.length && !active.environment.tainted ? { knowledgeReferences: active.knowledgeReferences } : {}), ...(active.exploration && !result.exploration ? { exploration: active.exploration } : {}), ...(active.title && !result.title ? { title: active.title } : {}) };
+    result = { ...result, ...(active.contextNotice ? { contextNotice: active.contextNotice } : {}), ...(!active.environment.tainted && active.investigators && !result.investigators ? { investigators: active.investigators } : {}), ...(!active.environment.tainted && result.status === 'complete' ? { checkouts: this.usedCheckouts(active), ...(active.knowledgeReferences.length ? { knowledgeProvenance: 'complete' as const } : {}) } : {}), ...(active.knowledgeReferences.length && !active.environment.tainted ? { knowledgeReferences: active.knowledgeReferences } : {}), ...(active.exploration && !result.exploration ? { exploration: active.exploration } : {}), ...(active.title && !result.title ? { title: active.title } : {}) };
     if (active.knowledgePublication && !result.knowledgePublication) result.knowledgePublication = active.knowledgePublication;
     if (active.coverage && !active.environment.tainted && !this.conversations.isEphemeral(active.messageId)) {
       active.coverage.unresolved = [...active.coverage.reusedRepositories.flatMap(name => active.reuseReceipts?.get(name)?.build?.unresolved.filter(question => question.startsWith(name + ':')).slice(0, 8) ?? []), ...(result.investigators ?? []).flatMap(task => (task.result?.unresolvedQuestions ?? [`${task.scope}: ${task.status}`]).map(question => `${task.scope}: ${question}`))].slice(0, 100);

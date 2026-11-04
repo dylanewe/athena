@@ -35,6 +35,34 @@ const candidate = () => ({ id: 'C1', scope: 'public-api', topic: 'Request servin
 async function publish(candidates: unknown = [candidate()], overrides = {}) {
   return knowledge.publish({ owner: { conversationId: 'conversation-1', messageId: 'message-1' }, candidates, evidence: await evidence(), completed: true, environmentExposed: false, signal: new AbortController().signal, ...overrides });
 }
+test.each(['search', 'detail', 'expand', 'evidence'] as const)('ordinary %s results retain complete main-private provenance independently of citations', async operation => {
+  const [target] = await publish();
+  const [origin] = await publish([{ ...candidate(), topic: 'Origin', relations: [{ kind: 'supports', target }] }]);
+  const request = operation === 'search' ? { operation, query: 'requests' } : operation === 'expand' ? { operation, id: origin, kinds: ['supports' as const] } : operation === 'evidence' ? { operation, id: target, index: 0 } : { operation, id: target };
+  const result = await knowledge.retrieve(request);
+  expect(result.items.length).toBeGreaterThan(0);
+  expect(result.derivation?.files.map(file => file.path).sort()).toEqual(['api/README.md', 'api/service.ts']);
+  expect(result.derivation?.checkouts).toHaveLength(1);
+  expect(result.evidence !== undefined).toBe(operation === 'evidence');
+  expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(KNOWLEDGE_LIMITS.bytes);
+  const owner = { webContentsId: 1, url: 'file:///athena/index.html' };
+  const visible = await new KnowledgeGateway(knowledge, owner).dispatch({ ...owner, isMainFrame: true }, 'retrieve', request);
+  expect(visible).not.toHaveProperty('derivation');
+});
+
+test('legacy claims without original checkout provenance are withheld rather than repaired from current sources', async () => {
+  const [id] = await publish();
+  const legacy = new DatabaseSync(join(directory, 'knowledge.sqlite'));
+  try { legacy.prepare("UPDATE claims SET value = json_remove(value, '$.checkouts') WHERE id = ?").run(id); }
+  finally { legacy.close(); }
+  for (const request of [{ operation: 'search', query: 'requests' }, { operation: 'detail', id }, { operation: 'evidence', id, index: 0 }] as const) {
+    const result = await knowledge.retrieve(request);
+    expect(result.items).toEqual([]);
+    expect(result.evidence).toBeUndefined();
+    expect(result.derivation?.checkouts ?? []).toEqual([]);
+  }
+});
+
 test('dependency discrepancies return both bounded evidence trails without certifying interpretation or absence', async () => {
   writeFileSync(join(root, 'api', 'README.md'), 'Use dependency B.\n');
   writeFileSync(join(root, 'api', 'service.ts'), 'export function serve() { return C.call(); }\n');
@@ -317,7 +345,7 @@ test('a single ranked response shares its 32-claim dependency traversal budget a
   expect(result.items).toHaveLength(16); // Each parent requires its distinct leaf: 16 + 16 = 32.
 });
 
-test('relationship expansion counts its origin and all targets against one source-identity budget', async () => {
+test('relationship expansion withholds payloads when complete response-wide provenance exceeds the byte cap', async () => {
   const directory = join(root, 'api', 'dependency-fixture'); mkdirSync(directory);
   const identities = [];
   try {
@@ -332,8 +360,12 @@ test('relationship expansion counts its origin and all targets against one sourc
     for (let i = 0; i < 6; i++) targets.push(...await publish([{ ...candidate(), topic: `Target ${i}` }], { evidence: observed, inspectedFiles: identities.slice(200 + i * 10, 210 + i * 10) }));
     const [origin] = await publish([{ ...candidate(), topic: 'Origin', relations: targets.map(target => ({ kind: 'supports', target })) }], { evidence: observed, inspectedFiles: identities.slice(0, 200) });
     const expanded = await knowledge.retrieve({ operation: 'expand', id: origin, kinds: ['supports'], limit: 20 });
-    expect(expanded.items).toHaveLength(5); // Origin: 201. Each target adds 10. Six would require 261 > 256.
-    expect(expanded.edges).toHaveLength(5);
+    // Origin: 201; each target adds 10. Source checks still cap at 256,
+    // but even the five eligible targets cannot fit their complete provenance.
+    expect(expanded.items).toEqual([]);
+    expect(expanded.edges).toBeUndefined();
+    expect(expanded.derivation).toBeUndefined();
+    expect(expanded.notice).toContain('complete provenance exceeds response bounds');
   } finally { rmSync(directory, { recursive: true }); }
 });
 

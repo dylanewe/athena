@@ -22,7 +22,7 @@ interface RetrievalBudget {
   checkouts: Map<string, boolean>;
   canPersistInvalidations: () => boolean;
   signal: AbortSignal;
-  coverage: { required: boolean; derivation: NonNullable<KnowledgeResult['derivation']> };
+  coverage: NonNullable<KnowledgeResult['derivation']>;
 }
 
 /** Local, rebuildable FTS index and bounded one-hop retrieval. Never model-generated SQL. */
@@ -30,7 +30,7 @@ export class KnowledgeRetrieval {
   /** Main-private response capabilities: never serialized into renderer/model results or persistence. */
   private readonly contexts = new WeakMap<object, RetrievalBudget>();
   private budget(signal: AbortSignal, canPersistInvalidations = () => false): RetrievalBudget {
-    return { records: new Map(), authorized: new Set(), sources: new Set(), checkouts: new Map(), canPersistInvalidations, signal, coverage: { required: false, derivation: { files: [], scopes: [], checkouts: [] } } };
+    return { records: new Map(), authorized: new Set(), sources: new Set(), checkouts: new Map(), canPersistInvalidations, signal, coverage: { files: [], scopes: [], checkouts: [] } };
   }
   inspectionContext(signal: AbortSignal): object {
     const context = {};
@@ -91,7 +91,6 @@ export class KnowledgeRetrieval {
     const offset = 'offset' in input ? input.offset ?? 0 : 0;
     const limit = input.operation === 'search' || input.operation === 'expand' || input.operation === 'neighborhood' || input.operation === 'flows' ? input.limit ?? L.defaultResults : 1;
     const budget = this.budget(signal, canPersistInvalidations);
-    budget.coverage.required = input.operation === 'neighborhood' || input.operation === 'flow' || input.operation === 'flows';
     let ids: string[];
     let edges: NonNullable<KnowledgeResult['edges']> = [];
     let neighborhood: { ids: string[]; nextOffset?: number; omitted: boolean } | undefined;
@@ -202,7 +201,7 @@ export class KnowledgeRetrieval {
       sources.add(JSON.stringify(source));
       return sources.size <= L.sourceChecks && this.eligible(source);
     };
-    const retained = budget.coverage.derivation;
+    const retained = budget.coverage;
     if (![...retained.files, ...retained.scopes].every(eligible) || !retained.checkouts.every(this.eligible)) return false;
     const encountered = new Set(budget.records.keys()), visited = new Set<string>();
     // Looked-up candidates that exhausted the response budget never authorized
@@ -244,12 +243,12 @@ export class KnowledgeRetrieval {
       result.notice = NOTICE + ' Source access revoked during retrieval.';
       return result;
     }
-    if (!budget?.coverage.required) return result;
-    result.derivation = budget.coverage.derivation;
+    if (!budget) return result;
+    result.derivation = budget.coverage;
     if (Buffer.byteLength(JSON.stringify(result)) > L.bytes) {
       result.items = []; delete result.edges; delete result.derivation; delete result.evidence; delete result.evidenceId;
       if (result.neighborhood) result.neighborhood.omitted = true;
-      result.notice = NOTICE + ' Typed knowledge withheld because complete attachment provenance exceeds response bounds.';
+      result.notice = NOTICE + ' Knowledge withheld because complete provenance exceeds response bounds.';
     }
     return result;
   }
@@ -351,7 +350,8 @@ export class KnowledgeRetrieval {
       if (visited.has(item.id)) return;
       if (visited.size >= L.graph) { complete = false; return; }
       visited.set(item.id, item);
-      budget.coverage.required ||= !!item.architecture || !!item.flow;
+      // Missing original checkout coverage cannot be reconstructed from today's sources.
+      if (!item.checkouts?.length || item.checkouts.some(snapshot => !snapshot.complete)) complete = false;
       identities.push(...item.dependencies, ...item.scopes);
       invalidated ||= item.validation === 'stale' || !item.checkouts?.length;
       checkouts.push(...(item.checkouts ?? []));
@@ -405,10 +405,10 @@ export class KnowledgeRetrieval {
       files: unique.filter(item => !('operation' in item)), scopes: unique.filter((item): item is SourceScope => 'operation' in item),
       checkouts: [...new Map(checkouts.map(snapshot => [JSON.stringify(snapshot), snapshot])).values()],
     };
-    // Accumulate before knowing which returned/attached claim is typed. The shared
-    // context enables its complete envelope as soon as any typed derivation is read.
+    // All delivered claims and attachments share one bounded provenance envelope,
+    // independently of claim kind, operation, or current E citation eligibility.
     const merge = <T>(left: T[], right: T[]) => [...new Map([...left, ...right].map(item => [JSON.stringify(item), item])).values()];
-    const coverage = budget.coverage.derivation;
+    const coverage = budget.coverage;
     coverage.files = merge(coverage.files, derivation.files);
     coverage.scopes = merge(coverage.scopes, derivation.scopes);
     coverage.checkouts = merge(coverage.checkouts, derivation.checkouts);

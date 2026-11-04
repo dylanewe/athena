@@ -14,6 +14,8 @@ Before any new generation/summary, the supervisor runs local knowledge freshness
 
 If any historical dependency changed, was deleted, is unchecked or is no longer permitted, the entire retrieved turn is withheld from outbound context. The UI explains this; the conversation remains usable for explicitly requested fresh work. Original history remains visible locally. Even unchanged historical material contributes **zero citation eligibility**: new answers must retrieve bounded current knowledge/evidence or delegate fresh investigation. Current-job ledgers start empty; a historical E ID alone cannot validate a new citation. Freshness/identity is not semantic certification, and static analysis is not runtime tracing.
 
+Every delivered knowledge result contributes main-private transitive provenance, even ordinary search/details without E citations, including delivered conflicts and user annotations. Completed knowledge-derived turns retain a main-owned completeness receipt alongside their checkout coverage. Legacy saved turns identifiable by knowledge references or knowledge-tool transcripts but lacking that receipt fail closed, even when they retain some checkouts: current knowledge cannot reconstruct unknown original provenance. Genuinely source-free turns remain usable. Neither receipt nor raw provenance is exposed through renderer/model IPC.
+
 Unchanged historical provenance still participates in the current job's pre-request/final checkout checks, preventing mid-job edits from mixing snapshots. Sealed environment-exposed conversations remain read-only and cannot leak derived history into a new job. No launch-time model call, automatic refresh job or paid summary is added.
 
 ## Restart and continuation

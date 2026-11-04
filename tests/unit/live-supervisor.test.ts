@@ -817,6 +817,107 @@ test('citation-free source investigations retain checkout provenance and cannot 
   await followupWithHistoricalContextWithheld(id, count);
 });
 
+test.each(['unchanged', 'edited', 'deleted', 'excluded'] as const)('ordinary knowledge details without E citations preserve safe historical reconstruction for %s sources', async state => {
+  const read = await sources.run('read', { root, path: 'answer.ts', start: 1, end: 1 });
+  const [claim] = await knowledge.publish({ owner: { conversationId: 'prior', messageId: 'prior' }, candidates: [knowledgeCandidate()],
+    evidence: [{ id: 'E1', citation: read.entries[0].citation!, text: read.entries[0].text! }], completed: true, environmentExposed: false, signal: new AbortController().signal });
+  scripted([functionResponse('retrieve_knowledge', { operation: 'detail', id: claim }), textResponse('KNOWLEDGE_ONLY_ANSWER: the answer module owns the value.')]);
+  jobs.start(null, 'KNOWLEDGE_ONLY_QUESTION'); await idle();
+  const id = db.workspace().selected!.id, count = requests.length;
+  expect(db.workspace().selected!.messages.at(-1)?.status).toBe('complete');
+  expect(db.liveContext(id).evidence).toEqual([]);
+  expect(db.liveContext(id).checkouts).toHaveLength(1);
+  if (state === 'edited') writeFileSync(join(root, 'answer.ts'), 'export const answer = 43;\n');
+  if (state === 'deleted') rmSync(join(root, 'answer.ts'));
+  if (state === 'excluded') writeFileSync(join(root, '.gitignore'), 'answer.ts\n');
+  // Reconstruction must work from durable main-private provenance, not an in-memory ledger.
+  db.close(); db = new Conversations(join(directory, 'conversations.sqlite'));
+  jobs = new LiveSupervisor(db, chatgpt, sources, { snapshot: () => structuredClone(snapshot) }, () => { const worker = new Worker(); workers.push(worker); return worker; }, () => {}, undefined, knowledge, resolutions);
+  scripted([textResponse('Fresh follow-up without citations.')]); jobs.start(id, 'Follow up'); await idle();
+  const outbound = JSON.stringify(requests.slice(count));
+  expect(outbound.includes('KNOWLEDGE_ONLY_QUESTION')).toBe(state === 'unchanged');
+  expect(outbound.includes('KNOWLEDGE_ONLY_ANSWER')).toBe(state === 'unchanged');
+  expect(db.workspace().selected!.messages.at(-1)?.contextNotice).toContain(state === 'unchanged' ? 'Historical context only' : 'Historical context withheld');
+});
+
+test.each(['depends-on', 'conflicts-with', 'annotation'] as const)('ordinary %s attachments retain transitive source provenance before requests and at completion', async attachment => {
+  for (const name of ['a', 'b', 'c']) {
+    mkdirSync(join(root, name, '.git'), { recursive: true }); writeFileSync(join(root, name, 'source.ts'), `export const owner = '${name}';\n`);
+    snapshot.repositories.push({ name, path: join(root, name), presence: 'present', documentationRoots: [], boundaries: [], fileCount: 1, examined: false });
+  }
+  const publish = async (scope: string, relations: { kind: string; target: string }[] = []) => {
+    const read = await sources.run('read', { root, path: `${scope}/source.ts`, start: 1, end: 1 });
+    return knowledge.publish({ owner: { conversationId: 'prior', messageId: scope }, candidates: [{ ...knowledgeCandidate(), scope, relations }],
+      evidence: [{ id: 'E1', citation: read.entries[0].citation!, text: read.entries[0].text! }], completed: true, environmentExposed: false, signal: new AbortController().signal });
+  };
+  const [c] = await publish('c'), [b] = await publish('b', [{ kind: 'depends-on', target: c }]);
+  const [a] = await publish('a', attachment === 'annotation' ? [] : [{ kind: attachment, target: b }]);
+  if (attachment === 'annotation') await resolutions.write({ operation: 'annotate', kind: 'note', text: 'Review both owners together.', claimIds: [a, b] });
+  const request = { operation: 'detail', id: a } as const;
+  const attached = await resolutions.attach(await knowledge.retrieve(request));
+  expect(attached.derivation?.checkouts.map(item => item.repository?.name).sort()).toEqual(['a', 'b', 'c']);
+  expect(attached.evidence).toBeUndefined();
+  // A complete job retains the attachment's transitive dependencies for follow-up.
+  scripted([functionResponse('retrieve_knowledge', request), textResponse('ORDINARY_TRANSITIVE_ANSWER')]);
+  jobs.start(null, 'Explain ordinary ownership'); await idle();
+  const id = db.workspace().selected!.id, count = requests.length;
+  expect(db.workspace().selected!.messages.at(-1)?.status).toBe('complete');
+  expect(db.liveContext(id).checkouts?.map(item => item.repository?.name).sort()).toEqual(['a', 'b', 'c']);
+  writeFileSync(join(root, 'c', 'source.ts'), 'export const owner = "changed";\n');
+  await followupWithHistoricalContextWithheld(id, count);
+  // Reading a stale derivation must not borrow the new job's checkout baseline.
+  requests = [];
+  scripted([functionResponse('retrieve_knowledge', request), textResponse('Prior knowledge was withheld.')]);
+  jobs.start(null, 'Read the old lead'); await idle();
+  expect(requests).toHaveLength(2);
+  expect(JSON.stringify(requests[1])).toContain('original source provenance does not match');
+  expect(JSON.stringify(requests[1])).not.toContain('The answer module owns');
+  expect(db.workspace().selected!.messages.at(-1)?.knowledgeReferences).toBeUndefined();
+});
+
+test.each(['edited', 'deleted', 'excluded'].flatMap(state => ['pre-request', 'completion'].map(phase => ({ state, phase }))))('ordinary knowledge dependency $state is checked at $phase during an active job', async ({ state, phase }) => {
+  const read = await sources.run('read', { root, path: 'answer.ts', start: 1, end: 1 });
+  const [id] = await knowledge.publish({ owner: { conversationId: 'prior', messageId: 'prior' }, candidates: [knowledgeCandidate()],
+    evidence: [{ id: 'E1', citation: read.entries[0].citation!, text: read.entries[0].text! }], completed: true, environmentExposed: false, signal: new AbortController().signal });
+  const mutate = () => {
+    if (state === 'edited') writeFileSync(join(root, 'answer.ts'), 'export const answer = 43;\n');
+    if (state === 'deleted') rmSync(join(root, 'answer.ts'));
+    if (state === 'excluded') writeFileSync(join(root, '.gitignore'), 'answer.ts\n');
+  };
+  // Mutate at the worker IPC boundary after delivery but before the next request,
+  // or inside scripted HTTP after authority was granted for the final generation.
+  const post = Worker.prototype.postMessage;
+  const delivery = vi.spyOn(Worker.prototype, 'postMessage').mockImplementation(function (this: Worker, message) {
+    if (phase === 'pre-request' && message.type === 'reply' && message.knowledge?.items.length) mutate();
+    post.call(this, message);
+  });
+  try {
+    scripted([functionResponse('retrieve_knowledge', { operation: 'detail', id }), textResponse('This answer is provisional.')], request => {
+      if (phase === 'completion' && request === 2) mutate();
+    });
+    jobs.start(null, 'Explain ownership without citations'); await idle();
+  } finally { delivery.mockRestore(); }
+  expect(requests).toHaveLength(phase === 'pre-request' ? 1 : 2);
+  expect(db.workspace().selected!.messages.at(-1)?.status).toBe('partial');
+  expect(db.liveContext(db.workspace().selected!.id).history).toEqual([]);
+  expect(JSON.stringify(requests)).not.toContain('"derivation"');
+  expect(db.workspace().selected!.messages.at(-1)).not.toHaveProperty('knowledgeProvenance');
+});
+
+test.each(['source-free', 'references', 'tool-history', 'partial-checkouts'] as const)('legacy %s turns do not invent missing knowledge provenance', async state => {
+  const first = db.beginLive(null, 'LEGACY_QUESTION', chatgpt.conversationBinding());
+  db.finishLive(first.messageId, { status: 'complete', text: 'LEGACY_ANSWER', requests: 1, usageComplete: true,
+    history: state === 'tool-history' ? [{ role: 'toolResult', toolCallId: 'old', toolName: 'retrieve_knowledge', timestamp: 0, isError: false, content: [{ type: 'text', text: 'Retrieval snapshot omitted; retrieve again.' }] }] : [],
+    ...(state === 'references' || state === 'partial-checkouts' ? { knowledgeReferences: [{ id: 'K' + 'a'.repeat(64), topic: 'Old knowledge' }] } : {}),
+    ...(state === 'partial-checkouts' ? { checkouts: [(await sources.checkout(root, '.'))!] } : {}),
+  }, []);
+  db.close(); db = new Conversations(join(directory, 'conversations.sqlite'));
+  jobs = new LiveSupervisor(db, chatgpt, sources, { snapshot: () => structuredClone(snapshot) }, () => { const worker = new Worker(); workers.push(worker); return worker; }, () => {}, undefined, knowledge, resolutions);
+  scripted([textResponse('Fresh answer')]); jobs.start(first.conversationId, 'Fresh question'); await idle();
+  expect(JSON.stringify(requests).includes('LEGACY_ANSWER')).toBe(state === 'source-free');
+  expect(JSON.stringify(requests).includes('LEGACY_QUESTION')).toBe(state === 'source-free');
+});
+
 test.each([
   { attachment: 'conflict', operation: 'neighborhood' }, { attachment: 'annotation', operation: 'neighborhood' },
   { attachment: 'conflict', operation: 'evidence' }, { attachment: 'annotation', operation: 'evidence' },
@@ -994,7 +1095,7 @@ test('completed scripted extraction publishes once and passes only query-selecte
   expect(JSON.stringify(requests[10])).not.toContain(records[0].id);
 });
 
-test('missing/stale indexed knowledge falls back to bounded fresh investigation without a false negative claim', async () => {
+test('stale indexed payloads are withheld before delivery, allowing bounded fresh investigation without mixed derivations', async () => {
   scripted(knowledgeScripts()); jobs.start(null, 'Explain ownership'); await idle();
   const [record] = await knowledge.inspect();
   writeFileSync(join(root, 'answer.ts'), 'export const answer = 43;\n');
@@ -1007,8 +1108,9 @@ test('missing/stale indexed knowledge falls back to bounded fresh investigation 
   jobs.start(null, 'Check current ownership'); await idle();
   expect(db.workspace().selected?.messages.at(-1)?.status).toBe('complete');
   expect(JSON.stringify(requests[1])).toContain('No match is not proof of absence');
-  expect(JSON.stringify(requests[2])).toContain('stale');
-  expect(JSON.stringify(requests[2])).not.toContain('evidenceId');
+  expect(JSON.stringify(requests[2])).toContain('original source provenance does not match');
+  expect(JSON.stringify(requests[2])).not.toContain('The answer module owns');
+  expect(db.workspace().selected?.messages.at(-1)?.knowledgeReferences).toBeUndefined();
   expect(db.workspace().selected?.messages.at(-1)?.evidence).toMatchObject([{ text: 'export const answer = 43;' }]);
 });
 
