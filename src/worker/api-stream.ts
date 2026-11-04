@@ -6,6 +6,7 @@ import { API_OUTPUT_TOKENS, type ApiGrant } from '../shared/api-models';
 import type { StreamObservation } from './chatgpt-stream';
 import { checkBeforeModelSend } from '../main/secret-check';
 import { transientHttpFailure } from './request-failures';
+import { hasUnmanagedProviderContext } from '../shared/provider-context';
 
 const TRANSIENT_API_ERRORS = new Set(['internal_error', 'server_error', 'api_error', 'overloaded_error', 'service_unavailable', 'temporarily_unavailable', 'timeout_error']);
 
@@ -20,6 +21,12 @@ export function apiStream(model: Model<Api>, context: TranscriptContext, grant: 
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
     const prefix = base.pathname.replace(/\/$/u, '');
     if (url.origin !== base.origin || !url.pathname.startsWith(prefix + '/') || (url.search && !(model.api === 'anthropic-messages' && url.search === '?beta=true')) || url.hash) throw new Error('Endpoint changed.');
+    // Inspect the actual serialized SDK body, independently of configuration and onPayload.
+    // Fail closed if a future adapter stops supplying a JSON object here.
+    if (typeof init?.body !== 'string') throw new Error('Unsupported provider request body.');
+    const body: unknown = JSON.parse(init.body);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Unsupported provider request body.');
+    if (hasUnmanagedProviderContext(body)) throw new Error('Unmanaged provider-side context is unsupported.');
     const requestSignal = AbortSignal.any([deadline, ...(init?.signal ? [init.signal] : [])]);
     let response: Response;
     try { response = await http(input, { ...init, redirect: 'error', signal: requestSignal }); }

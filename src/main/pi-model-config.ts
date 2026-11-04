@@ -7,6 +7,7 @@ import { ModelCostSchema, ModelInputLimitsSchema, ModelInputModalitySchema, Mode
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import { DEEPSEEK_MODEL } from './deepseek-model';
+import { hasUnmanagedProviderContext, UNMANAGED_PROVIDER_CONTEXT_ERROR } from '../shared/provider-context';
 
 export class ApiSettingsError extends Error {}
 // Pi coding-agent 1.4.0 model-config schema, using the exact pi-ai metadata schemas.
@@ -124,6 +125,8 @@ function validateModel(model: Model<Api>): void {
   const rates = model.cost && [model.cost, ...(model.cost.tiers ?? [])];
   if (!rates || rates.some(rate => [rate.input, rate.output, rate.cacheRead, rate.cacheWrite].some(n => !Number.isFinite(n) || n < 0))) throw new ApiSettingsError('Every model needs complete non-negative pricing, including cache rates, for the enabled $1 gate.');
   if (model.cost.tiers?.some(tier => !Number.isSafeInteger(tier.inputTokensAbove) || tier.inputTokensAbove < 0)) throw new ApiSettingsError('Pricing tiers require non-negative integer token thresholds.');
+  // Provider-stored input is a context-authority violation, not an ordinary sampling control.
+  for (const params of [model.samplingParams, ...Object.values(model.samplingParamsByThinkingLevel ?? {})]) if (params && hasUnmanagedProviderContext(params)) throw new ApiSettingsError(UNMANAGED_PROVIDER_CONTEXT_ERROR);
   // Sampling is free-form in Pi, but cannot override Athena authority, caps or routing.
   const forbidden = /^(model|messages|input|tools|tool_choice|max_tokens|max_completion_tokens|max_output_tokens|stream|store|reasoning|service_tier|extra_body|provider|route|models|n|best_of|num_generations|num_return_sequences|candidate_count)$/iu;
   for (const params of [model.samplingParams, ...Object.values(model.samplingParamsByThinkingLevel ?? {})]) if (params && Object.keys(params).some(key => forbidden.test(key))) throw new ApiSettingsError('Sampling defaults cannot override Athena routing, tools, completion multiplicity, or paid-work limits.');

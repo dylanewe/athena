@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { ApiSettings } from '../../src/main/api-settings';
 import { DEFAULT_CONFIG, parseModelConfig } from '../../src/main/pi-model-config';
 import { interpolateCredential, runCredentialHelper } from '../../src/main/api-credentials';
@@ -56,6 +57,23 @@ describe('Athena API-key settings boundary', () => {
     const model = parsed.find(p => p.model.id === 'deepseek-flash')!.model;
     expect(model).toMatchObject({ name: 'Private Flash', baseUrl: 'https://proxy.example/v1', cost: { input: 0.3, output: 3, cacheRead: 0.006, cacheWrite: 0 }, compat: { supportsStore: true, thinkingFormat: 'deepseek' }, samplingParams: { top_p: 0.9 } });
     expect(() => parseModelConfig(JSON.stringify({ providers: { deepseek: { models: [{ id: 'deepseek-flash' }] } } }))).toThrow();
+  });
+  it.each(['previous_response_id', 'conversation', 'prompt'])('rejects unmanaged %s references in definitions and merged overrides at every thinking level', reference => {
+    const { service, helper, reserve } = fixture();
+    service.configure(custom({ samplingParams: { temperature: 0.4 } }));
+    const before = service.snapshot();
+    for (const level of [undefined, 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
+      const sampling = level === undefined ? { samplingParams: { [reference]: 'private-reference' } } : { samplingParamsByThinkingLevel: { [level]: { [reference]: { id: 'private-reference' } } } };
+      for (const json of [
+        custom(sampling),
+        JSON.stringify({ providers: { deepseek: { apiKey: '!private-helper', baseUrl: 'https://proxy.example/v1', modelOverrides: { 'deepseek-flash': sampling } } } }),
+        (() => { const config = JSON.parse(custom({ samplingParams: { top_p: 0.9 }, samplingParamsByThinkingLevel: { off: { temperature: 0.2 } } })); config.providers.fake.modelOverrides = { one: sampling }; return JSON.stringify(config); })(),
+      ]) {
+        expect(() => service.configure(json)).toThrow('Unmanaged provider-side context is unsupported');
+        expect(service.snapshot()).toEqual(before);
+      }
+    }
+    expect(helper).not.toHaveBeenCalled(); expect(reserve).not.toHaveBeenCalled();
   });
   it('pins both complete role models across edits, restart, later jobs and conversation persistence', async () => {
     const f = fixture(undefined, { FAKE_KEY: 'env-key' });
@@ -162,6 +180,38 @@ describe('Athena API-key settings boundary', () => {
     await expect(f.service.grant(pinned, 'conversation', 10, signal())).rejects.toThrow('unset');
     expect(f.service.snapshot().models[0]!.name).toBe('Fake one'); expect(f.helper).not.toHaveBeenCalled();
     await expect(gateway.dispatch(caller, 'importModels', { path })).rejects.toThrow();
+  });
+  it.each(['previous_response_id', 'conversation', 'prompt'])('rejects %s through explicit import, editing and protected saved-settings loading without reset or secret echo', async reference => {
+    const f = fixture();
+    f.service.configure(custom()); selectFake(f.service);
+    const before = f.service.snapshot();
+    const owner = { webContentsId: 4, url: 'file:///ui' }, caller = { ...owner, isMainFrame: true };
+    const path = join(f.directory, 'models.json');
+    const gateway = new ApiModelGateway(f.service, owner, async () => path);
+    for (const params of [{ samplingParams: { [reference]: 'sensitive-reference' } }, { samplingParamsByThinkingLevel: { high: { [reference]: { id: 'sensitive-reference' } } } }]) {
+      const json = custom(params).replace('$FAKE_KEY', '!sensitive-helper-credential');
+      writeFileSync(path, json);
+      for (const [operation, payload] of [['importModels', undefined], ['configure', { json }]] as const) {
+        const error = await gateway.dispatch(caller, operation, payload).catch((error: Error) => error);
+        expect(error).toBeInstanceOf(Error);
+        expect(String(error)).toContain('Unmanaged provider-side context is unsupported');
+        expect(String(error)).not.toMatch(/sensitive-|providers/u);
+        expect(f.service.snapshot()).toEqual(before);
+      }
+      // Simulate an older release's protected configuration, without weakening production validation.
+      const db = new DatabaseSync(f.path);
+      const row = db.prepare('SELECT encrypted FROM api_settings WHERE id=1').get()!;
+      const saved = JSON.parse(f.protection.decrypt(row.encrypted as Uint8Array));
+      saved.json = json;
+      const encrypted = f.protection.encrypt(JSON.stringify(saved));
+      db.prepare('UPDATE api_settings SET encrypted=? WHERE id=1').run(encrypted);
+      const restarted = new ApiSettings(f.path, f.protection, f.helper, {}, f.reserve); settings.push(restarted);
+      expect(() => restarted.snapshot()).toThrow('Unmanaged provider-side context is unsupported');
+      expect(() => restarted.conversationConfig()).toThrow('Unmanaged provider-side context is unsupported');
+      expect(db.prepare('SELECT encrypted FROM api_settings WHERE id=1').get()!.encrypted).toEqual(new Uint8Array(encrypted));
+      db.prepare('UPDATE api_settings SET encrypted=? WHERE id=1').run(row.encrypted as Uint8Array); db.close();
+    }
+    expect(f.helper).not.toHaveBeenCalled(); expect(f.reserve).not.toHaveBeenCalled();
   });
   it('uses the existing persistent $1 gate for paid jobs without refunds or hidden replenishment', async () => {
     const f = fixture(undefined, { FAKE_KEY: 'fake' });

@@ -24,6 +24,41 @@ test.each([['openai-completions', completions, 'max_tokens'], ['openai-responses
   }).result();
   expect(result.stopReason).toBe('stop'); expect(observation.usage).toEqual({ input: 12, output: 4, cachedInput: 0 }); expect(calls).toBe(1);
 });
+test.each(['previous_response_id', 'conversation', 'prompt'])('blocks unmanaged %s at the serialized transport boundary when settings validation was bypassed', async reference => {
+  for (const sampling of [
+    { samplingParams: { [reference]: 'private-reference' } },
+    { samplingParamsByThinkingLevel: { off: { [reference]: { id: 'private-reference' } } } },
+  ]) {
+    const http = vi.fn(async () => new Response(responses));
+    const checked: Record<string, unknown>[] = [];
+    const result = await apiStream({ ...model('openai-responses'), ...sampling }, context, { token: 'private-key', headers: {} }, signal(), 64000, {}, http,
+      payload => { checked.push(payload as Record<string, unknown>); }).result();
+    // The real installed adapter constructed the reference, then the transport blocked it.
+    expect(checked).toHaveLength(1); expect(checked[0]).toHaveProperty(reference);
+    expect(http).not.toHaveBeenCalled(); expect(result.stopReason).toBe('error');
+    expect(result.errorMessage).not.toMatch(/private-|provider error/iu);
+  }
+});
+test.each(['previous_response_id', 'conversation', 'prompt'])('blocks serialization-produced %s references independently of model settings for every adapter', async reference => {
+  for (const [api, sse] of [['openai-completions', completions], ['openai-responses', responses], ['anthropic-messages', anthropic]]) {
+    const http = vi.fn(async () => new Response(sse));
+    const result = await apiStream(model(api), context, { token: 'fake', headers: {} }, signal(), 64000, {}, http, payload => {
+      // Simulate an adapter changing serialization after Athena's onPayload checks.
+      const body = payload as Record<string, unknown>;
+      body.toJSON = () => ({ ...body, [reference]: { id: 'private-reference' } });
+    }).result();
+    expect(http).not.toHaveBeenCalled(); expect(result.stopReason).toBe('error');
+    expect(result.errorMessage).not.toContain('private-reference');
+  }
+});
+test.each([['openai-completions', completions], ['openai-responses', responses]])('keeps ordinary sampling controls through the installed %s adapter and final transport', async (api, sse) => {
+  const http = vi.fn(async (_url, init) => {
+    expect(JSON.parse(String(init?.body))).toMatchObject({ temperature: 0.3, top_p: 0.8 });
+    return new Response(sse, { headers: { 'content-type': 'text/event-stream' } });
+  });
+  const result = await apiStream({ ...model(api), samplingParams: { temperature: 0.6, top_p: 0.8 }, samplingParamsByThinkingLevel: { off: { temperature: 0.3 } } }, context, { token: 'fake', headers: {} }, signal(), 64000, {}, http).result();
+  expect(result.stopReason).toBe('stop'); expect(http).toHaveBeenCalledTimes(1);
+});
 test.each([
   ['openai-completions', frame({ choices: [{ index: 0, delta: { role: 'assistant', content: 'unfinished' } }] })],
   ['openai-responses', frame({ type: 'response.completed', response: { status: 'queued' } })],

@@ -35,7 +35,11 @@ export class ApiSettings {
       parseModelConfig(saved.json);
       if (!['chatgpt', 'api-key'].includes(saved.route) || !saved.secrets || !saved.credentials || !Array.isArray(saved.revoked) || !saved.destinations || !saved.helpers) throw new Error();
       return this.state = saved;
-    } catch { throw new ApiSettingsError('Could not unlock or validate API-key settings. Unlock Keychain and restart Athena; no configuration was reset or substituted.'); }
+    } catch (error) {
+      // Configuration validation errors are application-authored and safe, including on restart.
+      if (error instanceof ApiSettingsError) throw error;
+      throw new ApiSettingsError('Could not unlock or validate API-key settings. Unlock Keychain and restart Athena; no configuration was reset or substituted.');
+    }
   }
   private save(state: Saved): void {
     if (!this.protection.available()) throw new ApiSettingsError('Unlock macOS protected storage before saving API-key configuration. No plaintext fallback.');

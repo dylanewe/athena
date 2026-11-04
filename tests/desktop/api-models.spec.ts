@@ -81,3 +81,31 @@ test('explicit one-time import isolates Pi resources and rejects invalid capabil
   await expect(section.getByLabel('Pi models.json (replace configuration)')).toHaveValue('');
   expect(await page.locator('body').innerText()).not.toContain('secret-invalid-input');
 });
+
+test('unmanaged provider context fails import and editor validation without secret echo, model substitution or retained entry fields', async () => {
+  const path = join(directory, 'models.json');
+  await app.evaluate(({ dialog }, path) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }); }, path);
+  await modelSettings();
+  const section = page.getByRole('region', { name: 'API-key conversation configuration' });
+  await section.getByText('Import or replace Pi-compatible model configuration', { exact: true }).click();
+  const before = await page.evaluate(() => window.athena.apiModels.snapshot());
+  const gate = await page.evaluate(async () => (await window.athena.models.snapshot()).gate);
+  for (const reference of ['previous_response_id', 'conversation', 'prompt']) {
+    for (const sampling of [
+      { samplingParams: { [reference]: 'sensitive-remote-reference' } },
+      { samplingParamsByThinkingLevel: { high: { [reference]: { id: 'sensitive-remote-reference' } } } },
+    ]) {
+      const json = JSON.stringify({ providers: { deepseek: { apiKey: '!sensitive-credential-helper', modelOverrides: { 'deepseek-flash': sampling } } } });
+      await section.getByLabel('Pi models.json (replace configuration)').fill(json);
+      await section.getByRole('button', { name: 'Validate and save configuration' }).click();
+      await expect(section.getByRole('alert')).toContainText('Unmanaged provider-side context is unsupported');
+      await expect(section.getByLabel('Pi models.json (replace configuration)')).toHaveValue('');
+      writeFileSync(path, json);
+      await section.getByRole('button', { name: 'Import trusted models.json…' }).click();
+      await expect(section.getByRole('alert')).toContainText('Remove previous_response_id, conversation, and prompt');
+      expect(await page.evaluate(() => window.athena.apiModels.snapshot())).toEqual(before);
+      expect(await page.locator('body').innerText()).not.toMatch(/sensitive-/u);
+    }
+  }
+  expect(await page.evaluate(async () => (await window.athena.models.snapshot()).gate)).toEqual(gate);
+});
